@@ -1,0 +1,22 @@
+pub const FOLD: &str = "FOLD";
+pub const CHECK: &str = "CHECK";
+pub const CALL: &str = "CALL";
+pub const RAISE: &str = "RAISE";
+pub const WINNER: &str = "WINNER";
+pub const FETCH_LOBBY_INFO: &str = "FETCH_LOBBY_INFO";
+pub const RECEIVE_LOBBY_INFO: &str = "RECEIVE_LOBBY_INFO";
+pub const PLAYERS_UPDATED: &str = "PLAYERS_UPDATED";
+pub const JOIN_TABLE: &str = "JOIN_TABLE";
+pub const TABLE_JOINED: &str = "TABLE_JOINED";
+pub const LEAVE_TABLE: &str = "LEAVE_TABLE";
+pub const TABLE_LEFT: &str = "TABLE_LEFT";
+pub const TABLES_UPDATED: &str = "TABLES_UPDATED";
+pub const TABLE_UPDATED: &str = "TABLE_UPDATED";
+pub const TABLE_MESSAGE: &str = "TABLE_MESSAGE";
+pub const REBUY: &str = "REBUY";
+pub const SIT_DOWN: &str = "SIT_DOWN";
+pub const STAND_UP: &str = "STAND_UP";
+pub const SITTING_OUT: &str = "SITTING_OUT";
+pub const SITTING_IN: &str = "SITTING_IN";
+#[allow(dead_code)]
+pub const DISCONNECT: &str = "DISCONNECT";

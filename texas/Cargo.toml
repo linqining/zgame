@@ -3,4 +3,22 @@ name = "texas"
 version = "0.1.0"
 edition = "2024"
 
+
 [dependencies]
+axum = "0.7"
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+socketioxide = { version = "0.18.3", features = ["state"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+bcrypt = "0.15"
+jsonwebtoken = "9"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenv = "0.15"
+mongodb = "3.6.0"
+itertools = "0.14"

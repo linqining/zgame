@@ -1,0 +1,41 @@
+use rand::seq::SliceRandom;
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Card {
+    pub suit: String,
+    pub rank: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Deck {
+    pub cards: Vec<Card>,
+}
+
+impl Deck {
+    pub fn new() -> Self {
+        let suits = vec!["s", "h", "d", "c"];
+        let ranks = vec!["A", "K", "Q", "J", "10", "9", "8", "7", "6", "5", "4", "3", "2"];
+        let mut cards: Vec<Card> = Vec::new();
+        for suit in &suits {
+            for rank in &ranks {
+                cards.push(Card { suit: suit.to_string(), rank: rank.to_string() });
+            }
+        }
+        let mut rng = rand::thread_rng();
+        for _ in 0..8 {
+            cards.shuffle(&mut rng);
+        }
+        Self { cards }
+    }
+
+    pub fn draw(&mut self) -> Option<Card> {
+        if self.cards.is_empty() {
+            return None;
+        }
+        let count = self.cards.len();
+        let index = rand::thread_rng().gen_range(0..count);
+        Some(self.cards.remove(index))
+    }
+}
