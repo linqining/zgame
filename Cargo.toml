@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "crates/*", "texas",           # 所有crate放在crates目录下
+    # 或者显式列出：
+    # "adder",
+    # "calculator",
+    # "utils"
+]
+
+# 可选：指定默认target目录
+resolver = "2"
