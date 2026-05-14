@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/*", "texas",           # 所有crate放在crates目录下
+     "texas",           # 所有crate放在crates目录下
     # 或者显式列出：
     # "adder",
     # "calculator",
