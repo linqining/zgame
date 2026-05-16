@@ -7,4 +7,5 @@ pub struct Player {
     pub id: String,
     pub name: String,
     pub bankroll: i64,
+    pub pk_hex: String,
 }

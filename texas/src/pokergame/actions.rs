@@ -20,3 +20,11 @@ pub const SITTING_OUT: &str = "SITTING_OUT";
 pub const SITTING_IN: &str = "SITTING_IN";
 #[allow(dead_code)]
 pub const DISCONNECT: &str = "DISCONNECT";
+pub const SHUFFLE_SUBMIT: &str = "SHUFFLE_SUBMIT";
+pub const SHUFFLE_NOTICE: &str = "SHUFFLE_NOTICE";
+pub const REVEAL_SUBMIT: &str = "REVEAL_SUBMIT";
+pub const REVEAL_NOTICE: &str = "REVEAL_NOTICE";
+pub const EXPEL_INITIATE: &str = "EXPEL_INITIATE";
+pub const EXPEL_VOTE: &str = "EXPEL_VOTE";
+pub const EXPEL_FORCE: &str = "EXPEL_FORCE";
+pub const EXPEL_RESULT: &str = "EXPEL_RESULT";

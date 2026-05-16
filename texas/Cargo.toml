@@ -22,3 +22,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenv = "0.15"
 mongodb = "3.6.0"
 itertools = "0.14"
+poker_protocol = { path = "../poker_protocol" }

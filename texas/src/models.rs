@@ -13,6 +13,8 @@ pub struct User {
     #[serde(rename = "type", default)]
     pub user_type: i32,
     pub created: String,
+    pub sk_hex:String,
+    pub pk_hex:String,
 }
 
 #[derive(Debug, Clone, Serialize)]

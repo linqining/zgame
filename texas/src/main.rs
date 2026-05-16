@@ -64,6 +64,7 @@ async fn main() -> std::io::Result<()> {
     let app_state = Arc::new(AppState {
         db: socket_state.db.clone(),
         config: config.clone(),
+        socket_state: socket_state.clone(),
     });
 
     let api_routes = Router::new()
@@ -72,7 +73,13 @@ async fn main() -> std::io::Result<()> {
             routing::get(handlers::get_current_user).post(handlers::login),
         )
         .route("/users", routing::post(handlers::register))
-        .route("/chips/free", routing::get(handlers::free_chips));
+        .route("/chips/free", routing::get(handlers::free_chips))
+        .route("/games/:game_id/join", routing::post(handlers::join_game))
+        .route("/games/:game_id/shuffle", routing::post(handlers::shuffle))
+        .route("/games/:game_id/join-and-shuffle", routing::post(handlers::join_game_and_shuffle))
+        .route("/games/:game_id/join-game-and-shuffle", routing::post(handlers::join_game_and_shuffle))
+        .route("/games/:game_id/action", routing::post(handlers::player_action))
+        .route("/games/:game_id/reveal-token", routing::post(handlers::submit_reveal_token));
 
     let app = Router::new()
         .nest("/api", api_routes)
