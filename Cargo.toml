@@ -1,10 +1,7 @@
 [workspace]
 members = [
-     "texas",           # 所有crate放在crates目录下
-    # 或者显式列出：
-    # "adder",
-    # "calculator",
-    # "utils"
+    "texas",           # 所有crate放在crates目录下
+    "poker_protocol",
 ]
 
 # 可选：指定默认target目录
