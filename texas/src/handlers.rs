@@ -13,8 +13,12 @@ use crate::auth;
 use crate::config::Config;
 use crate::models::{Database, UserResponse};
 use crate::pokergame::player::Player;
+use crate::pokergame::game_state::{MaskAndShuffleRoundJson, PkProofJson};
 use crate::socket::SocketState;
 use poker_protocol::z_poker::protocol::ClientPlayer;
+use poker_protocol::crypto::EcPoint;
+use sui_crypto::{SuiVerifier, UserSignatureVerifier};
+use group::GroupEncoding;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -59,17 +63,36 @@ pub async fn get_current_user(
     headers: HeaderMap,
     Extension(state): Extension<Arc<AppState>>,
 ) -> Response {
+    tracing::debug!("[get_current_user] request received");
     let token = match get_token_from_headers(&headers) {
-        Some(t) => t,
-        None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response(),
+        Some(t) => {
+            tracing::debug!("[get_current_user] token found in headers");
+            t
+        }
+        None => {
+            tracing::warn!("[get_current_user] no x-auth-token header found");
+            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response();
+        }
     };
 
     match auth::verify_token(&token, &state.config.jwt_secret) {
-        Ok(claims) => match state.db.find_user_by_id(&claims.user.id).await {
-            Some(user) => (StatusCode::OK, Json(user_to_response(&user))).into_response(),
-            None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"msg": "User not found"}))).into_response(),
-        },
-        Err(_) => (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response(),
+        Ok(claims) => {
+            tracing::debug!("[get_current_user] token verified, user_id={}", claims.user.id);
+            match state.db.find_user_by_id(&claims.user.id).await {
+                Some(user) => {
+                    tracing::debug!("[get_current_user] user found, id={}, name={}", user.id, user.name);
+                    (StatusCode::OK, Json(user_to_response(&user))).into_response()
+                }
+                None => {
+                    tracing::warn!("[get_current_user] user not found in db, id={}", claims.user.id);
+                    (StatusCode::NOT_FOUND, Json(serde_json::json!({"msg": "User not found"}))).into_response()
+                }
+            }
+        }
+        Err(_) => {
+            tracing::warn!("[get_current_user] token verification failed");
+            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response()
+        }
     }
 }
 
@@ -82,14 +105,17 @@ struct JoinGameRequest {
 #[derive(Deserialize)]
 struct ShuffleRequest {
     pk_hex: String,
-    shuffle_data: serde_json::Value,
+    mask_and_shuffle_round: MaskAndShuffleRoundJson,
 }
 
 #[derive(Deserialize)]
 struct JoinAndShuffleRequest {
     pk_hex: String,
     name: String,
-    shuffle_data: serde_json::Value,
+    pk_proof: PkProofJson,
+    mask_and_shuffle_round: MaskAndShuffleRoundJson,
+    seat_id: u32,
+    amount: u64,
 }
 
 #[derive(Deserialize)]
@@ -109,8 +135,37 @@ fn parse_game_id(game_id: &str) -> Option<u32> {
     game_id.parse::<u32>().ok()
 }
 
+fn parse_table_id(table_id: &str) -> Option<u32> {
+    table_id.parse::<u32>().ok()
+}
+
 fn err_resp(code: StatusCode, msg: &str) -> Response {
     (code, Json(serde_json::json!({"error": msg}))).into_response()
+}
+
+pub async fn get_table(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(table_id): Path<String>,
+) -> Response {
+    tracing::debug!("[get_table] request received, table_id={}", table_id);
+    let table_id = match parse_game_id(&table_id) {
+        Some(id) => id,
+        None => {
+            tracing::warn!("[get_table] invalid table_id: {}", table_id);
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid table_id");
+        }
+    };
+
+    match state.socket_state.get_client_table(table_id) {
+        Some(client_table) => {
+            tracing::debug!("[get_table] table found, table_id={}", table_id);
+            (StatusCode::OK, Json(serde_json::to_value(client_table).unwrap())).into_response()
+        }
+        None => {
+            tracing::warn!("[get_table] table not found, table_id={}", table_id);
+            err_resp(StatusCode::NOT_FOUND, "Table not found")
+        }
+    }
 }
 
 pub async fn join_game(
@@ -118,21 +173,35 @@ pub async fn join_game(
     Path(game_id): Path<String>,
     req: Request<Body>,
 ) -> Response {
+    tracing::debug!("[join_game] request received, game_id={}", game_id);
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid request body"),
+        Err(_) => {
+            tracing::warn!("[join_game] failed to read request body");
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid request body");
+        }
     };
-    let body: JoinGameRequest = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid JSON"),
+    let body = match serde_json::from_slice::<JoinGameRequest>(&body) {
+        Ok(v) => {
+            tracing::debug!("[join_game] parsed body, pk_hex={}, name={}", v.pk_hex, v.name);
+            v
+        }
+        Err(_) => {
+            tracing::warn!("[join_game] failed to parse JSON body");
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid JSON");
+        }
     };
 
     let table_id = match parse_game_id(&game_id) {
         Some(id) => id,
-        None => return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id"),
+        None => {
+            tracing::warn!("[join_game] invalid game_id: {}", game_id);
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id");
+        }
     };
 
     if let Some(_existing) = state.socket_state.find_socket_id_by_pk(&body.pk_hex) {
+        tracing::warn!("[join_game] player already in game, pk_hex={}", body.pk_hex);
         return err_resp(StatusCode::BAD_REQUEST, "Player already in game");
     }
 
@@ -146,9 +215,11 @@ pub async fn join_game(
     };
 
     if state.socket_state.add_player_to_table(table_id, player).is_err() {
+        tracing::warn!("[join_game] table not found, table_id={}", table_id);
         return err_resp(StatusCode::NOT_FOUND, "Table not found");
     }
 
+    tracing::debug!("[join_game] player joined successfully, pk_hex={}, table_id={}", body.pk_hex, table_id);
     (StatusCode::CREATED, Json(serde_json::json!({
         "player": {"id": body.pk_hex},
         "message": "Joined game successfully"
@@ -160,96 +231,139 @@ pub async fn shuffle(
     Path(game_id): Path<String>,
     req: Request<Body>,
 ) -> Response {
+    tracing::debug!("[shuffle] request received, game_id={}", game_id);
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid request body"),
+        Err(_) => {
+            tracing::warn!("[shuffle] failed to read request body");
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid request body");
+        }
     };
-    let body: ShuffleRequest = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid JSON"),
+    let body = match serde_json::from_slice::<ShuffleRequest>(&body) {
+        Ok(v) => {
+            tracing::debug!("[shuffle] parsed body, pk_hex={}", v.pk_hex);
+            v
+        }
+        Err(e) => {
+            tracing::warn!("[shuffle] failed to parse JSON body: {}", e);
+            return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
+        }
     };
 
     let table_id = match parse_game_id(&game_id) {
         Some(id) => id,
-        None => return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id"),
+        None => {
+            tracing::warn!("[shuffle] invalid game_id: {}", game_id);
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id");
+        }
     };
 
-    let socket_id = match state.socket_state.find_socket_id_by_pk(&body.pk_hex) {
-        Some(id) => id,
-        None => return err_resp(StatusCode::NOT_FOUND, "Player not found"),
-    };
-
-    let result = match state.socket_state.submit_shuffle_for_pk(table_id, &socket_id) {
-        Ok(status) => status,
-        Err(e) if e == "Table not found" => return err_resp(StatusCode::NOT_FOUND, &e),
-        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &e),
-    };
-
-    (StatusCode::OK, Json(serde_json::json!({
-        "status": result,
-        "message": "Shuffle submitted"
-    }))).into_response()
+    match state.socket_state.submit_verified_shuffle_for_pk(table_id, &body.pk_hex, body.mask_and_shuffle_round) {
+        Ok(_) => {
+            tracing::debug!("[shuffle] shuffle submitted and verified, pk_hex={}, table_id={}", body.pk_hex, table_id);
+            (StatusCode::OK, Json(serde_json::json!({
+                "message": "Shuffle submitted and verified"
+            }))).into_response()
+        }
+        Err(e) if e.as_str() == "Table not found" => {
+            tracing::warn!("[shuffle] table not found, table_id={}", table_id);
+            err_resp(StatusCode::NOT_FOUND, &e)
+        }
+        Err(e) => {
+            tracing::warn!("[shuffle] shuffle verification failed, pk_hex={}, table_id={}, error={}", body.pk_hex, table_id, e);
+            err_resp(StatusCode::BAD_REQUEST, &e)
+        }
+    }
 }
 
 pub async fn join_game_and_shuffle(
     Extension(state): Extension<Arc<AppState>>,
-    Path(game_id): Path<String>,
+    Path(table_id): Path<String>,
     req: Request<Body>,
 ) -> Response {
-    tracing::debug!("join_game_and_shuffle: {:?}", game_id);
+    tracing::debug!("[join_game_and_shuffle] request received, table_id={}", table_id);
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid request body"),
-    };
-    let body: JoinAndShuffleRequest = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid JSON"),
-    };
-
-    let table_id = match parse_game_id(&game_id) {
-        Some(id) => id,
-        None => return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id"),
-    };
-    
-
-
-    if let Some(existing_sid) = state.socket_state.find_socket_id_by_pk(&body.pk_hex) {
-        match state.socket_state.submit_shuffle_for_pk(table_id, &existing_sid) {
-            Ok(_) => {},
-            Err(e) if e == "Table not found" => return err_resp(StatusCode::NOT_FOUND, &e),
-            Err(e) => return err_resp(StatusCode::BAD_REQUEST, &e),
+        Err(_) => {
+            tracing::warn!("[join_game_and_shuffle] failed to read request body");
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid request body");
         }
+    };
 
-        return (StatusCode::OK, Json(serde_json::json!({
-            "player": {"id": body.pk_hex},
-            "message": "Joined and shuffled successfully (existing player)"
-        }))).into_response();
-    }
+    let body = match serde_json::from_slice::<JoinAndShuffleRequest>(&body) {
+        Ok(v) => {
+            tracing::debug!("[join_game_and_shuffle] parsed body, pk_hex={}, name={}", v.pk_hex, v.name);
+            v
+        }
+        Err(e) => {
+            tracing::warn!("[join_game_and_shuffle] failed to parse JSON body: {}", e);
+            return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
+        }
+    };
 
-    let socket_id = format!("http_{}", body.pk_hex);
+    let table_id = match parse_table_id(&table_id) {
+        Some(id) => id,
+        None => {
+            tracing::warn!("[join_game_and_shuffle] invalid table_id: {}", table_id);
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid table_id");
+        }
+    };
+
+    let player_pk = match hex::decode(&body.pk_hex)
+        .ok()
+        .and_then(|bytes| EcPoint::from_bytes(bytes.as_slice().into()).into_option())
+    {
+        Some(pk) => {
+            tracing::debug!("[join_game_and_shuffle] pk_hex decoded to EcPoint successfully");
+            pk
+        }
+        None => {
+            tracing::warn!("[join_game_and_shuffle] invalid pk_hex, cannot decode to EcPoint: {}", body.pk_hex);
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid pk_hex");
+        }
+    };
+
+    let player_id = match state.db.find_user_by_pk_hex(&body.pk_hex).await {
+        Some(user) => {
+            tracing::debug!("[join_game_and_shuffle] found existing user by pk_hex, user_id={}", user.id);
+            user.id
+        }
+        None => {
+            let id = format!("wallet:{}", body.pk_hex);
+            tracing::debug!("[join_game_and_shuffle] no user found for pk_hex, using generated id={}", id);
+            id
+        }
+    };
+
     let player = Player {
-        socket_id: socket_id.clone(),
-        id: body.pk_hex.clone(),
+        socket_id: format!("http_{}", body.pk_hex),
+        id: player_id,
         name: body.name.clone(),
         bankroll: 0,
         pk_hex: body.pk_hex.clone(),
     };
 
-    if state.socket_state.add_player_to_table(table_id, player).is_err() {
-        return err_resp(StatusCode::NOT_FOUND, "Table not found");
+    match state.socket_state.join_player_and_shuffle(table_id, player, player_pk, body.pk_proof, body.mask_and_shuffle_round, body.seat_id, body.amount) {
+        Ok(should_start_game_loop) => {
+            tracing::debug!("[join_game_and_shuffle] joined and shuffled successfully, pk_hex={}, table_id={}, should_start_game_loop={}", body.pk_hex, table_id, should_start_game_loop);
+            if should_start_game_loop {
+                tracing::info!("[join_game_and_shuffle] all players shuffled, starting game loop for table_id={}", table_id);
+                state.socket_state.start_game_loop_sync(state.socket_state.clone(), table_id);
+            }
+            (StatusCode::OK, Json(serde_json::json!({
+                "player": {"id": body.pk_hex},
+                "message": "Joined and shuffled successfully"
+            }))).into_response()
+        }
+        Err(e) if e.as_str() == "Table not found" => {
+            tracing::warn!("[join_game_and_shuffle] table not found, table_id={}", table_id);
+            err_resp(StatusCode::NOT_FOUND, &e)
+        }
+        Err(e) => {
+            tracing::warn!("[join_game_and_shuffle] join and shuffle failed, pk_hex={}, table_id={}, error={}", body.pk_hex, table_id, e);
+            err_resp(StatusCode::BAD_REQUEST, &e)
+        }
     }
-
-    let shuffle_result = match state.socket_state.submit_shuffle_for_pk(table_id, &socket_id) {
-        Ok(status) => status,
-        Err(e) if e == "Table not found" => "no_table".to_string(),
-        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &e),
-    };
-
-    (StatusCode::OK, Json(serde_json::json!({
-        "player": {"id": body.pk_hex},
-        "shuffle_status": shuffle_result,
-        "message": "Joined and shuffled successfully"
-    }))).into_response()
 }
 
 pub async fn player_action(
@@ -257,28 +371,53 @@ pub async fn player_action(
     Path(game_id): Path<String>,
     req: Request<Body>,
 ) -> Response {
+    tracing::debug!("[player_action] request received, game_id={}", game_id);
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid request body"),
+        Err(_) => {
+            tracing::warn!("[player_action] failed to read request body");
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid request body");
+        }
     };
-    let body: ActionRequestHttp = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid JSON"),
+    let body = match serde_json::from_slice::<ActionRequestHttp>(&body) {
+        Ok(v) => {
+            tracing::debug!("[player_action] parsed body, pk_hex={}, action={}, amount={:?}", v.pk_hex, v.action, v.amount);
+            v
+        }
+        Err(_) => {
+            tracing::warn!("[player_action] failed to parse JSON body");
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid JSON");
+        }
     };
 
     let table_id = match parse_game_id(&game_id) {
         Some(id) => id,
-        None => return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id"),
+        None => {
+            tracing::warn!("[player_action] invalid game_id: {}", game_id);
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id");
+        }
     };
 
     let socket_id = match state.socket_state.find_socket_id_by_pk(&body.pk_hex) {
-        Some(id) => id,
-        None => return err_resp(StatusCode::NOT_FOUND, "Player not found"),
+        Some(id) => {
+            tracing::debug!("[player_action] found socket_id={} for pk_hex={}", id, body.pk_hex);
+            id
+        }
+        None => {
+            tracing::warn!("[player_action] player not found, pk_hex={}", body.pk_hex);
+            return err_resp(StatusCode::NOT_FOUND, "Player not found");
+        }
     };
 
     let sender = match state.socket_state.get_action_sender(table_id).await {
-        Some(s) => s,
-        None => return err_resp(StatusCode::NOT_FOUND, "Game loop not running"),
+        Some(s) => {
+            tracing::debug!("[player_action] got action sender for table_id={}", table_id);
+            s
+        }
+        None => {
+            tracing::warn!("[player_action] game loop not running, table_id={}", table_id);
+            return err_resp(StatusCode::NOT_FOUND, "Game loop not running");
+        }
     };
 
     let action_request = crate::pokergame::table::ActionRequest {
@@ -288,10 +427,16 @@ pub async fn player_action(
     };
 
     match sender.send(action_request).await {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({
-            "message": format!("Action {} submitted", body.action)
-        }))).into_response(),
-        Err(_) => err_resp(StatusCode::INTERNAL_SERVER_ERROR, "Failed to send action"),
+        Ok(()) => {
+            tracing::debug!("[player_action] action sent successfully, pk_hex={}, action={}, table_id={}", body.pk_hex, body.action, table_id);
+            (StatusCode::OK, Json(serde_json::json!({
+                "message": format!("Action {} submitted", body.action)
+            }))).into_response()
+        }
+        Err(_) => {
+            tracing::error!("[player_action] failed to send action, pk_hex={}, action={}, table_id={}", body.pk_hex, body.action, table_id);
+            err_resp(StatusCode::INTERNAL_SERVER_ERROR, "Failed to send action")
+        }
     }
 }
 
@@ -300,30 +445,56 @@ pub async fn submit_reveal_token(
     Path(game_id): Path<String>,
     req: Request<Body>,
 ) -> Response {
+    tracing::debug!("[submit_reveal_token] request received, game_id={}", game_id);
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid request body"),
+        Err(_) => {
+            tracing::warn!("[submit_reveal_token] failed to read request body");
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid request body");
+        }
     };
-    let body: RevealTokenRequest = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid JSON"),
+    let body = match serde_json::from_slice::<RevealTokenRequest>(&body) {
+        Ok(v) => {
+            tracing::debug!("[submit_reveal_token] parsed body, pk_hex={}, reveal_tokens_count={}", v.pk_hex, v.reveal_tokens.len());
+            v
+        }
+        Err(_) => {
+            tracing::warn!("[submit_reveal_token] failed to parse JSON body");
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid JSON");
+        }
     };
 
     let table_id = match parse_game_id(&game_id) {
         Some(id) => id,
-        None => return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id"),
+        None => {
+            tracing::warn!("[submit_reveal_token] invalid game_id: {}", game_id);
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id");
+        }
     };
 
     let socket_id = match state.socket_state.find_socket_id_by_pk(&body.pk_hex) {
-        Some(id) => id,
-        None => return err_resp(StatusCode::NOT_FOUND, "Player not found"),
+        Some(id) => {
+            tracing::debug!("[submit_reveal_token] found socket_id={} for pk_hex={}", id, body.pk_hex);
+            id
+        }
+        None => {
+            tracing::warn!("[submit_reveal_token] player not found, pk_hex={}", body.pk_hex);
+            return err_resp(StatusCode::NOT_FOUND, "Player not found");
+        }
     };
 
     let all_complete = match state.socket_state.mark_reveal_complete_for_pk(table_id, &socket_id) {
-        Ok(result) => result,
-        Err(e) => return err_resp(StatusCode::NOT_FOUND, &e),
+        Ok(result) => {
+            tracing::debug!("[submit_reveal_token] reveal marked, table_id={}, socket_id={}, all_complete={}", table_id, socket_id, result);
+            result
+        }
+        Err(e) => {
+            tracing::warn!("[submit_reveal_token] mark reveal failed, table_id={}, socket_id={}, error={}", table_id, socket_id, e);
+            return err_resp(StatusCode::NOT_FOUND, &e);
+        }
     };
 
+    tracing::debug!("[submit_reveal_token] success, pk_hex={}, reveal_tokens_count={}, all_complete={}", body.pk_hex, body.reveal_tokens.len(), all_complete);
     (StatusCode::OK, Json(serde_json::json!({
         "message": format!("{} reveal tokens submitted", body.reveal_tokens.len()),
         "player_pk": body.pk_hex,
@@ -335,25 +506,186 @@ pub async fn login(
     Extension(state): Extension<Arc<AppState>>,
     req: Request<Body>,
 ) -> Response {
+    tracing::debug!("[login] request received");
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid request body"}]}))).into_response(),
+        Err(_) => {
+            tracing::warn!("[login] failed to read request body");
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid request body"}]}))).into_response();
+        }
     };
-    let body: LoginRequest = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid JSON"}]}))).into_response(),
+    let body = match serde_json::from_slice::<LoginRequest>(&body) {
+        Ok(v) => {
+            tracing::debug!("[login] parsed body, email={}", v.email);
+            v
+        }
+        Err(_) => {
+            tracing::warn!("[login] failed to parse JSON body");
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid JSON"}]}))).into_response();
+        }
     };
     
     let Some(user) = state.db.find_user_by_email(&body.email).await else {
+        tracing::warn!("[login] user not found, email={}", body.email);
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid credentials"}]}))).into_response();
     };
 
     match bcrypt::verify(&body.password, &user.password) {
-        Ok(true) => match auth::create_token(&user.id, &state.config.jwt_secret, state.config.jwt_token_expires_in) {
-            Ok(token) => (StatusCode::OK, Json(serde_json::json!({"token": token}))).into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response(),
-        },
-        _ => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid credentials"}]}))).into_response(),
+        Ok(true) => {
+            tracing::debug!("[login] password verified, user_id={}", user.id);
+            match auth::create_token(&user.id, &state.config.jwt_secret, state.config.jwt_token_expires_in) {
+                Ok(token) => {
+                    tracing::debug!("[login] token created, user_id={}", user.id);
+                    (StatusCode::OK, Json(serde_json::json!({"token": token}))).into_response()
+                }
+                Err(_) => {
+                    tracing::error!("[login] failed to create token, user_id={}", user.id);
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response()
+                }
+            }
+        }
+        _ => {
+            tracing::warn!("[login] password verification failed, email={}", body.email);
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid credentials"}]}))).into_response()
+        }
+    }
+}
+
+#[derive(Deserialize, Debug)]
+struct WalletLoginRequest {
+    address: String,
+    signature: sui_sdk_types::UserSignature,
+    message: String,
+}
+
+fn verify_sui_wallet_signature(
+    message: &str,
+    signature: &sui_sdk_types::UserSignature,
+    expected_address: &str,
+) -> Result<(String, String), String> {
+    tracing::debug!("[verify_sui_wallet_signature] verifying signature, expected_address={}", expected_address);
+    let personal_msg = sui_sdk_types::PersonalMessage(message.as_bytes().into());
+    let verifier = UserSignatureVerifier::new();
+    verifier
+        .verify_personal_message(&personal_msg, signature)
+        .map_err(|e| {
+            tracing::warn!("[verify_sui_wallet_signature] signature verification failed: {}", e);
+            format!("Signature verification failed: {}", e)
+        })?;
+
+    let pk_bytes = match signature {
+        sui_sdk_types::UserSignature::Simple(sui_sdk_types::SimpleSignature::Secp256k1 { public_key, .. }) => {
+            tracing::debug!("[verify_sui_wallet_signature] secp256k1 signature detected");
+            public_key.as_bytes()
+        }
+        _ => {
+            tracing::warn!("[verify_sui_wallet_signature] unsupported signature scheme");
+            return Err("Unsupported signature scheme".to_string());
+        }
+    };
+
+    let mut hasher = blake2b_simd::Params::new().hash_length(32).to_state();
+    hasher.update(&[0x01]);
+    hasher.update(pk_bytes);
+    let hash = hasher.finalize();
+    let derived_address = format!("0x{}", hex::encode(hash.as_bytes()));
+
+    if derived_address != expected_address {
+        tracing::warn!("[verify_sui_wallet_signature] address mismatch: derived={} expected={}", derived_address, expected_address);
+        return Err(format!(
+            "Address mismatch: derived {} but expected {}",
+            derived_address, expected_address
+        ));
+    }
+
+    let ecpoint = poker_protocol::crypto::EcPoint::from_bytes(pk_bytes.into());
+    let pk_hex = match Option::<poker_protocol::crypto::EcPoint>::from(ecpoint) {
+        Some(point) => {
+            let hex = hex::encode(point.to_affine().to_bytes());
+            tracing::debug!("[verify_sui_wallet_signature] derived pk_hex={}", hex);
+            hex
+        }
+        None => {
+            tracing::warn!("[verify_sui_wallet_signature] invalid EC point from public key");
+            return Err("Invalid EC point from public key".to_string());
+        }
+    };
+
+    tracing::debug!("[verify_sui_wallet_signature] verification successful, address={}, pk_hex={}", derived_address, pk_hex);
+    Ok((derived_address, pk_hex))
+}
+
+pub async fn wallet_login(
+    Extension(state): Extension<Arc<AppState>>,
+    req: Request<Body>,
+) -> Response {
+    tracing::debug!("[wallet_login] request received");
+    let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
+        Ok(b) => b,
+        Err(_) => {
+            tracing::warn!("[wallet_login] failed to read request body");
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid request body");
+        }
+    };
+    let body = match serde_json::from_slice::<WalletLoginRequest>(&body) {
+        Ok(v) => {
+            tracing::debug!("[wallet_login] parsed body, address={}", v.address);
+            v
+        }
+        Err(e) => {
+            tracing::warn!("[wallet_login] failed to parse JSON body: {}", e);
+            return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
+        }
+    };
+
+    let (address, pk_hex) = match verify_sui_wallet_signature(&body.message, &body.signature, &body.address) {
+        Ok(result) => {
+            tracing::debug!("[wallet_login] wallet signature verified, address={}", result.0);
+            result
+        }
+        Err(e) => {
+            tracing::warn!("[wallet_login] wallet signature verification failed, address={}, error={}", body.address, e);
+            return err_resp(StatusCode::UNAUTHORIZED, &e);
+        }
+    };
+
+    let user_id = format!("wallet:{}", address);
+
+    if state.db.find_user_by_id(&user_id).await.is_none() {
+        tracing::debug!("[wallet_login] new wallet user, creating user_id={}, address={}", user_id, address);
+        let user = crate::models::User {
+            id: user_id.clone(),
+            name: address.clone(),
+            email: format!("{}@wallet", address),
+            password: String::new(),
+            chips_amount: state.config.initial_chips_amount,
+            user_type: 1,
+            created: chrono::Utc::now().to_rfc3339(),
+            sk_hex: String::new(),
+            pk_hex: pk_hex.clone(),
+        };
+        if state.db.save_user(&user).await.is_err() {
+            tracing::error!("[wallet_login] failed to save wallet user, user_id={}", user_id);
+            return err_resp(StatusCode::INTERNAL_SERVER_ERROR, "Failed to save wallet user");
+        }
+        tracing::debug!("[wallet_login] wallet user saved, user_id={}", user_id);
+    } else {
+        tracing::debug!("[wallet_login] existing wallet user found, user_id={}", user_id);
+    }
+
+    match auth::create_token(&user_id, &state.config.jwt_secret, state.config.jwt_token_expires_in) {
+        Ok(token) => {
+            tracing::debug!("[wallet_login] token created, user_id={}, address={}", user_id, address);
+            (StatusCode::OK, Json(serde_json::json!({
+                "token": token,
+                "address": address,
+                "pk_hex": pk_hex,
+            }))).into_response()
+        }
+        Err(_) => {
+            tracing::error!("[wallet_login] failed to create token, user_id={}", user_id);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response()
+        }
     }
 }
 
@@ -361,28 +693,40 @@ pub async fn register(
     Extension(state): Extension<Arc<AppState>>,
     req: Request<Body>,
 ) -> Response {
+    tracing::debug!("[register] request received");
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid request body"}]}))).into_response(),
+        Err(_) => {
+            tracing::warn!("[register] failed to read request body");
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid request body"}]}))).into_response();
+        }
     };
-    let body: RegisterRequest = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid JSON"}]}))).into_response(),
+    let body = match serde_json::from_slice::<RegisterRequest>(&body) {
+        Ok(v) => {
+            tracing::debug!("[register] parsed body, name={}, email={}", v.name, v.email);
+            v
+        }
+        Err(_) => {
+            tracing::warn!("[register] failed to parse JSON body");
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid JSON"}]}))).into_response();
+        }
     };
 
     if state.db.find_user_by_email(&body.email).await.is_some()
         || state.db.find_user_by_name(&body.name).await.is_some()
     {
+        tracing::warn!("[register] email or name already exists, name={}, email={}", body.name, body.email);
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid credentials"}]}))).into_response();
     }
 
     let Ok(hashed) = bcrypt::hash(&body.password, 10) else {
+        tracing::error!("[register] failed to hash password");
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response();
     };
     
     let client_player = ClientPlayer::new();
     let (sk_hex, pk_hex) = client_player.get_sk_and_pk_hex();
-    println!("sk_hex: {}", sk_hex);
+    tracing::debug!("[register] generated keys, pk_hex={}", pk_hex);
     let user = crate::models::User {
         id: uuid::Uuid::new_v4().to_string(),
         name: body.name.clone(),
@@ -397,12 +741,20 @@ pub async fn register(
 
     let user_id = user.id.clone();
     if state.db.save_user(&user).await.is_err() {
+        tracing::error!("[register] failed to save user, user_id={}", user_id);
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response();
     }
+    tracing::debug!("[register] user saved, user_id={}", user_id);
 
     match auth::create_token(&user_id, &state.config.jwt_secret, state.config.jwt_token_expires_in) {
-        Ok(token) => (StatusCode::OK, Json(serde_json::json!({"token": token}))).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response(),
+        Ok(token) => {
+            tracing::debug!("[register] token created, user_id={}", user_id);
+            (StatusCode::OK, Json(serde_json::json!({"token": token}))).into_response()
+        }
+        Err(_) => {
+            tracing::error!("[register] failed to create token, user_id={}", user_id);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response()
+        }
     }
 }
 
@@ -410,23 +762,49 @@ pub async fn free_chips(
     headers: HeaderMap,
     Extension(state): Extension<Arc<AppState>>,
 ) -> Response {
+    tracing::debug!("[free_chips] request received");
     let token = match get_token_from_headers(&headers) {
-        Some(t) => t,
-        None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response(),
+        Some(t) => {
+            tracing::debug!("[free_chips] token found in headers");
+            t
+        }
+        None => {
+            tracing::warn!("[free_chips] no x-auth-token header found");
+            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response();
+        }
     };
 
     match auth::verify_token(&token, &state.config.jwt_secret) {
-        Ok(claims) => match state.db.find_user_by_id(&claims.user.id).await {
-            Some(user) if user.chips_amount < 1000 => {
-                state.db.set_chips(&user.id, state.config.initial_chips_amount).await;
-                match state.db.find_user_by_id(&user.id).await {
-                    Some(updated) => (StatusCode::OK, Json(user_to_response(&updated))).into_response(),
-                    None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(claims) => {
+            tracing::debug!("[free_chips] token verified, user_id={}", claims.user.id);
+            match state.db.find_user_by_id(&claims.user.id).await {
+                Some(user) if user.chips_amount < 1000 => {
+                    tracing::debug!("[free_chips] user eligible, user_id={}, current_chips={}", user.id, user.chips_amount);
+                    state.db.set_chips(&user.id, state.config.initial_chips_amount).await;
+                    match state.db.find_user_by_id(&user.id).await {
+                        Some(updated) => {
+                            tracing::debug!("[free_chips] chips updated, user_id={}, new_chips={}", updated.id, updated.chips_amount);
+                            (StatusCode::OK, Json(user_to_response(&updated))).into_response()
+                        }
+                        None => {
+                            tracing::error!("[free_chips] failed to reload user after chips update, user_id={}", user.id);
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        }
+                    }
+                }
+                Some(user) => {
+                    tracing::warn!("[free_chips] user has enough chips, user_id={}, chips={}", user.id, user.chips_amount);
+                    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid request"}]}))).into_response()
+                }
+                None => {
+                    tracing::warn!("[free_chips] user not found after token verification, user_id={}", claims.user.id);
+                    StatusCode::NOT_FOUND.into_response()
                 }
             }
-            Some(_) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid request"}]}))).into_response(),
-            None => StatusCode::NOT_FOUND.into_response(),
-        },
-        Err(_) => (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response(),
+        }
+        Err(_) => {
+            tracing::warn!("[free_chips] token verification failed");
+            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response()
+        }
     }
 }

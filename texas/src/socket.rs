@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use socketioxide::{
@@ -12,9 +13,10 @@ use crate::config::Config;
 use crate::models::Database;
 use crate::pokergame::actions;
 use crate::pokergame::deck::Card;
-use crate::pokergame::game_state::{ExpelPhase, RevealPhase, ShufflePublicState};
+use crate::pokergame::game_state::{ExpelPhase, MaskAndShuffleRoundJson, PkProofJson, RevealPhase, ShufflePublicState};
 use crate::pokergame::player::Player;
 use crate::pokergame::table::{ActionRequest, ClientTable, RoundState, Table};
+use poker_protocol::crypto::EcPoint;
 
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,6 +193,12 @@ impl GameLoopRegistry {
     }
 }
 
+static SOCKET_IO: OnceLock<SocketIo> = OnceLock::new();
+
+pub fn set_socket_io(io: SocketIo) {
+    let _ = SOCKET_IO.set(io);
+}
+
 struct GameState {
     tables: HashMap<u32, Table>,
     players: HashMap<String, Player>,
@@ -266,6 +274,25 @@ impl SocketState {
         });
     }
 
+    pub fn start_game_loop_sync(&self, state: Arc<SocketState>, table_id: u32) {
+        let Some(io) = SOCKET_IO.get().cloned() else {
+            tracing::warn!("[start_game_loop_sync] SocketIo not initialized");
+            return;
+        };
+        let mut registry = self.game_loop_registry.lock().unwrap();
+        if registry.contains(table_id) {
+            return;
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel::<ActionRequest>(100);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(game_loop_task(io, state, table_id, rx, stop_rx));
+        registry.insert(table_id, GameLoopEntry {
+            _handle: handle,
+            action_sender: tx,
+            stop_sender: stop_tx,
+        });
+    }
+
     pub async fn stop_game_loop(&self, table_id: u32) {
         tracing::info!("stop_game_loop: {}", table_id);
         let mut registry = self.game_loop_registry.lock().unwrap();
@@ -296,6 +323,11 @@ impl SocketState {
         None
     }
 
+    pub fn get_client_table(&self, table_id: u32) -> Option<ClientTable> {
+        let gs = self.state.lock().unwrap();
+        gs.tables.get(&table_id).map(|t| t.to_client())
+    }
+
     pub fn add_player_to_table(&self, table_id: u32, player: Player) -> Result<usize, String> {
         let mut gs = self.state.lock().unwrap();
         gs.players.insert(player.socket_id.clone(), player.clone());
@@ -320,6 +352,81 @@ impl SocketState {
                         table.complete_or_continue_next_shuffler();
                         Ok("partial".to_string())
                     }
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            Err("Table not found".to_string())
+        }
+    }
+
+    pub fn join_player_and_shuffle(
+        &self,
+        table_id: u32,
+        player: Player,
+        player_pk: EcPoint,
+        pk_proof_json: PkProofJson,
+        round_json: MaskAndShuffleRoundJson,
+        seat_id: u32,
+        amount: u64,
+    ) -> Result<bool, String> {
+        let socket_id = player.socket_id.clone();
+        let pk_hex = player.pk_hex.clone();
+        let player_name = player.name.clone();
+        let bankroll  = player.bankroll.clone();
+
+        let result = {
+            let mut gs = self.state.lock().unwrap();
+            if let Some(table) = gs.tables.get_mut(&table_id) {
+                table.join_player_and_shuffle(player, player_pk, pk_proof_json, round_json, seat_id, amount)
+            } else {
+                Err("Table not found".to_string())
+            }
+        };
+
+        if result.is_ok() {
+            let mut gs = self.state.lock().unwrap();
+            gs.players.insert(socket_id, Player {
+                socket_id: pk_hex.clone(),
+                id: pk_hex.clone(),
+                name: player_name,
+                bankroll: bankroll,
+                pk_hex: pk_hex.clone(),
+            });
+
+            if let Some(table) = gs.tables.get_mut(&table_id) {
+                if table.is_pending_shuffle_palyer_empty() && table.players.len() >= 2 {
+                    table.shuffle_state.is_active = false;
+                    table.round_state = RoundState::ShuffleComplete;
+                    tracing::info!("[SHUFFLE] Player {} joined and shuffled, all players shuffled", pk_hex);
+                    return Ok(true);
+                } else {
+                    tracing::info!("[SHUFFLE] Player {} joined and shuffled, but not enough players to start", pk_hex);
+                    table.complete_or_continue_next_shuffler();
+                }
+            }
+        }
+
+        result.map(|_| false)
+    }
+
+    pub fn submit_verified_shuffle_for_pk(
+        &self,
+        table_id: u32,
+        pk_hex: &str,
+        round_json: MaskAndShuffleRoundJson,
+    ) -> Result<(), String> {
+        let mut gs = self.state.lock().unwrap();
+        if let Some(table) = gs.tables.get_mut(&table_id) {
+            match table.submit_verified_shuffle(pk_hex, round_json) {
+                Ok(()) => {
+                    if table.is_all_players_shuffled() {
+                        table.shuffle_state.is_active = false;
+                        table.round_state = RoundState::ShuffleComplete;
+                    } else {
+                        table.complete_or_continue_next_shuffler();
+                    }
+                    Ok(())
                 }
                 Err(e) => Err(e),
             }
@@ -635,6 +742,7 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
         }
         RoundState::ShuffleComplete => {
             tracing::info!("[TICK] Table {} ShuffleComplete, resetting shuffle and starting hand", table_id);
+        
             {
                 let mut gs = state.state.lock().unwrap();
                 if let Some(table) = gs.tables.get_mut(&table_id) {
@@ -642,6 +750,7 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
                     table.round_state = RoundState::PreFlopReveal;
                 }
             }
+            
             broadcast_to_table(io, state, table_id, Some("Shuffle complete, dealing cards")).await;
         }
         RoundState::PreFlopReveal => {
@@ -1255,6 +1364,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
                 if let Some((player_clone, player_name, player_id)) = player_data {
+                    table.add_player(player_clone.clone());
                     table.sit_player(player_clone, payload.seat_id, payload.amount);
 
                     let msg = format!("{} sat down in Seat {}", player_name, payload.seat_id);

@@ -9,7 +9,7 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-z_game = { path = "../../z_game" }
+poker_protocol = { path = "../poker_protocol" }
 wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

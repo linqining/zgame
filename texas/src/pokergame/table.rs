@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use crate::pokergame::hand_rank::{vin_card_to_eval_card, EvalCard, HandRank};
 use crate::pokergame::evaluator::best_hand;
-use crate::pokergame::game_state::{ExpelPhase, PlayerRevealAssignment, RevealPhase, ShufflePublicState, ShuffleState, RevealTokenState, ExpelState};
+use crate::pokergame::game_state::{ElGamalCiphertextJson, ExpelPhase, ExpelPublicState, MaskAndShuffleRoundJson, PkProofJson, PlayerRevealAssignment, RevealPhase, RevealTokenPublicState, ShufflePublicState, ShuffleState, RevealTokenState, ExpelState};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -10,6 +10,7 @@ use crate::pokergame::player::Player;
 use crate::pokergame::seat::Seat;
 use crate::pokergame::side_pot::SidePot;
 use poker_protocol::z_poker::{MentalPokerGame, GameConfig};
+use poker_protocol::crypto::EcPoint;
 
 
 
@@ -70,6 +71,9 @@ pub struct ClientTable {
     pub side_pots: Vec<SidePot>,
     pub history: Vec<serde_json::Value>,
     pub round_state: RoundState,
+    pub shuffle_state: Option<ShufflePublicState>,
+    pub reveal_token_state: Option<RevealTokenPublicState>,
+    pub expel_state: Option<ExpelPublicState>,
 }
 
 
@@ -146,6 +150,9 @@ impl Table {
             side_pots: self.side_pots.clone(),
             history: self.history.clone(),
             round_state: self.round_state,
+            shuffle_state: self.get_shuffle_public_state(),
+            reveal_token_state: self.get_reveal_token_public_state(),
+            expel_state: self.get_expel_public_state(),
         }
     }
 
@@ -227,6 +234,19 @@ impl Table {
     }
 
 
+
+    pub fn find_random_empty_seat(&self) -> Option<u32> {
+        let empty_seats: Vec<u32> = (1..=self.max_players)
+            .filter(|&seat_id| self.seats.get(&seat_id).map_or(true, |s| s.is_none()))
+            .collect();
+        
+        if empty_seats.is_empty() {
+            None
+        } else {
+            use rand::seq::SliceRandom;
+            empty_seats.choose(&mut rand::thread_rng()).copied()
+        }
+    }
 
     pub fn sit_player(&mut self, player: Player, seat_id: u32, amount: u64) {
         if seat_id < 1 || seat_id > self.max_players {
@@ -1010,6 +1030,10 @@ impl Table {
         self.shuffle_state.pending_players.is_empty()
     }
 
+    pub fn is_pending_shuffle_palyer_empty(&self) -> bool {
+        self.shuffle_state.pending_players.is_empty()
+    }
+
     pub fn start_shuffle(&mut self) -> Result<(), String> {
         let active_count = self.active_players().len();
         if active_count < 2 {
@@ -1043,7 +1067,7 @@ impl Table {
     }
 
     pub fn reset_shuffle(&mut self) {
-        tracing::info!("[SHUFFLE] === Starting shuffle flow ===");
+        tracing::info!("[SHUFFLE] === Shuffle reset ===");
         tracing::info!("[SHUFFLE] Total active players: {}", self.active_players().len());
         self.shuffle_state.reset();
         tracing::info!("[SHUFFLE] Shuffle order: {:?}, current: {:?}",
@@ -1087,6 +1111,91 @@ impl Table {
         Ok(())
     }
 
+    pub fn join_player_and_shuffle(
+        &mut self,
+        player: Player,
+        player_pk: EcPoint,
+        pk_proof_json: PkProofJson,
+        round_json: MaskAndShuffleRoundJson,
+        seat_id: u32,
+        amount: u64,
+    ) -> Result<(), String> {
+        let pk_hex = player.pk_hex.clone();
+        let player_for_seat = player.clone();
+
+        if self.players.iter().any(|p| p.pk_hex == pk_hex) {
+            return Err("Player already in game".to_string());
+        }
+
+        let pk_proof = pk_proof_json.to_pk_proof()?;
+        if !pk_proof.verify(&player_pk) {
+            return Err("Invalid PK proof".to_string());
+        }
+
+        let round = round_json.to_mask_and_shuffle_round()?;
+        let current_agg_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
+        let share_pk = current_agg_pk + &player_pk;
+        if !round.proof.verify(&round.mask_cards, &round.output_cards, &share_pk) {
+            return Err("Invalid shuffle proof".to_string());
+        }
+
+        self.mental_poker_game.register_player(pk_hex.clone(), player_pk, pk_proof);
+        self.mental_poker_game.deck_encrypted = round.output_cards;
+
+        self.add_player(player);
+
+        let actual_seat_id = if seat_id == 0 {
+            self.find_random_empty_seat().ok_or("No empty seat available")?
+        } else {
+            if seat_id < 1 || seat_id > self.max_players {
+                return Err("Invalid seat_id".to_string());
+            }
+            if self.seats.get(&seat_id).map_or(false, |s| s.is_some()) {
+                return Err("Seat already occupied".to_string());
+            }
+            seat_id
+        };
+        
+        self.sit_player(player_for_seat, actual_seat_id, amount);
+
+        if self.shuffle_state.is_active {
+            self.shuffle_state.completed_players.push(pk_hex.clone());
+            self.shuffle_state.pending_players.retain(|p| *p != pk_hex);
+        }
+        tracing::info!("[SHUFFLE] Player {} joined and shuffled, sat at seat {}", pk_hex, actual_seat_id);
+        Ok(())
+    }
+
+    pub fn submit_verified_shuffle(
+        &mut self,
+        player_pk_hex: &str,
+        round_json: MaskAndShuffleRoundJson,
+    ) -> Result<(), String> {
+        if !self.shuffle_state.is_active {
+            return Err("Shuffle not active".to_string());
+        }
+        if self.shuffle_state.current_player_pk != Some(player_pk_hex.to_string()) {
+            return Err("Not current player".to_string());
+        }
+
+        let player_pk = self.mental_poker_game.players.get(player_pk_hex)
+            .map(|p| p.pk)
+            .ok_or("Player not found in mental poker game")?;
+
+        let round = round_json.to_mask_and_shuffle_round()?;
+        let current_agg_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
+        if !round.proof.verify(&round.mask_cards, &round.output_cards, &current_agg_pk) {
+            return Err("Invalid shuffle proof".to_string());
+        }
+
+        self.mental_poker_game.deck_encrypted = round.output_cards;
+
+        self.shuffle_state.completed_players.push(player_pk_hex.to_string());
+        self.shuffle_state.pending_players.retain(|p| *p != player_pk_hex);
+
+        Ok(())
+    }
+
     pub fn get_shuffle_public_state(&self) -> Option<ShufflePublicState> {
         if self.shuffle_state.is_active {
             Some(ShufflePublicState {
@@ -1094,6 +1203,41 @@ impl Table {
                 current_player_pk: self.shuffle_state.current_player_pk.clone(),
                 completed_players: self.shuffle_state.completed_players.clone(),
                 pending_players: self.shuffle_state.pending_players.clone(),
+                deck_encrypted: self.mental_poker_game.deck_encrypted
+                    .iter()
+                    .map(ElGamalCiphertextJson::from_ciphertext)
+                    .collect(),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn get_reveal_token_public_state(&self) -> Option<RevealTokenPublicState> {
+        if self.reveal_token_state.is_active {
+            Some(RevealTokenPublicState {
+                is_active: true,
+                phase: self.reveal_token_state.phase.to_string(),
+                completed_players: self.reveal_token_state.completed_players.clone(),
+                pending_players: self.reveal_token_state.pending_players.clone(),
+                player_assignments: self.reveal_token_state.player_assignments.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn get_expel_public_state(&self) -> Option<ExpelPublicState> {
+        if self.expel_state.is_active {
+            Some(ExpelPublicState {
+                is_active: true,
+                phase: self.expel_state.phase.to_string(),
+                target_player_pk: self.expel_state.target_player_pk.clone(),
+                initiator_pk: self.expel_state.initiator_pk.clone(),
+                voted_players: self.expel_state.voted_players.clone(),
+                required_votes: self.expel_state.required_votes,
+                expelled_players: self.expel_state.expelled_players.clone(),
+                expel_records_count: self.expel_state.expel_records_count,
             })
         } else {
             None

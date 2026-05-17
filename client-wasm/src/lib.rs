@@ -1,10 +1,10 @@
 use wasm_bindgen::prelude::*;
 use serde::{Serialize, Deserialize};
-use z_game::z_poker::protocol::ClientPlayer;
-use z_game::z_poker::protocol::{JoinGameAndShuffleRound,MaskAndShuffleRound};
-use z_game::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext};
-use z_game::card_reveal::VerificationError;
-use z_game::crypto::types::BASE_G;
+use poker_protocol::ClientPlayer;
+use poker_protocol::{JoinGameAndShuffleRound,MaskAndShuffleRound};
+use poker_protocol::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext};
+use poker_protocol::card_reveal::VerificationError;
+use poker_protocol::crypto::types::BASE_G;
 use rand_core::OsRng;
 use ff::{Field, PrimeField};
 use elliptic_curve::group::GroupEncoding;

@@ -65,6 +65,14 @@ impl Database {
             .flatten()
     }
 
+    pub async fn find_user_by_pk_hex(&self, pk_hex: &str) -> Option<User> {
+        self.users
+            .find_one(mongodb::bson::doc! {"pk_hex": pk_hex})
+            .await
+            .ok()
+            .flatten()
+    }
+
     pub async fn save_user(&self, user: &User) -> mongodb::error::Result<mongodb::results::InsertOneResult> {
         self.users.insert_one(user).await
     }

@@ -1,8 +1,7 @@
 [workspace]
 members = [
     "texas",           # 所有crate放在crates目录下
-    "poker_protocol",
-    "client-wasm"
+    "poker_protocol"
 ]
 
 # 可选：指定默认target目录

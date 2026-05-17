@@ -59,6 +59,7 @@ async fn main() -> std::io::Result<()> {
         .with_state(socket_state.clone())
         .build_layer();
 
+    socket::set_socket_io(io.clone());
     socket::register_handlers(&io);
 
     let app_state = Arc::new(AppState {
@@ -68,12 +69,12 @@ async fn main() -> std::io::Result<()> {
     });
 
     let api_routes = Router::new()
-        .route(
-            "/auth",
-            routing::get(handlers::get_current_user).post(handlers::login),
-        )
+        .route("/auth",routing::get(handlers::get_current_user).post(handlers::login))
+        .route("/auth/wallet", routing::post(handlers::wallet_login))
         .route("/users", routing::post(handlers::register))
         .route("/chips/free", routing::get(handlers::free_chips))
+        .route("/tables/:table_id", routing::get(handlers::get_table))
+        .route("/tables/:table_id/join-and-shuffle", routing::post(handlers::join_game_and_shuffle))
         .route("/games/:game_id/join", routing::post(handlers::join_game))
         .route("/games/:game_id/shuffle", routing::post(handlers::shuffle))
         .route("/games/:game_id/join-and-shuffle", routing::post(handlers::join_game_and_shuffle))

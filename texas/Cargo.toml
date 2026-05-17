@@ -22,4 +22,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenv = "0.15"
 mongodb = "3.6.0"
 itertools = "0.14"
+hex = "0.4"
+ff = "0.13"
+group = "0.13"
+blake2b_simd = "1"
 poker_protocol = { path = "../poker_protocol" }
+sui_sdk = { git = "https://github.com/mystenlabs/sui", package = "sui-sdk"}
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
+sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09", features = ["pem","secp256r1"] }
