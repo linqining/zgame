@@ -59,7 +59,7 @@ const Play = ({ history }) => {
       const seatBet = currentTable.seats[seatId].bet || 0;
       setBet(Math.max(currentTable.minRaise - seatBet, 0));
     }
-  }, [currentTable]);
+  }, [currentTable]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <>
@@ -218,7 +218,7 @@ const Play = ({ history }) => {
                 scale="0.60"
                 origin="center center"
               >
-                {currentTable.winMessages.length === 0 && (
+                {(!currentTable.winMessages || currentTable.winMessages.length === 0) && (
                   <GameStateInfo currentTable={currentTable} />
                 )}
               </PositionedUISlot>

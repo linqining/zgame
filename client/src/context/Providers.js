@@ -11,6 +11,7 @@ import GlobalStyles from '../styles/Global';
 import { BrowserRouter } from 'react-router-dom';
 import OfflineProvider from './offline/OfflineProvider';
 import WebSocketProvider from './websocket/WebsocketProvider';
+import PlayerProvider from './player/PlayerContext';
 import GameState from './game/GameState';
 
 const Providers = ({ children }) => (
@@ -23,11 +24,13 @@ const Providers = ({ children }) => (
               <ModalProvider>
                 <OfflineProvider>
                   <WebSocketProvider>
-                    <GameState>
-                      <Normalize />
-                      <GlobalStyles />
-                      {children}
-                    </GameState>
+                    <PlayerProvider>
+                      <GameState>
+                        <Normalize />
+                        <GlobalStyles />
+                        {children}
+                      </GameState>
+                    </PlayerProvider>
                   </WebSocketProvider>
                 </OfflineProvider>
               </ModalProvider>
