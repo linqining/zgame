@@ -13,12 +13,14 @@ use crate::auth;
 use crate::config::Config;
 use crate::models::{Database, UserResponse};
 use crate::pokergame::player::Player;
-use crate::pokergame::game_state::{MaskAndShuffleRoundJson, PkProofJson};
+use crate::pokergame::game_state::{MaskAndShuffleRoundJson, PkProofJson, SubmitRevealTokenJson};
 use crate::socket::SocketState;
+use crate::pokergame::game_state::RevealPhase;
 use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::crypto::EcPoint;
-use sui_crypto::{SuiVerifier, UserSignatureVerifier};
-use group::GroupEncoding;
+use poker_protocol::z_poker::convert::hex_to_ecpoint;
+use group::{GroupEncoding, Group};
+use sui_sdk::sui_crypto::SuiVerifier;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -128,7 +130,7 @@ struct ActionRequestHttp {
 #[derive(Deserialize)]
 struct RevealTokenRequest {
     pk_hex: String,
-    reveal_tokens: Vec<serde_json::Value>,
+    reveal_tokens: Vec<SubmitRevealTokenJson>,
 }
 
 fn parse_game_id(game_id: &str) -> Option<u32> {
@@ -205,13 +207,22 @@ pub async fn join_game(
         return err_resp(StatusCode::BAD_REQUEST, "Player already in game");
     }
 
-    let socket_id = format!("http_{}", body.pk_hex);
-    let player = Player {
-        socket_id: socket_id.clone(),
-        id: body.pk_hex.clone(),
-        name: body.name.clone(),
-        bankroll: 0,
-        pk_hex: body.pk_hex.clone(),
+    let player = match state.socket_state.find_player_by_pk(&body.pk_hex) {
+        Some(p) => {
+            tracing::debug!("[join_game] found existing player by pk_hex, socket_id={}", p.socket_id);
+            p
+        }
+        None => {
+            tracing::debug!("[join_game] no existing player found for pk_hex, creating http player");
+            Player {
+                socket_id: format!("http_{}", body.pk_hex),
+                id: body.pk_hex.clone(),
+                name: body.name.clone(),
+                bankroll: 0,
+                pk_hex: body.pk_hex.clone(),
+                readable_hands: vec![],
+            }
+        }
     };
 
     if state.socket_state.add_player_to_table(table_id, player).is_err() {
@@ -282,7 +293,7 @@ pub async fn join_game_and_shuffle(
     req: Request<Body>,
 ) -> Response {
     tracing::debug!("[join_game_and_shuffle] request received, table_id={}", table_id);
-    let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
+    let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
         Ok(b) => b,
         Err(_) => {
             tracing::warn!("[join_game_and_shuffle] failed to read request body");
@@ -300,6 +311,7 @@ pub async fn join_game_and_shuffle(
             return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
         }
     };
+    tracing::debug!("[join_game_and_shuffle] parsed body: {:?}", body.pk_proof);
 
     let table_id = match parse_table_id(&table_id) {
         Some(id) => id,
@@ -335,12 +347,22 @@ pub async fn join_game_and_shuffle(
         }
     };
 
-    let player = Player {
-        socket_id: format!("http_{}", body.pk_hex),
-        id: player_id,
-        name: body.name.clone(),
-        bankroll: 0,
-        pk_hex: body.pk_hex.clone(),
+    let player = match state.socket_state.find_player_by_pk(&body.pk_hex) {
+        Some(p) => {
+            tracing::debug!("[join_game_and_shuffle] found existing player by pk_hex, socket_id={}", p.socket_id);
+            p
+        }
+        None => {
+            tracing::debug!("[join_game_and_shuffle] no existing player found for pk_hex, creating http player", );
+            Player {
+                socket_id: format!("http_{}", body.pk_hex),
+                id: player_id,
+                name: body.name.clone(),
+                bankroll: 0,
+                pk_hex: body.pk_hex.clone(),
+                readable_hands: vec![],
+            }
+        }
     };
 
     match state.socket_state.join_player_and_shuffle(table_id, player, player_pk, body.pk_proof, body.mask_and_shuffle_round, body.seat_id, body.amount) {
@@ -458,8 +480,8 @@ pub async fn submit_reveal_token(
             tracing::debug!("[submit_reveal_token] parsed body, pk_hex={}, reveal_tokens_count={}", v.pk_hex, v.reveal_tokens.len());
             v
         }
-        Err(_) => {
-            tracing::warn!("[submit_reveal_token] failed to parse JSON body");
+        Err(e) => {
+            tracing::warn!("[submit_reveal_token] failed to parse JSON body: {}", e);
             return err_resp(StatusCode::BAD_REQUEST, "Invalid JSON");
         }
     };
@@ -472,32 +494,86 @@ pub async fn submit_reveal_token(
         }
     };
 
-    let socket_id = match state.socket_state.find_socket_id_by_pk(&body.pk_hex) {
-        Some(id) => {
-            tracing::debug!("[submit_reveal_token] found socket_id={} for pk_hex={}", id, body.pk_hex);
-            id
-        }
-        None => {
-            tracing::warn!("[submit_reveal_token] player not found, pk_hex={}", body.pk_hex);
-            return err_resp(StatusCode::NOT_FOUND, "Player not found");
+    let player_pk = match hex_to_ecpoint(&body.pk_hex) {
+        Ok(pt) => pt,
+        Err(e) => {
+            tracing::warn!("[submit_reveal_token] invalid player_pk: {}", e);
+            return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid player_pk: {}", e));
         }
     };
 
-    let all_complete = match state.socket_state.mark_reveal_complete_for_pk(table_id, &socket_id) {
+    let tokens_len = body.reveal_tokens.len();
+    if tokens_len == 0 {
+        tracing::warn!("[submit_reveal_token] no reveal tokens provided");
+        return err_resp(StatusCode::BAD_REQUEST, "No reveal tokens provided");
+    }
+
+    let tokens: Result<Vec<_>, String> = body.reveal_tokens.iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let encrypted_card = item.encrypted_card.to_ciphertext()
+                .map_err(|e| format!("Token[{}]: Invalid encrypted_card: {}", idx, e))?;
+            let reveal_token = hex_to_ecpoint(&item.reveal_token_hex)
+                .map_err(|e| format!("Token[{}]: Invalid reveal_token_hex: {}", idx, e))?;
+            let proof = item.reveal_token_proof.to_proof()
+                .map_err(|e| format!("Token[{}]: Invalid reveal_token_proof: {}", idx, e))?;
+
+            Ok(poker_protocol::z_poker::protocol::RevealToken {
+                user_public_key: player_pk,
+                encrypted_card,
+                proof,
+                reveal_token,
+            })
+        })
+        .collect();
+
+    let tokens = match tokens {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("[submit_reveal_token] token parse error: {}", e);
+            return err_resp(StatusCode::BAD_REQUEST, &e);
+        }
+    };
+
+    let reveal_phase = state.socket_state.get_reveal_phase_for_table(table_id).unwrap_or_default();
+
+    if let Err(e) = state.socket_state.submit_reveal_tokens_for_pk(table_id, &body.pk_hex, tokens) {
+        tracing::warn!("[submit_reveal_token] submit failed, table_id={}, pk_hex={}, error={}", table_id, body.pk_hex, e);
+        return err_resp(StatusCode::BAD_REQUEST, &e);
+    }
+
+    // todo 发送完成通知
+    let all_complete = match state.socket_state.mark_reveal_complete_for_pk(table_id, &body.pk_hex) {
         Ok(result) => {
-            tracing::debug!("[submit_reveal_token] reveal marked, table_id={}, socket_id={}, all_complete={}", table_id, socket_id, result);
+            tracing::debug!("[submit_reveal_token] reveal marked, table_id={}, pk_hex={}, all_complete={}", table_id, body.pk_hex, result);
             result
         }
         Err(e) => {
-            tracing::warn!("[submit_reveal_token] mark reveal failed, table_id={}, socket_id={}, error={}", table_id, socket_id, e);
+            tracing::warn!("[submit_reveal_token] mark reveal failed, table_id={}, pk_hex={}, error={}", table_id, body.pk_hex, e);
             return err_resp(StatusCode::NOT_FOUND, &e);
         }
     };
 
-    tracing::debug!("[submit_reveal_token] success, pk_hex={}, reveal_tokens_count={}, all_complete={}", body.pk_hex, body.reveal_tokens.len(), all_complete);
+    if all_complete {
+        match reveal_phase {
+            RevealPhase::HandReveal  => {
+                state.socket_state.broadcast_hand_reveal_result(table_id);
+            }
+            RevealPhase::ShowdownReveal => {
+                state.socket_state.broadcast_showdown_result(table_id).await;
+            }
+            RevealPhase::CommunityReveal => {
+                state.socket_state.broadcast_community_cards(table_id);
+            }
+        }
+    }
+
+
+    tracing::debug!("[submit_reveal_token] success, pk_hex={}, reveal_tokens_count={}, all_complete={}", body.pk_hex, tokens_len, all_complete);
     (StatusCode::OK, Json(serde_json::json!({
-        "message": format!("{} reveal tokens submitted", body.reveal_tokens.len()),
+        "message": format!("{} reveal tokens submitted", tokens_len),
         "player_pk": body.pk_hex,
+        "phase": format!("{:?}", reveal_phase),
         "reveal_phase_complete": all_complete,
     }))).into_response()
 }
@@ -565,9 +641,8 @@ fn verify_sui_wallet_signature(
 ) -> Result<(String, String), String> {
     tracing::debug!("[verify_sui_wallet_signature] verifying signature, expected_address={}", expected_address);
     let personal_msg = sui_sdk_types::PersonalMessage(message.as_bytes().into());
-    let verifier = UserSignatureVerifier::new();
-    verifier
-        .verify_personal_message(&personal_msg, signature)
+    let verifier = sui_sdk::sui_crypto::secp256k1::Secp256k1Verifier::new();
+    verifier.verify_personal_message(&personal_msg, signature)
         .map_err(|e| {
             tracing::warn!("[verify_sui_wallet_signature] signature verification failed: {}", e);
             format!("Signature verification failed: {}", e)
@@ -661,16 +736,21 @@ pub async fn wallet_login(
             chips_amount: state.config.initial_chips_amount,
             user_type: 1,
             created: chrono::Utc::now().to_rfc3339(),
-            sk_hex: String::new(),
-            pk_hex: pk_hex.clone(),
+            // sk_hex: String::new(),
+            pk_hex: body.message.clone(),
         };
         if state.db.save_user(&user).await.is_err() {
             tracing::error!("[wallet_login] failed to save wallet user, user_id={}", user_id);
             return err_resp(StatusCode::INTERNAL_SERVER_ERROR, "Failed to save wallet user");
         }
-        tracing::debug!("[wallet_login] wallet user saved, user_id={}", user_id);
+        tracing::debug!("[wallet_login] wallet user saved, user_id={}, pk_hex={}", user_id, body.message.clone());
     } else {
-        tracing::debug!("[wallet_login] existing wallet user found, user_id={}", user_id);
+        if state.db.update_user_pk(&user_id, &body.message.clone()).await {
+            tracing::debug!("[wallet_login] existing wallet user found, user_id={}, pk_hex={}", user_id, body.message.clone());
+        } else {
+            tracing::warn!("[wallet_login] failed to update wallet user pk, user_id={}", user_id);
+        }
+        tracing::debug!("[wallet_login] existing wallet user found, user_id={}, pk_hex={}", user_id, body.message.clone());
     }
 
     match auth::create_token(&user_id, &state.config.jwt_secret, state.config.jwt_token_expires_in) {
@@ -679,7 +759,7 @@ pub async fn wallet_login(
             (StatusCode::OK, Json(serde_json::json!({
                 "token": token,
                 "address": address,
-                "pk_hex": pk_hex,
+                "pk_hex": body.message.clone(),
             }))).into_response()
         }
         Err(_) => {
@@ -735,7 +815,7 @@ pub async fn register(
         chips_amount: state.config.initial_chips_amount,
         user_type: 0,
         created: chrono::Utc::now().to_rfc3339(),
-        sk_hex,
+        // sk_hex,
         pk_hex,
     };
 

@@ -1,10 +1,10 @@
 use wasm_bindgen::prelude::*;
 use serde::{Serialize, Deserialize};
-use poker_protocol::ClientPlayer;
-use poker_protocol::{JoinGameAndShuffleRound,MaskAndShuffleRound};
-use poker_protocol::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext};
-use poker_protocol::card_reveal::VerificationError;
-use poker_protocol::crypto::types::BASE_G;
+use z_game::z_poker::protocol::ClientPlayer;
+use z_game::z_poker::protocol::{JoinGameAndShuffleRound,MaskAndShuffleRound};
+use z_game::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext};
+use z_game::card_reveal::VerificationError;
+use z_game::crypto::types::BASE_G;
 use rand_core::OsRng;
 use ff::{Field, PrimeField};
 use elliptic_curve::group::GroupEncoding;
@@ -349,14 +349,28 @@ impl WasmClientPlayer {
             scalar_to_hex(&ms.proof.nonce),
         );
 
-        let s = format!(
+        let mask_and_shuffle_json = format!(
             r#"{{"mask_cards":{},"remask_proof":{},"output_cards":{},"shuffle_proof":{}}}"#,
             ct_vec_to_json(&ms.mask_cards),
             remask_proof_json,
             ct_vec_to_json(&ms.output_cards),
             shuffle_proof_json,
         );
-        Ok(json_val_to_jsvalue(s))
+
+        let proof = round.pk_ownership_proof;
+        let pk_proof_json = format!(
+            r#"{{"commitment_hex":"{}","response_hex":"{}"}}"#,
+            ecpoint_to_hex(&proof.commitment),
+            scalar_to_hex(&proof.response)
+        );
+
+        let join_game_and_shuffle_json = format!(
+            r#"{{"pk_ownership_proof":{},"pk_hex":"{}","mask_and_shuffle_round":{}}}"#,
+            pk_proof_json,
+            round.pk_hex,
+            mask_and_shuffle_json,
+        );        
+        Ok(json_val_to_jsvalue(join_game_and_shuffle_json))
     }
 
     pub fn verify_remask_proof(
@@ -567,6 +581,13 @@ impl WasmClientPlayer {
         self.inner.decrypt_playing_card(&ct, other_tokens)
             .map(|card| card.to_string())
             .ok_or_else(|| JsValue::from_str("Failed to decrypt playing card"))
+    }
+
+    pub fn decrypt_readable_card(&self, ct_json: &str) -> Result<String, JsValue>  {
+        let ct = json_to_ct(ct_json).map_err(|e| JsValue::from_str(&e))?;
+        self.inner.decrypt_readable_card(&ct)
+        .map(|card| card.to_string())
+        .ok_or_else(|| JsValue::from_str("Failed to decrypt readable card"))
     }
 }
 

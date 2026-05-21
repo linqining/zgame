@@ -5,12 +5,13 @@ use crate::pokergame::game_state::{ElGamalCiphertextJson, ExpelPhase, ExpelPubli
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::pokergame::deck::{Card, Deck};
+use crate::pokergame::deck::{Card, Deck, EncryptedDeck};
 use crate::pokergame::player::Player;
-use crate::pokergame::seat::Seat;
+use crate::pokergame::seat::{ClientSeat,Seat};
 use crate::pokergame::side_pot::SidePot;
 use poker_protocol::z_poker::{MentalPokerGame, GameConfig};
-use poker_protocol::crypto::EcPoint;
+use poker_protocol::crypto::{EcPoint, ElGamalCiphertext};
+use sui_sdk::sui_crypto::SuiVerifier;
 
 
 
@@ -34,6 +35,7 @@ pub enum RoundState {
     Turn,
     RiverReveal,
     River,
+    ShowdownReveal,
     Showdown,
     HandComplete,
 }
@@ -53,9 +55,9 @@ pub struct ClientTable {
     pub limit: u64,
     pub max_players: u32,
     pub players: Vec<Player>,
-    pub seats: HashMap<u32, Option<Seat>>,
+    pub seats: HashMap<u32, Option<ClientSeat>>,
     pub board: Vec<Card>,
-    pub deck: Option<Deck>,
+    pub deck: Option<EncryptedDeck>,
     pub button: Option<u32>,
     pub turn: Option<u32>,
     pub pot: u64,
@@ -87,8 +89,6 @@ pub struct Table {
     pub max_players: u32,
     pub players: Vec<Player>,
     pub seats: HashMap<u32, Option<Seat>>,
-    pub board: Vec<Card>,
-    pub deck: Option<Deck>,
     pub button: Option<u32>,
     pub turn: Option<u32>,
     pub pot: u64,
@@ -126,15 +126,27 @@ pub struct Table {
 
 impl Table {
     pub fn to_client(&self) -> ClientTable {
+        let mut client_seats = HashMap::new();
+        for (seat_id, seat) in self.seats.iter() {
+            if let Some(seat) = seat {
+                let client_seat = seat.to_client();
+                // todo get card decrypted
+                client_seats.insert(*seat_id, Some(client_seat.clone()));
+            }
+        }
+        let encrypted_deck = EncryptedDeck{
+            cards: self.mental_poker_game.deck_encrypted.iter().map(ElGamalCiphertextJson::from_ciphertext).collect(),
+        };
+        let board = self.mental_poker_game.list_revealed_community_cards().iter().map(|c| Card::from_playing_card(c)).collect::<Vec<_>>();
         ClientTable {
             id: self.id,
             name: self.name.clone(),
             limit: self.limit,
             max_players: self.max_players,
             players: self.players.clone(),
-            seats: self.seats.clone(),
-            board: self.board.clone(),
-            deck: self.deck.clone(),
+            seats: client_seats,
+            board: board,
+            deck: Some(encrypted_deck.clone()),
             button: self.button,
             turn: self.turn,
             pot: self.pot,
@@ -165,8 +177,6 @@ impl Table {
             max_players,
             players: vec![],
             seats,
-            board: vec![],
-            deck: None,
             button: None,
             turn: None,
             pot: 0,
@@ -346,10 +356,8 @@ impl Table {
     }
 
     pub fn start_hand(&mut self) {
-        self.deck = Some(Deck::new());
         self.went_to_showdown = false;
         self.reset_board_and_pot();
-        self.clear_seat_hands();
         self.reset_bets_and_actions();
         self.unfold_players();
         self.history = vec![];
@@ -360,10 +368,9 @@ impl Table {
             self.update_history();
             self.set_blinds();
             self.hand_over = false;
-            self.round_state = RoundState::PreFlop;
-            self.betting_timeout_start = Some(std::time::Instant::now());
             self.betting_round = Some(crate::pokergame::betting::BettingRound::new_preflop(self.min_bet * 2));
         }
+        
         self.update_history();
     }
 
@@ -424,7 +431,7 @@ impl Table {
     pub fn clear_seat_hands(&mut self) {
         for seat_opt in self.seats.values_mut() {
             if let Some(seat) = seat_opt {
-                seat.hand = vec![];
+                seat.hand.clear();
             }
         }
     }
@@ -444,6 +451,7 @@ impl Table {
     pub fn end_hand(&mut self) {
         self.clear_seat_turns();
         self.hand_over = true;
+        self.clear_seat_hands();
         self.round_state = RoundState::HandComplete;
         self.hand_complete_at = Some(std::time::Instant::now());
         self.sit_out_felted_players();
@@ -479,26 +487,26 @@ impl Table {
         self.button = None;
         self.turn = None;
         self.hand_over = true;
-        self.deck = None;
         self.went_to_showdown = false;
+        self.mental_poker_game.reset();
         self.reset_board_and_pot();
         self.clear_win_messages();
         self.clear_seats();
     }
 
     pub fn reset_board_and_pot(&mut self) {
-        self.board = vec![];
         self.pot = 0;
         self.main_pot = 0;
         self.side_pots = vec![];
     }
 
     pub fn update_history(&mut self) {
+        let board = self.mental_poker_game.list_revealed_community_cards().iter().map(|c| Card::from_playing_card(c)).collect::<Vec<_>>();
         self.history.push(json!({
             "pot": self.pot,
             "mainPot": self.main_pot,
             "sidePots": self.side_pots,
-            "board": self.board,
+            "board":board,
             "seats": self.clean_seats_for_history(),
             "button": self.button,
             "turn": self.turn,
@@ -523,31 +531,6 @@ impl Table {
             }
         }
         serde_json::Value::Object(clean)
-    }
-
-    #[allow(dead_code)]
-    pub fn change_turn(&mut self, last_turn: u32) {
-        self.update_history();
-        if self.unfolded_players().len() == 1 {
-            self.end_without_showdown();
-            return;
-        }
-        if self.is_betting_round_complete() {
-            self.calculate_side_pots();
-            self.deal_next_street();
-            self.turn = if self.hand_over {
-                None
-            } else {
-                Some(self.next_unfolded_player(self.button.unwrap_or(1), 1))
-            };
-        } else {
-            self.turn = Some(self.next_unfolded_player(last_turn, 1));
-        }
-        for i in 1..=self.max_players {
-            if let Some(Some(seat)) = self.seats.get_mut(&i) {
-                seat.turn = self.turn == Some(i);
-            }
-        }
     }
 
     pub fn is_betting_round_complete(&self) -> bool {
@@ -622,21 +605,7 @@ impl Table {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn deal_next_street(&mut self) {
-        let length = self.board.len();
-        self.reset_bets_and_actions();
-        self.main_pot = self.pot;
-        match length {
-            0 => self.deal_flop(),
-            3 | 4 => self.deal_turn_or_river(),
-            5 => {
-                self.determine_side_pot_winners();
-                self.determine_main_pot_winner();
-            }
-            _ => {}
-        }
-    }
+
 
     pub fn determine_side_pot_winners(&mut self) {
         if self.side_pots.is_empty() { return; }
@@ -673,20 +642,31 @@ impl Table {
 
     pub fn evaluate_player_hands(&self) -> Vec<(u32, HandRank)> {
         let mut results = Vec::new();
+        let (player_revealed_map, comm_revealed_cards) = self.mental_poker_game.list_revealed_cards();
+        if comm_revealed_cards.len() < 5 { return results; }
+        tracing::info!("comm_revealed_cards: {:?}", comm_revealed_cards);
         for seat_opt in self.seats.values() {
             if let Some(seat) = seat_opt {
-                if !seat.folded && !seat.sitting_out && seat.hand.len() >= 2 {
+                if seat.player.is_none() { continue; }
+                let seat_player = seat.player.as_ref().unwrap();
+                let revealed_cards = match player_revealed_map.get(&seat_player.pk_hex){
+                    Some(rc) => rc,
+                    None => continue,
+                };
+
+                if !seat.folded && !seat.sitting_out && revealed_cards.len() >= 2 {
                     let mut eval_cards: Vec<EvalCard> = Vec::new();
-                    for card in &seat.hand {
-                        if let Some(ec) = vin_card_to_eval_card(&card.suit, &card.rank) {
+                    for card in revealed_cards {
+                        if let Some(ec) = vin_card_to_eval_card(card.suit.short_name_lower(), card.rank.symbol()) {
                             eval_cards.push(ec);
                         }
                     }
-                    for card in &self.board {
-                        if let Some(ec) = vin_card_to_eval_card(&card.suit, &card.rank) {
+                    for card in &comm_revealed_cards {
+                        if let Some(ec) = vin_card_to_eval_card(card.suit.short_name_lower(), card.rank.symbol()) {
                             eval_cards.push(ec);
                         }
                     }
+                    tracing::info!("evaluate_player_hands eval_cards: {:?}", eval_cards);
                     if eval_cards.len() >= 5 {
                         let (hand_rank, _) = best_hand(&eval_cards);
                         results.push((seat.id, hand_rank));
@@ -766,15 +746,16 @@ impl Table {
         let max = self.max_players;
         let button = self.button.unwrap_or(1);
         let order: Vec<u32> = (button..=max).chain(1..button).collect();
-        if let Some(ref mut deck) = self.deck {
-            for _ in 0..2 {
-                for &seat_id in &order {
-                    if let Some(Some(seat)) = self.seats.get_mut(&seat_id) {
+
+        for _ in 0..2 {
+            for &seat_id in &order {
+                if let Some(Some(seat)) = self.seats.get_mut(&seat_id) {
+                    if let Some(player) = &seat.player{
                         if !seat.sitting_out {
-                            if let Some(card) = deck.draw() {
-                                seat.hand.push(card);
-                            }
+                            self.mental_poker_game.deal_to_player(&player.pk_hex.clone(), 1).unwrap();
                             seat.turn = self.turn == Some(seat_id);
+                        }else{
+                            tracing::info!("player {} is sitting out,no deal", player.name);
                         }
                     }
                 }
@@ -783,21 +764,11 @@ impl Table {
     }
 
     pub fn deal_flop(&mut self) {
-        if let Some(ref mut deck) = self.deck {
-            for _ in 0..3 {
-                if let Some(card) = deck.draw() {
-                    self.board.push(card);
-                }
-            }
-        }
+        self.mental_poker_game.deal_community_cards_encrypted(3);
     }
 
     pub fn deal_turn_or_river(&mut self) {
-        if let Some(ref mut deck) = self.deck {
-            if let Some(card) = deck.draw() {
-                self.board.push(card);
-            }
-        }
+        self.mental_poker_game.deal_community_cards_encrypted(1);
     }
 
     pub fn handle_fold(&mut self, socket_id: &str) -> Option<ActionResult> {
@@ -900,19 +871,18 @@ impl Table {
         self.reset_bets_and_actions();
         match self.round_state {
             RoundState::PreFlop => {
+                // deal three community card 
                 self.deal_flop();
-                self.round_state = RoundState::Flop;
+                // start reveal community card
+                self.round_state = RoundState::FlopReveal;
             }
             RoundState::Flop => {
                 self.deal_turn_or_river();
-                self.round_state = RoundState::Turn;
+                self.round_state = RoundState::TurnReveal;
             }
             RoundState::Turn => {
                 self.deal_turn_or_river();
-                self.round_state = RoundState::River;
-            }
-            RoundState::River => {
-                self.round_state = RoundState::Showdown;
+                self.round_state = RoundState::RiverReveal;
             }
             _ => {}
         }
@@ -1011,7 +981,6 @@ impl Table {
             .any(|s| s.player.as_ref().map_or(false, |p| p.socket_id == socket_id) && s.disconnected)
     }
 
-    #[allow(dead_code)]
     pub fn find_disconnected_socket_by_user_id(&self, user_id: &str) -> Option<String> {
         for seat_opt in self.seats.values() {
             if let Some(seat) = seat_opt {
@@ -1034,6 +1003,7 @@ impl Table {
         self.shuffle_state.pending_players.is_empty()
     }
 
+    //todo hand_complete 马上开始
     pub fn start_shuffle(&mut self) -> Result<(), String> {
         let active_count = self.active_players().len();
         if active_count < 2 {
@@ -1048,10 +1018,19 @@ impl Table {
 
         let already_completed: std::collections::HashSet<String> =
             self.shuffle_state.completed_players.iter().cloned().collect();
-        self.shuffle_state.pending_players = self.seats.values()
-            .filter_map(|s| s.as_ref())
-            .filter(|s| !s.sitting_out)
-            .filter_map(|s| s.player.as_ref().map(|p| p.socket_id.clone()))
+        
+        let active_pks = self.active_players().iter().filter(|p| p.player.is_some()).map(|p| p.player.as_ref().unwrap().pk_hex.clone()).collect::<Vec<_>>();
+
+        let remove_pks = self.mental_poker_game.players.iter().filter(|(pk,player_state)| !active_pks.contains(&player_state.pk_hex)).map(|p| p.1.pk_hex.clone()).collect::<Vec<_>>();
+        for pk in remove_pks{
+            // 移除不参与洗牌的玩家
+            // todo 每局初始化一个更简单
+            self.mental_poker_game.leave_player(&pk);
+        }
+
+        // todo sitting_out 回来的玩家再加入洗牌(假如在洗牌阶段)
+        self.shuffle_state.pending_players = self.mental_poker_game.players.keys()
+            .cloned()
             .filter(|pk| !already_completed.contains(pk))
             .collect();
 
@@ -1256,17 +1235,22 @@ impl Table {
     // ==================== Reveal Token State Methods ====================
 
     pub fn start_preflop_reveal_phase(&mut self) {
-        let player_pks: Vec<String> = self.seats.values()
-            .filter_map(|s| s.as_ref())
-            .filter(|s| !s.sitting_out && !s.folded)
-            .filter_map(|s| s.player.as_ref().map(|p| p.socket_id.clone()))
-            .collect();
-
+        if self.reveal_token_state.is_active{
+            return;
+        }
+        let player_pks = self.mental_poker_game.players.keys().cloned().collect::<Vec<String>>();
         let mut player_assignments = HashMap::new();
         for pk in &player_pks {
+            let mut hand_cards = Vec::new();
+            for (other_pk, state) in &self.mental_poker_game.players {
+                if pk == other_pk { continue; }
+                for card in &state.hand_encrypted {
+                    hand_cards.push(card.encrypted_card.clone());
+                }
+            }
             player_assignments.insert(pk.clone(), PlayerRevealAssignment {
-                hand_card_indices: vec![0, 1],
-                community_card_indices: vec![],
+                hand_card: hand_cards,
+                community_card: vec![],
             });
         }
 
@@ -1291,18 +1275,16 @@ impl Table {
             tracing::error!("[start_community_reveal_phase] Reveal phase already active");
             return;
         }
-        let player_pks: Vec<String> = self.seats.values()
-            .filter_map(|s| s.as_ref())
-            .filter(|s| !s.sitting_out && !s.folded)
-            .filter_map(|s| s.player.as_ref().map(|p| p.socket_id.clone()))
-            .collect();
 
-        let community_card_indices: Vec<usize> = (0..self.board.len()).collect();
+        let player_pks = self.mental_poker_game.players.keys().cloned().collect::<Vec<String>>();
+
+        let unreveal_cards = self.mental_poker_game.list_unreveal_community_cards_encrypted();
+        let community_cards: Vec<ElGamalCiphertext> = unreveal_cards.iter().map(|c| c.encrypted_card.clone()).collect();
         let mut player_assignments = HashMap::new();
         for pk in &player_pks {
             player_assignments.insert(pk.clone(), PlayerRevealAssignment {
-                hand_card_indices: vec![],
-                community_card_indices: community_card_indices.clone(),
+                hand_card: vec![],
+                community_card: community_cards.clone(),
             });
         }
 
@@ -1311,7 +1293,7 @@ impl Table {
             phase: RevealPhase::CommunityReveal,
             current_card_index: 0,
             total_cards_per_player: 2,
-            total_community_cards: self.board.len(),
+            total_community_cards: self.mental_poker_game.community_cards_encrypted.len(),
             timeout_start: Some(std::time::Instant::now()),
             timeout_seconds: 10,
             completed_players: Vec::new(),
@@ -1319,7 +1301,7 @@ impl Table {
             player_assignments,
         };
         tracing::info!("[REVEAL-TOKEN] Community reveal phase started for {} players ({} community cards)",
-            player_pks.len(), self.board.len());
+            player_pks.len(), self.mental_poker_game.community_cards_encrypted.len());
     }
 
     pub fn start_hand_card_reveal_phase(&mut self) {
@@ -1327,32 +1309,75 @@ impl Table {
             tracing::error!("[start_hand_card_reveal_phase] Reveal phase already active");
             return;
         }
-        let player_pks: Vec<String> = self.seats.values()
-            .filter_map(|s| s.as_ref())
-            .filter(|s| !s.folded)
-            .filter_map(|s| s.player.as_ref().map(|p| p.socket_id.clone()))
-            .collect();
+        let player_pks: Vec<String> = self.mental_poker_game.players.keys().cloned().collect();
+        
 
         let mut player_assignments = HashMap::new();
         for seat_opt in self.seats.values() {
             if let Some(seat) = seat_opt {
-                if !seat.folded {
-                    if let Some(player) = &seat.player {
-                        player_assignments.insert(player.socket_id.clone(), PlayerRevealAssignment {
-                            hand_card_indices: (0..seat.hand.len()).collect(),
-                            community_card_indices: vec![],
-                        });
+                if let Some(player) = &seat.player {
+                    let mut hand_cards = vec![];
+                    for men_player in self.mental_poker_game.players.values() {
+                        if men_player.pk_hex == player.pk_hex{
+                            continue;
+                        }
+                        hand_cards.extend(men_player.hand_encrypted.iter().map(|f| f.encrypted_card.clone()));
                     }
+                    player_assignments.insert(player.pk_hex.clone(), PlayerRevealAssignment {
+                        hand_card: hand_cards,
+                        community_card: vec![],
+                    });
                 }
             }
         }
-
         self.reveal_token_state = RevealTokenState {
             is_active: true,
-            phase: RevealPhase::ShowDownReveal,
+            phase: RevealPhase::ShowdownReveal,
             current_card_index: 0,
             total_cards_per_player: 2,
-            total_community_cards: self.board.len(),
+            total_community_cards: self.mental_poker_game.community_cards_encrypted.len(),
+            timeout_start: Some(std::time::Instant::now()),
+            timeout_seconds: 10,
+            completed_players: Vec::new(),
+            pending_players: player_pks,
+            player_assignments,
+        };
+        tracing::info!("[REVEAL-TOKEN] Hand card reveal (showdown) phase started");
+    }
+
+    pub fn start_showdown_reveal_phase(&mut self) {
+        if self.reveal_token_state.is_active {
+            tracing::error!("[start_hand_card_reveal_phase] Reveal phase already active");
+            return;
+        }
+        let player_pks: Vec<String> = self.seats.values()
+            .filter_map(|s| s.as_ref())
+            .filter(|s| !s.folded )
+            .filter_map(|s| s.player.as_ref().map(|p| p.pk_hex.clone()))
+            .collect();
+        let mut player_assignments = HashMap::new();
+        for seat_opt in self.seats.values() {
+            if let Some(seat) = seat_opt {
+                if seat.folded { continue; }
+                if let Some(player) = &seat.player {
+                    if !self.mental_poker_game.players.contains_key(player.pk_hex.as_str()) {
+                        continue;
+                    }
+                    let men_player = self.mental_poker_game.players.get(player.pk_hex.as_str()).unwrap();
+                    let hand_cards = men_player.hand_encrypted.iter().map(|f| f.encrypted_card.clone()).collect();
+                    player_assignments.insert(player.pk_hex.clone(), PlayerRevealAssignment {
+                        hand_card: hand_cards,
+                        community_card: vec![],
+                    });
+                }
+            }
+        }
+        self.reveal_token_state = RevealTokenState {
+            is_active: true,
+            phase: RevealPhase::ShowdownReveal,
+            current_card_index: 0,
+            total_cards_per_player: 2,
+            total_community_cards: self.mental_poker_game.community_cards_encrypted.len(),
             timeout_start: Some(std::time::Instant::now()),
             timeout_seconds: 10,
             completed_players: Vec::new(),
@@ -1375,6 +1400,34 @@ impl Table {
 
         if self.reveal_token_state.pending_players.is_empty() {
             self.reveal_token_state.reset();
+            match self.round_state {
+                RoundState::PreFlopReveal => {
+                    self.round_state = RoundState::PreFlop;
+                    self.betting_timeout_start = Some(std::time::Instant::now());
+                }
+                RoundState::FlopReveal => {
+                    self.round_state = RoundState::Flop;
+                    self.betting_timeout_start = Some(std::time::Instant::now());
+                }
+                RoundState::TurnReveal => {
+                    self.round_state = RoundState::Turn;
+                    self.betting_timeout_start = Some(std::time::Instant::now());
+                }
+                RoundState::RiverReveal => {
+                    self.round_state = RoundState::River;
+                    self.betting_timeout_start = Some(std::time::Instant::now());
+                }
+                RoundState::ShowdownReveal => {
+                    self.determine_side_pot_winners();
+                    self.determine_main_pot_winner();
+                    // self.round_state = RoundState::Showdown;
+                    // self.showdown_at = Some(std::time::Instant::now());
+                }
+                _ => {
+                    tracing::error!("[mark_player_reveal_complete] Invalid round state");
+                }
+            }
+            tracing::info!("[REVEAL-TOKEN] All reveal phases complete, switch round state to PreFlop");
             return true;
         }
         false
@@ -1406,6 +1459,42 @@ impl Table {
     pub fn reset_reveal_state(&mut self) {
         self.reveal_token_state.reset();
         tracing::info!("[REVEAL-TOKEN] Reveal state reset");
+    }
+
+    pub fn submit_player_reveal_tokens(
+        &mut self,
+        player_pk: &str,
+        tokens: Vec<poker_protocol::z_poker::protocol::RevealToken>,
+    ) -> Result<(), String> {
+        if !self.reveal_token_state.is_active {
+            return Err("Reveal token phase not active".to_string());
+        }
+        if !self.reveal_token_state.pending_players.iter().any(|p| p == player_pk) {
+            return Err("Player already submitted or not pending".to_string());
+        }
+
+        let assign = match self.reveal_token_state.player_assignments.get(player_pk) {
+            Some(a) => a,
+            None => return Err(format!("No assignment found for player {}", player_pk)),
+        };
+        tracing::info!("[REVEAL-TOKEN] Player {} submitted token ({}) num {:?}",
+            player_pk, self.reveal_token_state.phase, tokens.len());
+
+        for token in tokens {
+            let cards = match self.reveal_token_state.phase {
+                RevealPhase::HandReveal => &assign.hand_card,
+                RevealPhase::CommunityReveal => &assign.community_card,
+                RevealPhase::ShowdownReveal => &assign.hand_card,
+            };
+            if !cards.iter().any(|pct| pct == &token.encrypted_card) {
+                return Err(format!("Invalid token in {} phase", self.reveal_token_state.phase));
+            }
+            if let Err(e) = self.mental_poker_game.submit_reveal_token(token.clone(), player_pk) {
+                tracing::error!("[REVEAL-TOKEN] Token submission failed: {:?}", e);
+                return Err(format!("Token submission failed: {:?}", e));
+            }
+        }
+        Ok(())
     }
 
     // ==================== Expel State Methods ====================

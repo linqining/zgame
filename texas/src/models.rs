@@ -13,7 +13,6 @@ pub struct User {
     #[serde(rename = "type", default)]
     pub user_type: i32,
     pub created: String,
-    pub sk_hex:String,
     pub pk_hex:String,
 }
 
@@ -49,12 +48,29 @@ impl Database {
             .flatten()
     }
 
-    pub async fn find_user_by_email(&self, email: &str) -> Option<User> {
+    pub async fn update_user_pk(&self, id: &str, pk_hex: &str) -> bool {
         self.users
+            .update_one(
+                mongodb::bson::doc! {"_id": id},
+                mongodb::bson::doc! {"$set": {"pk_hex": pk_hex}},
+            )
+            .await
+            .is_ok()
+    }
+
+
+
+    pub async fn find_user_by_email(&self, email: &str) -> Option<User> {
+        match self.users
             .find_one(mongodb::bson::doc! {"email": email})
             .await
-            .ok()
-            .flatten()
+        {
+            Ok(opt) => opt,
+            Err(e) => {
+                tracing::error!("Failed to find user by email {}: {}", email, e);
+                None
+            }
+        }
     }
 
     pub async fn find_user_by_name(&self, name: &str) -> Option<User> {

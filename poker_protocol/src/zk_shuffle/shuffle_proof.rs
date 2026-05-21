@@ -1025,6 +1025,7 @@ mod tests {
         println!("\n=== Security Test: Hash-to-Scalar Domain Coverage ===\n");
 
         use sha2::{Digest, Sha256};
+        use ff::PrimeField;
 
         for trial in 0..10 {
             let mut h = Sha256::new();

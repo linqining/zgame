@@ -384,6 +384,7 @@ pub enum VerificationError {
     InvalidProofAtPosition(usize),
     LengthMismatch,
     NoCardsReplaced,
+    PlayerNotFound,
     TooManyCardsReplaced,
     InvalidC2Consistency,
     InvalidDummyCount,
@@ -2826,8 +2827,6 @@ mod parallel_expel_tests {
                 &pk,
                 sk,
                 pk_i,
-                &session_nonce,
-                &pk_hex,
             ).expect("Player prove should succeed");
 
             let result = session.add_player_result(
@@ -2886,8 +2885,6 @@ mod parallel_expel_tests {
                 &pk,
                 sk,
                 pk_i,
-                &session_nonce,
-                &pk_hex,
             ).expect("Player prove should succeed");
 
             let result = session.add_player_result(
@@ -2937,12 +2934,12 @@ mod parallel_expel_tests {
 
         let (ref uc0, ref sk0, ref pk0) = players[0];
         let pk_hex0 = hex::encode(pk0.to_affine().to_bytes());
-        let (out0, proof0, pos0) = parallel_prove_expel_for_player(&cards, uc0, &pk, sk0, pk0, &session_nonce, &pk_hex0).unwrap();
+        let (out0, proof0, pos0) = parallel_prove_expel_for_player(&cards, uc0, &pk, sk0, pk0,).unwrap();
         session.add_player_result(pk_hex0.clone(), out0, proof0, uc0, pk0, pos0).expect("P0 OK");
 
         let (ref uc1, ref sk1, ref pk1) = players[1];
         let pk_hex1 = hex::encode(pk1.to_affine().to_bytes());
-        let (out1, proof1, pos1) = parallel_prove_expel_for_player(&cards, uc1, &pk, sk1, pk1, &session_nonce, &pk_hex1).unwrap();
+        let (out1, proof1, pos1) = parallel_prove_expel_for_player(&cards, uc1, &pk, sk1, pk1,).unwrap();
         session.add_player_result(pk_hex1.clone(), out1, proof1, uc1, pk1, pos1).expect("P1 OK (conflict detected at finalize)");
 
         let deck_result = session.finalize();
@@ -2978,7 +2975,7 @@ mod parallel_expel_tests {
         for (idx, (uc, sk, pk_i)) in players.iter().enumerate() {
             let pk_hex = hex::encode(pk_i.to_affine().to_bytes());
             let (out, proof, positions) = parallel_prove_expel_for_player(
-                &cards, uc, &pk, sk, pk_i, &session_nonce, &pk_hex,
+                &cards, uc, &pk, sk, pk_i
             ).unwrap();
             session.add_player_result(pk_hex.clone(), out, proof, uc, pk_i, positions).unwrap();
         }
@@ -3015,7 +3012,7 @@ mod parallel_expel_tests {
 
         for (idx, (uc, sk, pk_i)) in players.iter().enumerate() {
             let pk_hex = hex::encode(pk_i.to_affine().to_bytes());
-            let (out, proof, positions) = parallel_prove_expel_for_player(&cards, uc, &pk, sk, pk_i, &session_nonce, &pk_hex).unwrap();
+            let (out, proof, positions) = parallel_prove_expel_for_player(&cards, uc, &pk, sk, pk_i, ).unwrap();
             session.add_player_result(pk_hex.clone(), out, proof, uc, pk_i, positions).unwrap();
         }
 

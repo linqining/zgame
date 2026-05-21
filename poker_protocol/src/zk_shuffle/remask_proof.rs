@@ -3,6 +3,7 @@ use rand_core::OsRng;
 use ff::Field;
 use group::{Group, GroupEncoding};
 use sha2::{Sha256, Digest};
+use rand_core::RngCore;
 
 #[derive(Debug, Clone)]
 pub struct RemaskProof {
@@ -85,11 +86,23 @@ impl RemaskProof {
     }
 }
 
+pub fn remask_ciphertext(ct: &ElGamalCiphertextV2, sk: &Scalar, pk: &EcPoint, rng: &mut impl RngCore) -> ElGamalCiphertextV2 {
+    let r_prime = Scalar::random(rng);
+    if ct.c1 == EcPoint::IDENTITY {
+         ct.re_encrypt(pk, &r_prime)
+    }else{
+        let mut mask_card = ct.clone();
+        mask_card.c2 = mask_card.c2 + mask_card.c1*sk;
+        mask_card
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::elgamal::ElGamalCiphertextV2;
     use crate::crypto::BASE_H;
+    use crate::z_poker::convert::hex_to_ecpoint;
     use rand_core::RngCore;
     use sha2::digest::Output;
 
@@ -117,11 +130,83 @@ mod tests {
         let input_cts: Vec<ElGamalCiphertextV2> = (0..N_CARDS)
             .map(|i| ElGamalCiphertextV2::encrypt(&plaintexts[i], &pk, &r_values[i])).collect();
         let output_cts: Vec<ElGamalCiphertextV2> = (0..N_CARDS)
-            .map(|i| make_remask_pair(&input_cts[i], &sk, &pk, &mut rng)).collect();
+            .map(|i| remask_ciphertext(&input_cts[i], &sk, &pk, &mut rng)).collect();
 
         let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk);
         assert!(proof.verify(&input_cts, &output_cts, &pk), "honest prover should pass");
     }
+
+    #[test]
+    fn test_honest_prover_passes_2() {
+        let mut rng = OsRng;
+        let (sk, pk) = gen_keypair(&mut rng);
+        
+        let plaintexts: Vec<EcPoint> = (0..N_CARDS).map(|i| *BASE_G * Scalar::from(i as u64)).collect();
+        let r_values: Vec<Scalar> = (0..N_CARDS).map(|_| Scalar::random(&mut rng)).collect();
+
+        let input_cts: Vec<ElGamalCiphertextV2> = (0..N_CARDS)
+            .map(|i| ElGamalCiphertextV2 {
+                c1: EcPoint::IDENTITY,
+                c2: plaintexts[i] ,
+                c3: EcPoint::IDENTITY,
+            }).collect();
+
+        let mut output_cts = Vec::new();
+        for i in 0..input_cts.len() {
+            let mut mask_card = input_cts[i].clone();
+            mask_card.c2 = mask_card.c2 + mask_card.c1*sk;
+            output_cts.push(mask_card);
+        }
+        // let output_cts: Vec<ElGamalCiphertextV2> = (0..N_CARDS)
+        //     .map(|i| make_remask_pair(&input_cts[i], &sk, &pk, &mut rng)).collect();
+
+        let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk);
+        assert!(proof.verify(&input_cts, &output_cts, &pk), "honest prover should pass");
+    }
+
+    #[test]
+    fn test_honest_prover_passes_3() {
+       let mut rng = OsRng;
+        let (sk, pk) = gen_keypair(&mut rng);
+        let plaintexts: Vec<EcPoint> = (0..N_CARDS).map(|i| *BASE_H * Scalar::from(i as u64)).collect();
+        let r_values: Vec<Scalar> = (0..N_CARDS).map(|_| Scalar::random(&mut rng)).collect();
+
+        let input_cts: Vec<ElGamalCiphertextV2> = (0..N_CARDS)
+            .map(|i| ElGamalCiphertextV2::encrypt(&plaintexts[i], &pk, &r_values[i])).collect();
+
+        let (sk2, pk2) = gen_keypair(&mut rng);
+        let mut output_cts = Vec::new();
+        for i in 0..input_cts.len() {
+            let mut mask_card = input_cts[i].clone();
+            mask_card.c2 = mask_card.c2 + mask_card.c1*sk2;
+            output_cts.push(mask_card);
+        }
+
+        let proof = RemaskProof::prove(&input_cts, &output_cts, &sk2, &pk2);
+        assert!(proof.verify(&input_cts, &output_cts, &pk2), "honest prover should pass");
+    }
+
+    #[test]
+    fn test_gen_keys(){
+        use crate::z_poker::convert::ecpoint_to_hex;
+        let mut rng = OsRng;
+        let origin = "000000000000000000000000000000000000000000000000000000000000000000";
+        let c1 = hex_to_ecpoint(origin).unwrap();
+        let ct = ElGamalCiphertextV2 {
+            c1: c1,
+            c2: EcPoint::random(rng),
+            c3: EcPoint::IDENTITY,
+        };
+
+        let (sk2, pk2) = gen_keypair(&mut rng);
+
+        let ct = remask_ciphertext(&ct, &sk2, &pk2, &mut rng);
+
+        println!("is identity {}", EcPoint::identity().to_affine() == ct.c1.to_affine());
+        let agg_pk_hex = ecpoint_to_hex(&ct.c1);
+        println!("agg_pk {}", agg_pk_hex);
+    }
+
 
     #[test]
     fn test_wrong_sk_fails() {

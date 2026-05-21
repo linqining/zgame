@@ -1,24 +1,23 @@
 import React, { createContext, useState, useCallback, useEffect, useRef } from 'react';
-
 const PlayerContext = createContext();
 
 let wasmInitialized = false;
 let wasmInitPromise = null;
-let WasmClientPlayerClass = null;
+let wasmClientPlayer = null;
 
 async function ensureWasmReady() {
-  if (wasmInitialized && WasmClientPlayerClass) return;
+  if (wasmInitialized && wasmClientPlayer) return;
 
   if (!wasmInitPromise) {
     wasmInitPromise = (async () => {
       if (typeof window.wasm_bindgen !== 'function') {
-        throw new Error('wasm_bindgen not found. Make sure client_wasm.js is loaded.');
+        throw new Error('wasm_bindgen not found. Make sure client_wasm.js is loaded via <script>.');
       }
 
-      const exports = await window.wasm_bindgen('/wasm/client_wasm_bg.wasm');
-      WasmClientPlayerClass = exports.WasmClientPlayer;
+      await window.wasm_bindgen('/wasm/client_wasm_bg.wasm');
+      wasmClientPlayer = window.wasm_bindgen.WasmClientPlayer;
 
-      if (!WasmClientPlayerClass) {
+      if (!wasmClientPlayer) {
         throw new Error('WasmClientPlayer not found in WASM exports');
       }
 
@@ -45,9 +44,19 @@ const PlayerProvider = ({ children }) => {
   const [playerName, setPlayerName] = useState(null);
   const [wasmReady, setWasmReady] = useState(false);
   const keysRef = useRef(null);
+  const restoreSessionRef = useRef(null);
+  const getPlayerKeysRef = useRef(null);
 
   useEffect(() => {
-    ensureWasmReady().then(() => setWasmReady(true)).catch((e) => {
+    ensureWasmReady().then(() => {
+      setWasmReady(true);
+      if (restoreSessionRef.current) {
+        const restored = restoreSessionRef.current();
+        if (!restored && getPlayerKeysRef.current) {
+          getPlayerKeysRef.current();
+        }
+      }
+    }).catch((e) => {
       console.error('[PlayerContext] Failed to initialize WASM:', e);
     });
   }, []);
@@ -68,19 +77,17 @@ const PlayerProvider = ({ children }) => {
     setGameId(gid);
     setPlayerName(name);
 
-    localStorage.setItem(`sk_${gid}`, sk);
-    localStorage.setItem(`pk_${gid}`, pk);
-    localStorage.setItem(`player_${gid}`, name);
+    localStorage.setItem('sk', sk);
+    localStorage.setItem('pk', pk);
+    localStorage.setItem('player_name', name);
     localStorage.setItem('last_game_id', gid);
   }, []);
 
   const clearPlayerKeys = useCallback(() => {
-    if (gameId) {
-      localStorage.removeItem(`sk_${gameId}`);
-      localStorage.removeItem(`pk_${gameId}`);
-      localStorage.removeItem(`player_${gameId}`);
-      localStorage.removeItem('last_game_id');
-    }
+    localStorage.removeItem('sk');
+    localStorage.removeItem('pk');
+    localStorage.removeItem('player_name');
+    localStorage.removeItem('last_game_id');
 
     keysRef.current = null;
     setPlayerKeysState(null);
@@ -91,48 +98,49 @@ const PlayerProvider = ({ children }) => {
     setPlayerName(null);
 
     console.log('[PlayerContext] Cleared all player data');
-  }, [gameId]);
+  }, []);
 
-  const getPlayerKeys = useCallback((targetGameId) => {
-    const gid = targetGameId || gameId;
-
-    if (!gid) {
-      console.warn('[PlayerContext] No game ID provided or stored');
-      return null;
-    }
-
-    if (keysRef.current && gameId === gid) {
+  const getPlayerKeys = useCallback(() => {
+    if (keysRef.current) {
       return keysRef.current;
     }
 
-    const storedSk = localStorage.getItem(`sk_${gid}`);
+    const storedSk = localStorage.getItem('sk');
     if (!storedSk) {
-      console.warn(`[PlayerContext] No SK found for game ${gid}`);
-      return null;
+      console.warn('[PlayerContext] No SK found in storage, generating new keys');
+      const newKeys = new wasmClientPlayer();
+      let sk = newKeys.get_sk_hex();
+      let pk = newKeys.get_pk_hex();
+      localStorage.setItem('sk', sk);
+      localStorage.setItem('pk', pk);
+      const restoredProof = parsePkProof(newKeys.generate_pk_proof());
+      setPlayerKeys(newKeys, restoredProof, "", pk);
+      return newKeys;
     }
 
     try {
       console.log('[PlayerContext] Reconstructing player keys from SK...');
-      const reconstructedKeys = WasmClientPlayerClass.from_sk(storedSk);
-      keysRef.current = reconstructedKeys;
+      const reconstructedKeys = wasmClientPlayer.from_sk(storedSk);
+      const restoredProof = parsePkProof(reconstructedKeys.generate_pk_proof());
+      const pk = reconstructedKeys.get_pk_hex();
+      const savedName = localStorage.getItem('player_name') || '';
+      const savedGameId = localStorage.getItem('last_game_id') || '';
+      setPlayerKeys(reconstructedKeys, restoredProof, savedGameId, savedName);
       console.log('[PlayerContext] Successfully reconstructed player keys');
       return reconstructedKeys;
     } catch (e) {
       console.error('[PlayerContext] Failed to reconstruct player keys:', e);
       return null;
     }
-  }, [gameId]);
+  }, []);
 
   const restoreSession = useCallback(() => {
     const savedGameId = localStorage.getItem('last_game_id');
-    if (!savedGameId) return false;
+    const savedSk = localStorage.getItem('sk');
+    const savedPk = localStorage.getItem('pk');
+    const savedName = localStorage.getItem('player_name');
 
-    const savedSk = localStorage.getItem(`sk_${savedGameId}`);
-    const savedPk = localStorage.getItem(`pk_${savedGameId}`);
-    const savedName = localStorage.getItem(`player_${savedGameId}`);
-
-    if (!savedSk || !savedPk || !savedName) {
-      localStorage.removeItem('last_game_id');
+    if (!savedSk) {
       return false;
     }
 
@@ -140,10 +148,10 @@ const PlayerProvider = ({ children }) => {
 
     try {
       console.log('[PlayerContext] Restoring player session from storage...');
-      const restoredKeys = WasmClientPlayerClass.from_sk(savedSk);
+      const restoredKeys = wasmClientPlayer.from_sk(savedSk);
       const restoredProof = parsePkProof(restoredKeys.generate_pk_proof());
 
-      setPlayerKeys(restoredKeys, restoredProof, savedGameId, savedName);
+      setPlayerKeys(restoredKeys, restoredProof, savedGameId || '', savedName || '');
       console.log('[PlayerContext] Player session restored successfully!');
       return true;
     } catch (e) {
@@ -152,6 +160,9 @@ const PlayerProvider = ({ children }) => {
       return false;
     }
   }, [setPlayerKeys]);
+
+  restoreSessionRef.current = restoreSession;
+  getPlayerKeysRef.current = getPlayerKeys;
 
   useEffect(() => {
     console.log('[PlayerContext] Context updated:', {
@@ -183,5 +194,5 @@ const PlayerProvider = ({ children }) => {
   );
 };
 
-export { PlayerContext, ensureWasmReady, parsePkProof };
+export { PlayerContext, ensureWasmReady, parsePkProof, wasmClientPlayer };
 export default PlayerProvider;

@@ -31,6 +31,15 @@ impl Suit {
         }
     }
 
+    pub fn short_name_lower(&self) -> &'static str {
+        match self {
+            Self::Club => "c",
+            Self::Diamond => "d",
+            Self::Heart => "h",
+            Self::Spade => "s",
+        }
+    }
+
     pub fn is_red(&self) -> bool {
         matches!(self, Self::Diamond | Self::Heart)
     }
@@ -169,7 +178,7 @@ impl PlayingCard {
 
 impl fmt::Display for PlayingCard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.rank.symbol(), self.suit.symbol())
+        write!(f, "{}{}", self.suit.short_name_lower(),self.rank.symbol() )
     }
 }
 

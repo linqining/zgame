@@ -1,13 +1,13 @@
 use crate::crypto::{
     ElGamalCiphertext, Plaintext, Scalar, EcPoint, PublicKey,
-    BASE_G, N_CARDS, encrypt_batch,
+    BASE_G, BASE_H, N_CARDS, encrypt_batch,
 };
 use crate::z_poker::convert::{hex_to_scalar,scalar_to_hex, ecpoint_to_hex, hex_to_ecpoint};
 use crate::zk_shuffle::{ShuffleProof};
 use crate::card_reveal::{
     ExpelOrProof, ExpelProof, VerificationError, Transcript, RevealTokenProof,
 };
-use crate::zk_shuffle::remask_proof::RemaskProof;
+use crate::zk_shuffle::remask_proof::{RemaskProof,remask_ciphertext};
 use super::card::{PlayingCard, standard_deck};
 use super::key_manager::{KeyManager, PKOwnershipProof};
 use ff::Field;
@@ -74,6 +74,11 @@ impl ClientPlayer {
         let token = self.generate_reveal_token(ct);
         let other_tokens_sum = other_tokens.iter().sum::<EcPoint>();
         PlayingCard::from_plaintext(&(token.encrypted_card.c2 - token.reveal_token - other_tokens_sum))
+    }
+
+    pub fn decrypt_readable_card(&self, ct: &ElGamalCiphertext) -> Option<PlayingCard> {
+        let token = self.generate_reveal_token(ct);
+        PlayingCard::from_plaintext(&(token.encrypted_card.c2 - token.reveal_token))
     }
 
     pub fn generate_pk_proof(&self) -> PKOwnershipProof {
@@ -278,12 +283,14 @@ pub struct RevealState {
     pub reveal_tokens: Vec<RevealTokenSimple>, // 每个玩家的reveal_token
 }
 
+//todo user flod, add is_leave state
 #[derive(Debug, Clone)]
 pub struct PlayerState {
     pub pk_hex: String,
     pub pk: PublicKey,
     pub hand_encrypted: Vec<PlayerEncryptedCard>,
 }
+
 
 #[derive(Debug)]
 pub struct ShuffleRound {
@@ -361,9 +368,9 @@ impl MaskAndShuffleRound {
     ) -> Self {
         let mut mask_cards = vec![];
         for i in 0..input_cards.len() {
-            let mut mask_card = input_cards[i].clone();
-            mask_card.c2 = mask_card.c2 + mask_card.c1*player_sk;
-            mask_cards.push(mask_card);
+            let  mask_card = input_cards[i].clone();
+            let remask_card = remask_ciphertext(&mask_card, &player_sk, player_pk, rng);
+            mask_cards.push(remask_card);
         }
         let remask_proof = RemaskProof::prove(&input_cards, &mask_cards, &player_sk,player_pk);
         let shuffle_round = ShuffleRound::execute(&mask_cards, share_pk, rng);
@@ -384,10 +391,23 @@ pub struct PlayerEncryptedCard {
     pub playing_card: Option<PlayingCard>,
 }
 
+impl PlayerEncryptedCard {
+    fn get_readable_card(&self,user_pk: PublicKey) -> Option<ElGamalCiphertext> {
+        if self.reveal_state.pending_players.contains(&user_pk) && self.reveal_state.pending_players.len()==1{
+            let sum_token: EcPoint = self.reveal_state.reveal_tokens.iter().map(|t| t.reveal_token).sum();
+            let mut readable_card = self.encrypted_card.clone();
+            readable_card.c2 -= sum_token;
+            Some(readable_card)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DealResult {
     pub player_pk: String,
-    pub encrypted_cards: Vec<PlayerEncryptedCard>,
+    pub encrypted_cards: Vec<ElGamalCiphertext>,
 }
 
 #[derive(Debug)]
@@ -483,7 +503,6 @@ pub struct ExpelStateResponse {
 #[derive(Debug)]
 pub struct MentalPokerGame {
     pub config: GameConfig,
-    pub phase: GamePhase,
     pub key_manager: KeyManager,
     pub players: HashMap<String, PlayerState>,
     pub deck_plaintext: Vec<Plaintext>,
@@ -516,7 +535,6 @@ impl MentalPokerGame {
         let n_community = config.community_cards;
         Self {
             config,
-            phase: GamePhase::Setup,
             key_manager: KeyManager::new(),
             players: HashMap::new(),
             deck_plaintext,
@@ -540,7 +558,6 @@ impl MentalPokerGame {
             ciper_text.c2=c.clone();
             ciper_text
         }).collect();
-        self.phase = GamePhase::Setup;
         self.deck_encrypted = initial_encrypt_deck;
         self.shuffle_rounds.clear();
         self.deal_results.clear();
@@ -565,6 +582,25 @@ impl MentalPokerGame {
         self.players.get(&pk_hex_ref).unwrap()
     }
 
+    pub fn list_unreveal_community_cards_encrypted(&self) -> Vec<PlayerEncryptedCard> {
+        self.community_cards_encrypted.iter().filter(|c| !c.playing_card.is_some()).map(|c| c.clone()).collect()
+    }
+
+    pub fn list_revealed_cards(&self) -> (HashMap<String,Vec<PlayingCard>>, Vec<PlayingCard>) {
+        let mut player_revealed_map = HashMap::new();
+        let comm_revealed_cards = self.community_cards_encrypted.iter().filter(|c| c.playing_card.is_some()).map(|c| c.playing_card.unwrap()).collect();
+        for (pk,p) in self.players.iter() {
+            let revealed_cards = p.hand_encrypted.iter().filter(|c| c.playing_card.is_some()).map(|c| c.playing_card.unwrap()).collect();
+            player_revealed_map.insert(pk.clone(), revealed_cards);
+        }
+        (player_revealed_map, comm_revealed_cards)
+    }
+
+    pub fn list_revealed_community_cards(&self) -> Vec<PlayingCard> {
+        let comm_revealed_cards = self.community_cards_encrypted.iter().filter(|c| c.playing_card.is_some()).map(|c| c.playing_card.unwrap()).collect();
+        comm_revealed_cards
+    }
+
     pub fn leave_player(&mut self, player_pk: &str) -> Result<(), VerificationError> {
         if !self.players.contains_key(player_pk) {
             return Err(VerificationError::NoCardsReplaced);
@@ -578,20 +614,16 @@ impl MentalPokerGame {
     }
 
     pub fn encrypt_deck(&mut self) {
-        assert_eq!(self.phase, GamePhase::Setup);
         let mut rng = OsRng;
         self.deck_encrypted = encrypt_batch(&self.deck_plaintext, &self.key_manager.get_aggregated_pk(), &mut rng);
-        self.phase = GamePhase::Shuffling;
     }
 
     pub fn start_shuffle(&mut self) {
-        self.phase = GamePhase::Shuffling;
     }
 
     pub fn submit_shuffle(&mut self, player_pk: &str, round: ShuffleRound) -> Result<(), VerificationError> {
-        assert_eq!(self.phase, GamePhase::Shuffling);
         if !self.players.contains_key(player_pk) {
-            return Err(VerificationError::NoCardsReplaced);
+            return Err(VerificationError::PlayerNotFound);
         }
 
         if !round.verify(&self.key_manager.get_aggregated_pk()) {
@@ -603,13 +635,11 @@ impl MentalPokerGame {
         Ok(())
     }
 
+    //todo rmove 
     pub fn complete_shuffle(&mut self) {
-        assert_eq!(self.phase, GamePhase::Shuffling);
-        self.phase = GamePhase::Dealing;
     }
 
     pub fn deal_to_players(&mut self) -> Result<(), VerificationError> {
-        assert_eq!(self.phase, GamePhase::Dealing);
         let n: usize = self.config.num_players;
         let k = self.config.cards_per_player;
         let n_comm = self.config.community_cards;
@@ -622,12 +652,13 @@ impl MentalPokerGame {
         let mut pending_players = self.players.values().map(|p| p.pk.clone()).collect::<Vec<_>>();
         for (_player_pk, player) in &mut self.players {
             let mut card_index = Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted);
+            let mut player_encrypted_cards = Vec::with_capacity(k);
             let mut encrypted_cards = Vec::with_capacity(k);
             for _ in 0..k {
                 if card_index >= self.deck_encrypted.len() {
                     return Err(VerificationError::TooManyCardsReplaced);
                 }
-                encrypted_cards.push(PlayerEncryptedCard {
+                player_encrypted_cards.push(PlayerEncryptedCard {
                     card_index: card_index as u32,
                     encrypted_card: self.deck_encrypted[card_index].clone(),
                     reveal_state: RevealState {
@@ -636,16 +667,51 @@ impl MentalPokerGame {
                     },
                     playing_card: None,
                 });
+                encrypted_cards.push(self.deck_encrypted[card_index].clone());
                 card_index += 1;
             }
-            player.hand_encrypted = encrypted_cards.clone();
+            player.hand_encrypted.extend(player_encrypted_cards);
 
             self.deal_results.push(DealResult {
                 player_pk: player.pk_hex.clone(),
                 encrypted_cards,
             });
         }
-        self.phase = GamePhase::Playing;
+        Ok(())
+    }
+
+    pub fn deal_to_player(&mut self, player_pk: &str, n: usize) -> Result<(), VerificationError> {
+        
+        let pending_players: Vec<EcPoint> = self.players.values().map(|p| p.pk).collect::<Vec<_>>();
+        
+        let player = self.players.get_mut(player_pk)
+            .ok_or(VerificationError::PlayerNotFound)?;
+        
+        let pk_hex = player.pk_hex.clone();
+        let mut card_index = Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted);
+        if card_index + n > self.deck_encrypted.len() {
+            return Err(VerificationError::TooManyCardsReplaced);
+        }
+        let mut player_encrypted_cards = Vec::with_capacity(n);
+        let mut encrypted_cards = Vec::with_capacity(n);
+        for _ in 0..n {
+            player_encrypted_cards.push(PlayerEncryptedCard {
+                card_index: card_index as u32,
+                encrypted_card: self.deck_encrypted[card_index].clone(),
+                reveal_state: RevealState {
+                    pending_players: pending_players.clone(),
+                    reveal_tokens: Vec::new(),
+                },
+                playing_card: None,
+            });
+            encrypted_cards.push(self.deck_encrypted[card_index].clone());
+            card_index += 1;
+        }
+        player.hand_encrypted.extend(player_encrypted_cards);
+        self.deal_results.push(DealResult {
+            player_pk: pk_hex,
+            encrypted_cards,
+        });
         Ok(())
     }
 
@@ -677,7 +743,6 @@ impl MentalPokerGame {
                 playing_card: None,
             });
         }
-        tracing::debug!("[deal_community_cards_encrypted] deal {:?} community cards", encrypted_cards.clone());
         encrypted_cards
     }
 
@@ -798,7 +863,6 @@ impl MentalPokerGame {
         let revealed_plaintext = token.encrypted_card.c2 - token.reveal_token;
         self.community_cards[comm_index] = Some(token.clone());
         self.revealed_cards.insert(deck_index, revealed_plaintext);
-        self.phase = GamePhase::Reveal;
         Ok(())
     }
 
@@ -937,8 +1001,7 @@ impl MentalPokerGame {
 
     pub fn get_game_state_summary(&self) -> String {
         format!(
-            "MentalPokerGame(phase={:?}, players={}, shuffles={}, dealt={}, community_revealed={}/{}, expelled={}, entrusted={})",
-            self.phase,
+            "MentalPokerGame( players={}, shuffles={}, dealt={}, community_revealed={}/{}, expelled={}, entrusted={})",
             self.players.len(),
             self.shuffle_rounds.len(),
             self.deal_results.len(),
@@ -972,7 +1035,6 @@ impl MentalPokerGame {
 
     // 只能给离开了游戏的玩家调用
     pub fn proxy_shuffle_for(&mut self, player_pk: &str) -> Result<(), VerificationError> {
-        assert_eq!(self.phase, GamePhase::Shuffling);
         if !self.players.contains_key(player_pk) {
             return Err(VerificationError::NoCardsReplaced);
         }
@@ -1337,6 +1399,23 @@ impl MentalPokerGame {
             .collect()
     }
 
+    // 用户可解出的tokan
+    pub fn get_player_readable_tokens(
+        &self,
+    ) -> HashMap<String, Vec<ElGamalCiphertext>> {
+        let mut player_map = HashMap::new();
+        for (player_pk,player) in  self.players.clone() {
+            let mut player_readable_cards = Vec::with_capacity(player.hand_encrypted.len());
+            for ct in &player.hand_encrypted {
+                if let Some(readable_card) = ct.get_readable_card(player.pk.clone()) {
+                    player_readable_cards.push(readable_card);
+                }
+            }
+            player_map.insert(player_pk.clone(), player_readable_cards);
+        }
+        player_map
+    }
+
     pub fn unmask_card(
         &self,
         card_ct: &ElGamalCiphertext,
@@ -1360,12 +1439,16 @@ mod tests {
     fn collect_all_tokens(clients: &HashMap<String, ClientPlayer>, target_ct: &ElGamalCiphertext, all_player_pks: &[String]) -> Vec<RevealToken> {
         all_player_pks.iter().map(|pk| clients[pk].generate_reveal_token(target_ct)).collect()
     }
-    fn collect_per_card_tokens(clients: &HashMap<String, ClientPlayer>, hand: &[ElGamalCiphertext], all_player_pks: &[String], exclude_pk: &str) -> Vec<Vec<RevealToken>> {
-        hand.iter().map(|ct|
-            all_player_pks.iter().filter(|pk| pk.as_str() != exclude_pk).map(|pk| clients[pk].generate_reveal_token(ct)).collect()
+    fn collect_per_card_tokens(clients: &HashMap<String, ClientPlayer>, hand: &[PlayerEncryptedCard], all_player_pks: &[String], exclude_pk: &str) -> Vec<Vec<RevealToken>> {
+        hand.iter().map(|card|
+            all_player_pks.iter().filter(|pk| pk.as_str() != exclude_pk).map(|pk| clients[pk].generate_reveal_token(&card.encrypted_card)).collect()
         ).collect()
     }
     fn all_player_pks(game: &MentalPokerGame) -> Vec<String> { game.players.keys().cloned().collect() }
+
+    fn extract_encrypted_cards(hand: &[PlayerEncryptedCard]) -> Vec<ElGamalCiphertext> {
+        hand.iter().map(|card| card.encrypted_card.clone()).collect()
+    }
 
     fn setup_clients(count: usize) -> HashMap<String, ClientPlayer> {
         (0..count).map(|i| (format!("player_{}", i), ClientPlayer::new())).collect()
@@ -1403,7 +1486,9 @@ mod tests {
         let pks: Vec<String> = clients.keys().cloned().collect();
         let h0 = game.get_hand_encrypted(&pks[0]).unwrap();
         let h1 = game.get_hand_encrypted(&pks[1]).unwrap();
-        assert!(clients[&pks[0]].peek_card(&h0[1], &vec![]).unwrap() != clients[&pks[0]].peek_card(&h0[0], &vec![]).unwrap() || clients[&pks[0]].peek_card(&h0[0], &vec![]).unwrap() != clients[&pks[1]].peek_card(&h1[0], &vec![]).unwrap());
+        let h0_ct = extract_encrypted_cards(h0);
+        let h1_ct = extract_encrypted_cards(h1);
+        assert!(clients[&pks[0]].peek_card(&h0_ct[1], &vec![]).unwrap() != clients[&pks[0]].peek_card(&h0_ct[0], &vec![]).unwrap() || clients[&pks[0]].peek_card(&h0_ct[0], &vec![]).unwrap() != clients[&pks[1]].peek_card(&h1_ct[0], &vec![]).unwrap());
         println!("\n✅ Card privacy verified");
     }
 
@@ -1419,8 +1504,9 @@ mod tests {
 
         let pks: Vec<String> = clients.keys().cloned().collect();
         let h0 = game.get_hand_encrypted(&pks[0]).unwrap();
+        let h0_ct = extract_encrypted_cards(h0);
         let agg_pk = game.aggregated_pk();
-        let token_p0 = clients[&pks[0]].reveal_own_card(0, h0, &game.deck_plaintext, &agg_pk).unwrap();
+        let token_p0 = clients[&pks[0]].reveal_own_card(0, &h0_ct, &game.deck_plaintext, &agg_pk).unwrap();
         assert!(game.verify_reveal_token(&token_p0, &pks[0]).unwrap());
         match game.verify_reveal_token(&token_p0, &pks[1]) { Ok(v) => assert!(!v), Err(_) => {} }
         println!("\n✅ Cross-player rejection works");
@@ -1439,8 +1525,9 @@ mod tests {
 
         let pks: Vec<String> = clients.keys().cloned().collect();
         let h3 = game.get_hand_encrypted(&pks[3]).unwrap();
+        let h3_ct = extract_encrypted_cards(h3);
         let p3_tokens = collect_per_card_tokens(&clients, h3, &all_player_pks(&game), &pks[3]);
-        let record = clients[&pks[3]].generate_expel_proof(h3, &game.deck_plaintext, &game.aggregated_pk(), &p3_tokens).expect("Expel P3 proof");
+        let record = clients[&pks[3]].generate_expel_proof(&h3_ct, &game.deck_plaintext, &game.aggregated_pk(), &p3_tokens).expect("Expel P3 proof");
         game.submit_expel(record.clone()).expect("Submit expel");
         assert_eq!(record.expelled_player_pk, pks[3]);
         assert!(game.verify_expel_record(&record).unwrap());
@@ -1459,12 +1546,17 @@ mod tests {
 
         let pks: Vec<String> = clients.keys().cloned().collect();
         let h2 = game.get_hand_encrypted(&pks[2]).unwrap();
+        let h2_ct = extract_encrypted_cards(h2);
         let p2_tokens = collect_per_card_tokens(&clients, h2, &all_player_pks(&game), &pks[2]);
-        game.submit_expel(clients[&pks[2]].generate_expel_proof(h2, &game.deck_plaintext, &game.aggregated_pk(), &p2_tokens).unwrap()).unwrap();
+        game.submit_expel(clients[&pks[2]].generate_expel_proof(&h2_ct, &game.deck_plaintext, &game.aggregated_pk(), &p2_tokens).unwrap()).unwrap();
 
         let h0 = game.get_hand_encrypted(&pks[0]).unwrap();
-        let pt = clients[&pks[0]].peek_card(&h0[0], &vec![]).unwrap();
-        if !game.is_valid_deck_plaintext(&pt) { let new_pt = game.redeal_to_player(&pks[0], 0, pt).expect("redeal"); assert!(game.is_valid_deck_plaintext(&new_pt)); }
+        let h0_ct = extract_encrypted_cards(h0);
+        let pt = clients[&pks[0]].peek_card(&h0_ct[0], &vec![]).unwrap();
+        if !game.is_valid_deck_plaintext(&pt) { 
+            let new_ct = game.redeal_to_player(&pks[0], 0, pt).expect("redeal"); 
+            assert!(new_ct.is_valid()); 
+        }
         println!("\n✅ Redeal after expel works!");
     }
 
@@ -1490,11 +1582,13 @@ mod tests {
 
         let pks: Vec<String> = clients.keys().cloned().collect();
         let h3 = game.get_hand_encrypted(&pks[3]).unwrap();
+        let h3_ct = extract_encrypted_cards(h3);
         let p3t = collect_per_card_tokens(&clients, h3, &all_player_pks(&game), &pks[3]);
-        game.submit_expel(clients[&pks[3]].generate_expel_proof(h3, &game.deck_plaintext, &game.aggregated_pk(), &p3t).unwrap()).unwrap();
+        game.submit_expel(clients[&pks[3]].generate_expel_proof(&h3_ct, &game.deck_plaintext, &game.aggregated_pk(), &p3t).unwrap()).unwrap();
         let h2 = game.get_hand_encrypted(&pks[2]).unwrap();
+        let h2_ct = extract_encrypted_cards(h2);
         let t2 = collect_per_card_tokens(&clients, h2, &all_player_pks(&game), &pks[2]);
-        game.submit_expel(clients[&pks[2]].generate_expel_proof(h2, &game.deck_plaintext, &game.aggregated_pk(), &t2).unwrap()).unwrap();
+        game.submit_expel(clients[&pks[2]].generate_expel_proof(&h2_ct, &game.deck_plaintext, &game.aggregated_pk(), &t2).unwrap()).unwrap();
         assert_eq!(game.expelled_players.len(), 2);
         println!("\n✅ Multi-expel works!");
     }
@@ -1511,8 +1605,9 @@ mod tests {
 
         let pks: Vec<String> = clients.keys().cloned().collect();
         let h2 = game.get_hand_encrypted(&pks[2]).unwrap();
+        let h2_ct = extract_encrypted_cards(h2);
         let t2 = collect_per_card_tokens(&clients, h2, &all_player_pks(&game), &pks[2]);
-        let record = clients[&pks[2]].generate_expel_proof(h2, &game.deck_plaintext, &game.aggregated_pk(), &t2).expect("depart proof");
+        let record = clients[&pks[2]].generate_expel_proof(&h2_ct, &game.deck_plaintext, &game.aggregated_pk(), &t2).expect("depart proof");
         game.submit_depart(record, &clients[&pks[2]].sk).expect("depart submit");
         assert_eq!(game.expelled_players.last().map(|s| s.as_str()), Some("player_2"));
         println!("\n✅ Depart with SK works!");
@@ -1530,8 +1625,9 @@ mod tests {
 
         let pks: Vec<String> = clients.keys().cloned().collect();
         let h1 = game.get_hand_encrypted(&pks[1]).unwrap();
+        let h1_ct = extract_encrypted_cards(h1);
         let t1 = collect_per_card_tokens(&clients, h1, &all_player_pks(&game), &pks[1]);
-        assert!(game.submit_depart(clients[&pks[1]].generate_expel_proof(h1, &game.deck_plaintext, &game.aggregated_pk(), &t1).unwrap(), &Scalar::random(&mut OsRng)).is_err());
+        assert!(game.submit_depart(clients[&pks[1]].generate_expel_proof(&h1_ct, &game.deck_plaintext, &game.aggregated_pk(), &t1).unwrap(), &Scalar::random(&mut OsRng)).is_err());
         println!("\n✅ Wrong SK rejected");
     }
 
@@ -1560,8 +1656,9 @@ mod tests {
         game_a.deal_to_players().unwrap();
         let pks_a: Vec<String> = ca.keys().cloned().collect();
         let ha3 = game_a.get_hand_encrypted(&pks_a[3]).unwrap();
+        let ha3_ct = extract_encrypted_cards(ha3);
         let ta3 = collect_per_card_tokens(&ca, ha3, &all_player_pks(&game_a), &pks_a[3]);
-        let r_expel = ca[&pks_a[3]].generate_expel_proof(ha3, &game_a.deck_plaintext, &game_a.aggregated_pk(), &ta3).expect("expel");
+        let r_expel = ca[&pks_a[3]].generate_expel_proof(&ha3_ct, &game_a.deck_plaintext, &game_a.aggregated_pk(), &ta3).expect("expel");
         game_a.submit_expel(r_expel.clone());
 
         let mut game_b = MentalPokerGame::new(cfg);
@@ -1573,8 +1670,9 @@ mod tests {
         game_b.deal_to_players().unwrap();
         let pks_b: Vec<String> = cb.keys().cloned().collect();
         let hb2 = game_b.get_hand_encrypted(&pks_b[2]).unwrap();
+        let hb2_ct = extract_encrypted_cards(hb2);
         let tb2 = collect_per_card_tokens(&cb, hb2, &all_player_pks(&game_b), &pks_b[2]);
-        let r_depart = cb[&pks_b[2]].generate_expel_proof(hb2, &game_b.deck_plaintext, &game_b.aggregated_pk(), &tb2).expect("depart");
+        let r_depart = cb[&pks_b[2]].generate_expel_proof(&hb2_ct, &game_b.deck_plaintext, &game_b.aggregated_pk(), &tb2).expect("depart");
         game_b.submit_depart(r_depart.clone(), &cb[&pks_b[2]].sk);
 
         assert!(game_a.verify_expel_record(&r_expel).unwrap());
@@ -1705,5 +1803,247 @@ mod tests {
         assert!(!proof_valid, "Tampered output should fail shuffle verification");
 
         println!("\n✅ Tampered output correctly rejected!");
+    }
+
+    #[test]
+    fn test_mask_and_shuffle_round_basic() {
+        let mut rng = OsRng;
+        let player_sk = Scalar::random(&mut rng);
+        let player_pk = *BASE_G * player_sk;
+        let share_pk = *BASE_G * Scalar::random(&mut rng);
+
+        let plaintexts: Vec<EcPoint> = (0..N_CARDS)
+            .map(|i| *BASE_H * Scalar::from(i as u64))
+            .collect();
+        let r_values: Vec<Scalar> = (0..N_CARDS)
+            .map(|_| Scalar::random(&mut rng))
+            .collect();
+        let input_cards: Vec<ElGamalCiphertext> = (0..N_CARDS)
+            .map(|i| ElGamalCiphertext::encrypt(&plaintexts[i], &share_pk, &r_values[i]))
+            .collect();
+
+        let result = MaskAndShuffleRound::execute(
+            &input_cards,
+            &share_pk,
+            player_sk.clone(),
+            &player_pk,
+            &mut rng,
+        );
+
+        assert_eq!(result.mask_cards.len(), N_CARDS);
+        assert_eq!(result.output_cards.len(), N_CARDS);
+        assert!(result.remask_proof.verify(&input_cards, &result.mask_cards, &player_pk));
+
+        println!("\n✅ MaskAndShuffleRound basic test passed!");
+    }
+
+    #[test]
+    fn test_mask_and_shuffle_round_with_identity_c1() {
+        let mut rng = OsRng;
+        let player_sk = Scalar::random(&mut rng);
+        let player_pk = *BASE_G * player_sk;
+        let share_pk = *BASE_G * Scalar::random(&mut rng);
+
+        let input_cards: Vec<ElGamalCiphertext> = (0..N_CARDS)
+            .map(|i| ElGamalCiphertext {
+                c1: EcPoint::IDENTITY,
+                c2: *BASE_H * Scalar::from(i as u64),
+                c3: EcPoint::IDENTITY,
+            })
+            .collect();
+
+        let result = MaskAndShuffleRound::execute(
+            &input_cards,
+            &share_pk,
+            player_sk.clone(),
+            &player_pk,
+            &mut rng,
+        );
+
+        assert_eq!(result.mask_cards.len(), N_CARDS);
+        assert_eq!(result.output_cards.len(), N_CARDS);
+
+        for ct in &result.mask_cards {
+            assert_ne!(ct.c1, EcPoint::IDENTITY, "mask_cards should have non-identity c1 after re-encryption");
+        }
+
+        assert!(result.proof.verify(&result.mask_cards, &result.output_cards, &share_pk));
+
+        println!("\n✅ MaskAndShuffleRound with identity c1 test passed!");
+    }
+
+    #[test]
+    fn test_mask_and_shuffle_round_output_different_from_input() {
+        let mut rng = OsRng;
+        let player_sk = Scalar::random(&mut rng);
+        let player_pk = *BASE_G * player_sk;
+        let share_pk = *BASE_G * Scalar::random(&mut rng);
+
+        let plaintexts: Vec<EcPoint> = (0..N_CARDS)
+            .map(|i| *BASE_H * Scalar::from(i as u64))
+            .collect();
+        let r_values: Vec<Scalar> = (0..N_CARDS)
+            .map(|_| Scalar::random(&mut rng))
+            .collect();
+        let input_cards: Vec<ElGamalCiphertext> = (0..N_CARDS)
+            .map(|i| ElGamalCiphertext::encrypt(&plaintexts[i], &share_pk, &r_values[i]))
+            .collect();
+
+        let result = MaskAndShuffleRound::execute(
+            &input_cards,
+            &share_pk,
+            player_sk.clone(),
+            &player_pk,
+            &mut rng,
+        );
+
+        let mut input_set = std::collections::HashSet::new();
+        for ct in &input_cards {
+            input_set.insert(ct.c1.to_affine().to_bytes().to_vec());
+        }
+        let mut output_set = std::collections::HashSet::new();
+        for ct in &result.output_cards {
+            output_set.insert(ct.c1.to_affine().to_bytes().to_vec());
+        }
+
+        assert_ne!(input_set, output_set, "Output should be shuffled/masked differently");
+
+        println!("\n✅ MaskAndShuffleRound output differs from input!");
+    }
+
+    #[test]
+    fn test_mask_and_shuffle_round_wrong_pk_fails() {
+        let mut rng = OsRng;
+        let player_sk = Scalar::random(&mut rng);
+        let player_pk = *BASE_G * player_sk;
+        let wrong_sk = Scalar::random(&mut rng);
+        let wrong_pk = *BASE_G * wrong_sk;
+        let share_pk = *BASE_G * Scalar::random(&mut rng);
+
+        let plaintexts: Vec<EcPoint> = (0..N_CARDS)
+            .map(|i| *BASE_H * Scalar::from(i as u64))
+            .collect();
+        let r_values: Vec<Scalar> = (0..N_CARDS)
+            .map(|_| Scalar::random(&mut rng))
+            .collect();
+        let input_cards: Vec<ElGamalCiphertext> = (0..N_CARDS)
+            .map(|i| ElGamalCiphertext::encrypt(&plaintexts[i], &share_pk, &r_values[i]))
+            .collect();
+
+        let result = MaskAndShuffleRound::execute(
+            &input_cards,
+            &share_pk,
+            player_sk.clone(),
+            &player_pk,
+            &mut rng,
+        );
+
+        assert!(!result.remask_proof.verify(&input_cards, &result.mask_cards, &wrong_pk),
+            "Verification with wrong pk should fail");
+
+        println!("\n✅ Wrong pk correctly rejected!");
+    }
+
+    #[test]
+    fn test_mask_and_shuffle_round_tampered_mask_cards_fails() {
+        let mut rng = OsRng;
+        let player_sk = Scalar::random(&mut rng);
+        let player_pk = *BASE_G * player_sk;
+        let share_pk = *BASE_G * Scalar::random(&mut rng);
+
+        let plaintexts: Vec<EcPoint> = (0..N_CARDS)
+            .map(|i| *BASE_H * Scalar::from(i as u64))
+            .collect();
+        let r_values: Vec<Scalar> = (0..N_CARDS)
+            .map(|_| Scalar::random(&mut rng))
+            .collect();
+        let input_cards: Vec<ElGamalCiphertext> = (0..N_CARDS)
+            .map(|i| ElGamalCiphertext::encrypt(&plaintexts[i], &share_pk, &r_values[i]))
+            .collect();
+
+        let result = MaskAndShuffleRound::execute(
+            &input_cards,
+            &share_pk,
+            player_sk.clone(),
+            &player_pk,
+            &mut rng,
+        );
+
+        let mut tampered_mask_cards = result.mask_cards.clone();
+        if tampered_mask_cards.len() > 1 {
+            tampered_mask_cards.swap(0, 1);
+        }
+
+        assert!(!result.remask_proof.verify(&input_cards, &tampered_mask_cards, &player_pk),
+            "Tampered mask cards should fail verification");
+
+        println!("\n✅ Tampered mask cards correctly rejected!");
+    }
+
+    #[test]
+    fn test_mask_and_shuffle_round_shuffle_proof_valid() {
+        let mut rng = OsRng;
+        let player_sk = Scalar::random(&mut rng);
+        let player_pk = *BASE_G * player_sk;
+        let share_pk = *BASE_G * Scalar::random(&mut rng);
+
+        let plaintexts: Vec<EcPoint> = (0..N_CARDS)
+            .map(|i| *BASE_H * Scalar::from(i as u64))
+            .collect();
+        let r_values: Vec<Scalar> = (0..N_CARDS)
+            .map(|_| Scalar::random(&mut rng))
+            .collect();
+        let input_cards: Vec<ElGamalCiphertext> = (0..N_CARDS)
+            .map(|i| ElGamalCiphertext::encrypt(&plaintexts[i], &share_pk, &r_values[i]))
+            .collect();
+
+        let result = MaskAndShuffleRound::execute(
+            &input_cards,
+            &share_pk,
+            player_sk.clone(),
+            &player_pk,
+            &mut rng,
+        );
+
+        assert!(result.proof.verify(&result.mask_cards, &result.output_cards, &share_pk),
+            "Shuffle proof should be valid");
+
+        println!("\n✅ Shuffle proof is valid!");
+    }
+
+    #[test]
+    fn test_mask_and_shuffle_round_tampered_output_fails_shuffle_proof() {
+        let mut rng = OsRng;
+        let player_sk = Scalar::random(&mut rng);
+        let player_pk = *BASE_G * player_sk;
+        let share_pk = *BASE_G * Scalar::random(&mut rng);
+
+        let plaintexts: Vec<EcPoint> = (0..N_CARDS)
+            .map(|i| *BASE_H * Scalar::from(i as u64))
+            .collect();
+        let r_values: Vec<Scalar> = (0..N_CARDS)
+            .map(|_| Scalar::random(&mut rng))
+            .collect();
+        let input_cards: Vec<ElGamalCiphertext> = (0..N_CARDS)
+            .map(|i| ElGamalCiphertext::encrypt(&plaintexts[i], &share_pk, &r_values[i]))
+            .collect();
+
+        let result = MaskAndShuffleRound::execute(
+            &input_cards,
+            &share_pk,
+            player_sk.clone(),
+            &player_pk,
+            &mut rng,
+        );
+
+        let mut tampered_output = result.output_cards.clone();
+        if tampered_output.len() > 1 {
+            tampered_output.swap(0, 1);
+        }
+
+        assert!(!result.proof.verify(&result.mask_cards, &tampered_output, &share_pk),
+            "Tampered output should fail shuffle proof verification");
+
+        println!("\n✅ Tampered output correctly rejected by shuffle proof!");
     }
 }

@@ -3,6 +3,7 @@ use ff::Field;
 use group::Group;
 use rand_core::RngCore;
 
+
 #[derive(Debug, Clone, PartialEq,Copy)]
 pub struct ElGamalCiphertextV2 {
     pub c1: EcPoint,

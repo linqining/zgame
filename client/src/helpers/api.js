@@ -10,8 +10,8 @@ export const gameApi = {
     axios.post(`${API_BASE}/games/${gameId}/shuffle`, data),
 
   joinAndShuffle: (gameId, data) =>
-    axios.post(`${API_BASE}/games/${gameId}/join-and-shuffle`, data),
-
+    axios.post(`${API_BASE}/tables/${gameId}/join-and-shuffle`, data),
+  
   playerAction: (gameId, data) =>
     axios.post(`${API_BASE}/games/${gameId}/action`, data),
 

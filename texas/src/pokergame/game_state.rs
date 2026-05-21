@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::os::raw::c_uint;
 
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use poker_protocol::z_poker::convert::ecpoint_to_hex;
 use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Scalar};
-use poker_protocol::z_poker::PKOwnershipProof;
+use poker_protocol::z_poker::key_manager::PKOwnershipProof;
 use poker_protocol::z_poker::protocol::MaskAndShuffleRound;
 use poker_protocol::zk_shuffle::remask_proof::RemaskProof;
 use poker_protocol::zk_shuffle::{ShuffleProof, ZKConsistencyProof};
@@ -49,7 +51,7 @@ pub enum RevealPhase {
     #[default]
     HandReveal,
     CommunityReveal,
-    ShowDownReveal,
+    ShowdownReveal,
 }
 
 impl std::fmt::Display for RevealPhase {
@@ -57,7 +59,7 @@ impl std::fmt::Display for RevealPhase {
         match self {
             RevealPhase::HandReveal => write!(f, "hand_reveal"),
             RevealPhase::CommunityReveal => write!(f, "community_reveal"),
-            RevealPhase::ShowDownReveal => write!(f, "show_down_reveal"),
+            RevealPhase::ShowdownReveal => write!(f, "show_down_reveal"),
         }
     }
 }
@@ -103,11 +105,53 @@ impl RevealTokenState {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct PlayerRevealAssignment {
-    pub hand_card_indices: Vec<usize>,
-    pub community_card_indices: Vec<usize>,
+    pub hand_card: Vec<ElGamalCiphertext>,
+    pub community_card: Vec<ElGamalCiphertext>,
 }
+
+impl Serialize for PlayerRevealAssignment {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(2))?;
+        let hand_card_jsons: Vec<ElGamalCiphertextJson> = self.hand_card.iter().map(|c_uint|ElGamalCiphertextJson::from_ciphertext(c_uint)).collect();
+        map.serialize_entry("hand_card", &hand_card_jsons)?;
+        let community_card_jsons:Vec<ElGamalCiphertextJson> = self.community_card.iter().map(|c_uint|ElGamalCiphertextJson::from_ciphertext(c_uint)).collect();
+        map.serialize_entry("community_card", &community_card_jsons)?;
+        map.end()
+    }   
+}
+
+impl<'de> Deserialize<'de> for PlayerRevealAssignment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            hand_card: Vec<ElGamalCiphertextJson>,
+            community_card: Vec<ElGamalCiphertextJson>,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        let hand_card = helper.hand_card.into_iter()
+            .map(|json| json.to_ciphertext().map_err(serde::de::Error::custom))
+            .collect::<Result<Vec<_>, _>>()?;
+        let community_card = helper.community_card.into_iter()
+            .map(|json| json.to_ciphertext().map_err(serde::de::Error::custom))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            hand_card,
+            community_card,
+        })
+    }
+}
+
+
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub enum ExpelPhase {
@@ -217,7 +261,7 @@ pub struct ShufflePublicState {
     pub deck_encrypted: Vec<ElGamalCiphertextJson>,
 }
 
-fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
+pub fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
     let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
     match EcPoint::from_bytes(bytes.as_slice().into()).into_option() {
         Some(p) => Ok(p),
@@ -393,4 +437,30 @@ impl MaskAndShuffleRoundJson {
             remask_proof: self.remask_proof.to_remask_proof()?,
         })
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RevealTokenProofJson {
+    pub user_public_key_hex: String,
+    pub commitment_t1_hex: String,
+    pub commitment_t2_hex: String,
+    pub response_s_hex: String,
+}
+
+impl RevealTokenProofJson {
+    pub fn to_proof(&self) -> Result<poker_protocol::card_reveal::RevealTokenProof, String> {
+        Ok(poker_protocol::card_reveal::RevealTokenProof {
+            user_public_key: hex_to_ecpoint(&self.user_public_key_hex)?,
+            commitment_t1: hex_to_ecpoint(&self.commitment_t1_hex)?,
+            commitment_t2: hex_to_ecpoint(&self.commitment_t2_hex)?,
+            response_s: hex_to_scalar(&self.response_s_hex)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SubmitRevealTokenJson {
+    pub encrypted_card: ElGamalCiphertextJson,
+    pub reveal_token_proof: RevealTokenProofJson,
+    pub reveal_token_hex: String,
 }
