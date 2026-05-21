@@ -1,14 +1,15 @@
 use wasm_bindgen::prelude::*;
 use serde::{Serialize, Deserialize};
-use z_game::z_poker::protocol::ClientPlayer;
-use z_game::z_poker::protocol::{JoinGameAndShuffleRound,MaskAndShuffleRound};
-use z_game::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext};
-use z_game::card_reveal::VerificationError;
-use z_game::crypto::types::BASE_G;
+use poker_protocol::z_poker::protocol::ClientPlayer;
+use poker_protocol::z_poker::protocol::{JoinGameAndShuffleRound,MaskAndShuffleRound};
+use poker_protocol::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext};
+use poker_protocol::card_reveal::VerificationError;
+use poker_protocol::crypto::types::BASE_G;
 use rand_core::OsRng;
 use ff::{Field, PrimeField};
 use elliptic_curve::group::GroupEncoding;
 use serde_wasm_bindgen;
+use poker_protocol::card_reveal;
 
 #[wasm_bindgen]
 extern "C" {
@@ -95,7 +96,7 @@ fn json_to_ct_vec(json_str: &str) -> Result<Vec<ElGamalCiphertext>, String> {
     Ok(result)
 }
 
-fn reveal_token_proof_to_json(proof: &z_game::card_reveal::RevealTokenProof) -> String {
+fn reveal_token_proof_to_json(proof: &card_reveal::RevealTokenProof) -> String {
     format!(
         r#"{{"user_public_key_hex":"{}","commitment_t1_hex":"{}","commitment_t2_hex":"{}","response_s_hex":"{}"}}"#,
         ecpoint_to_hex(&proof.user_public_key),
@@ -105,10 +106,10 @@ fn reveal_token_proof_to_json(proof: &z_game::card_reveal::RevealTokenProof) -> 
     )
 }
 
-fn json_to_reveal_token_proof(json_str: &str) -> Result<z_game::card_reveal::RevealTokenProof, String> {
+fn json_to_reveal_token_proof(json_str: &str) -> Result<card_reveal::RevealTokenProof, String> {
     let val: serde_json::Value = serde_json::from_str(json_str)
         .map_err(|e| format!("JSON parse error: {}", e))?;
-    Ok(z_game::card_reveal::RevealTokenProof {
+    Ok(card_reveal::RevealTokenProof {
         user_public_key: hex_to_ecpoint(val["user_public_key"].as_str().unwrap_or(""))?,
         commitment_t1: hex_to_ecpoint(val["commitment_t1"].as_str().unwrap_or(""))?,
         commitment_t2: hex_to_ecpoint(val["commitment_t2"].as_str().unwrap_or(""))?,
@@ -198,7 +199,7 @@ impl WasmClientPlayer {
             Err(e) => return Err(JsValue::from_str(&format!("JSON error: {}", e))),
         };
 
-        use z_game::z_poker::protocol::RevealToken as RT;
+        use poker_protocol::z_poker::protocol::RevealToken as RT;
         let mut tokens: Vec<RT> = vec![];
         for tval in &tokens_arr {
             let encrypted_card = match json_to_ct(&tval.to_string()) {
@@ -267,7 +268,7 @@ impl WasmClientPlayer {
             Err(e) => return Err(JsValue::from_str(&e)),
         };
 
-        let token = z_game::z_poker::protocol::RevealToken {
+        let token = poker_protocol::z_poker::protocol::RevealToken {
             user_public_key: hex_to_ecpoint(val["user_public_key_hex"].as_str().unwrap_or(""))?,
             encrypted_card,
             proof,
@@ -285,11 +286,48 @@ impl WasmClientPlayer {
 
         let round = self.inner.shuffle(&deck, &agg_pk);
 
+        let zk_consistency_json = format!(
+            r#"{{"d1_hex":"{}","d2_hex":"{}","a_g_hex":"{}","a_pk_hex":"{}","s_hex":"{}"}}"#,
+            ecpoint_to_hex(&round.proof.zk_consistency.d1),
+            ecpoint_to_hex(&round.proof.zk_consistency.d2),
+            ecpoint_to_hex(&round.proof.zk_consistency.a_g),
+            ecpoint_to_hex(&round.proof.zk_consistency.a_pk),
+            scalar_to_hex(&round.proof.zk_consistency.s),
+        );
+
+        let triple_dleq_json = format!(
+            r#"{{"a_g_hex":"{}","a_pk_hex":"{}","a_h_hex":"{}","s_hex":"{}"}}"#,
+            ecpoint_to_hex(&round.proof.triple_dleq.A_g),
+            ecpoint_to_hex(&round.proof.triple_dleq.A_pk),
+            ecpoint_to_hex(&round.proof.triple_dleq.A_h),
+            scalar_to_hex(&round.proof.triple_dleq.s),
+        );
+
+        let product_arg_json = format!(
+            r#"{{"a_hex":"{}","b_hex":"{}","c_hex":"{}","d_hex":"{}","s_hex":"{}","t_hex":"{}"}}"#,
+            ecpoint_to_hex(&round.proof.product_arg.A),
+            ecpoint_to_hex(&round.proof.product_arg.B),
+            ecpoint_to_hex(&round.proof.product_arg.C),
+            ecpoint_to_hex(&round.proof.product_arg.D),
+            scalar_to_hex(&round.proof.product_arg.s),
+            scalar_to_hex(&round.proof.product_arg.t),
+        );
+
+        let shuffle_proof_json = format!(
+            r#"{{"zk_consistency":{},"triple_dleq":{},"product_arg":{},"global_challenge_hex":"{}","nonce_hex":"{}"}}"#,
+            zk_consistency_json,
+            triple_dleq_json,
+            product_arg_json,
+            scalar_to_hex(&round.proof.global_challenge),
+            scalar_to_hex(&round.proof.nonce),
+        );
+
         let s = format!(
-            r#"{{"player_pk":"{}","input_cards":{},"output_cards":{}}}"#,
+            r#"{{"player_pk":"{}","input_cards":{},"output_cards":{},"shuffle_proof":{}}}"#,
             ecpoint_to_hex(&self.inner.pk),
             ct_vec_to_json(&round.input_cards),
             ct_vec_to_json(&round.output_cards),
+            shuffle_proof_json,
         );
         Ok(json_val_to_jsvalue(s))
     }
@@ -389,7 +427,7 @@ impl WasmClientPlayer {
             Err(e) => return Err(JsValue::from_str(&format!("JSON parse error: {}", e))),
         };
 
-        let proof = z_game::zk_shuffle::remask_proof::RemaskProof {
+        let proof = poker_protocol::zk_shuffle::remask_proof::RemaskProof {
             A: hex_to_ecpoint(proof_val["a_hex"].as_str().unwrap_or(""))?,
             B: hex_to_ecpoint(proof_val["b_hex"].as_str().unwrap_or(""))?,
             sum_c1: hex_to_ecpoint(proof_val["sum_c1_hex"].as_str().unwrap_or(""))?,
@@ -476,7 +514,7 @@ impl WasmClientPlayer {
             }
         };
 
-        use z_game::z_poker::protocol::RevealToken as RT;
+        use poker_protocol::z_poker::protocol::RevealToken as RT;
         let mut per_card_tokens: Vec<Vec<RT>> = vec![];
         for card_tokens in &tokens_outer {
             let mut card_token_vec = vec![];
@@ -544,7 +582,7 @@ impl WasmClientPlayer {
             Err(e) => return Err(JsValue::from_str(&format!("JSON error: {}", e))),
         };
 
-        use z_game::z_poker::protocol::RevealToken as RT;
+        use poker_protocol::z_poker::protocol::RevealToken as RT;
         let mut tokens: Vec<RT> = vec![];
         for tval in &tokens_arr {
             let encrypted_card = json_to_ct(&tval.to_string()).map_err(|e| JsValue::from_str(&e))?;

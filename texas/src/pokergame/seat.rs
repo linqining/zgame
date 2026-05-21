@@ -21,6 +21,8 @@ pub struct Seat {
     pub disconnected: bool,
     #[serde(skip)]
     pub disconnected_at: Option<u64>,
+    #[serde(default)]
+    pub is_waiting: bool,
 }
 
 impl Seat {
@@ -39,6 +41,7 @@ impl Seat {
             sitting_out: false,
             disconnected: false,
             disconnected_at: None,
+            is_waiting: false,
         }
     }
 
@@ -102,6 +105,7 @@ impl Seat {
             folded: self.folded,
             last_action: self.last_action.clone(),
             sitting_out: self.sitting_out,
+            is_waiting: self.is_waiting,
         }
     }
 }
@@ -122,4 +126,6 @@ pub struct ClientSeat {
     pub folded: bool,
     pub last_action: Option<String>,
     pub sitting_out: bool,
+    #[serde(default)]
+    pub is_waiting: bool,
 }

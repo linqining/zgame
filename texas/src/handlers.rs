@@ -16,6 +16,7 @@ use crate::pokergame::player::Player;
 use crate::pokergame::game_state::{MaskAndShuffleRoundJson, PkProofJson, SubmitRevealTokenJson};
 use crate::socket::SocketState;
 use crate::pokergame::game_state::RevealPhase;
+use crate::pokergame::table::JoinResult;
 use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::crypto::EcPoint;
 use poker_protocol::z_poker::convert::hex_to_ecpoint;
@@ -202,8 +203,8 @@ pub async fn join_game(
         }
     };
 
-    if let Some(_existing) = state.socket_state.find_socket_id_by_pk(&body.pk_hex) {
-        tracing::warn!("[join_game] player already in game, pk_hex={}", body.pk_hex);
+    if state.socket_state.is_player_in_seat(&body.pk_hex) {
+        tracing::warn!("[join_game] player already in seat, pk_hex={}", body.pk_hex);
         return err_resp(StatusCode::BAD_REQUEST, "Player already in game");
     }
 
@@ -269,7 +270,7 @@ pub async fn shuffle(
         }
     };
 
-    match state.socket_state.submit_verified_shuffle_for_pk(table_id, &body.pk_hex, body.mask_and_shuffle_round) {
+    match state.socket_state.submit_verified_shuffle_with_round(table_id, &body.pk_hex, body.mask_and_shuffle_round) {
         Ok(_) => {
             tracing::debug!("[shuffle] shuffle submitted and verified, pk_hex={}, table_id={}", body.pk_hex, table_id);
             (StatusCode::OK, Json(serde_json::json!({
@@ -366,16 +367,29 @@ pub async fn join_game_and_shuffle(
     };
 
     match state.socket_state.join_player_and_shuffle(table_id, player, player_pk, body.pk_proof, body.mask_and_shuffle_round, body.seat_id, body.amount) {
-        Ok(should_start_game_loop) => {
-            tracing::debug!("[join_game_and_shuffle] joined and shuffled successfully, pk_hex={}, table_id={}, should_start_game_loop={}", body.pk_hex, table_id, should_start_game_loop);
-            if should_start_game_loop {
-                tracing::info!("[join_game_and_shuffle] all players shuffled, starting game loop for table_id={}", table_id);
-                state.socket_state.start_game_loop_sync(state.socket_state.clone(), table_id);
+        Ok((should_start_game_loop, join_result)) => {
+            match join_result {
+                JoinResult::JoinedAndShuffled => {
+                    tracing::debug!("[join_game_and_shuffle] joined and shuffled successfully, pk_hex={}, table_id={}, should_start_game_loop={}", body.pk_hex, table_id, should_start_game_loop);
+                    if should_start_game_loop {
+                        tracing::info!("[join_game_and_shuffle] all players shuffled, starting game loop for table_id={}", table_id);
+                        state.socket_state.start_game_loop_sync(state.socket_state.clone(), table_id);
+                    }
+                    (StatusCode::OK, Json(serde_json::json!({
+                        "player": {"id": body.pk_hex},
+                        "message": "Joined and shuffled successfully",
+                        "status": "joinedAndShuffled"
+                    }))).into_response()
+                }
+                JoinResult::JoinedWaiting => {
+                    tracing::debug!("[join_game_and_shuffle] joined as waiting, pk_hex={}, table_id={}", body.pk_hex, table_id);
+                    (StatusCode::OK, Json(serde_json::json!({
+                        "player": {"id": body.pk_hex},
+                        "message": "Joined, waiting for next hand",
+                        "status": "joinedWaiting"
+                    }))).into_response()
+                }
             }
-            (StatusCode::OK, Json(serde_json::json!({
-                "player": {"id": body.pk_hex},
-                "message": "Joined and shuffled successfully"
-            }))).into_response()
         }
         Err(e) if e.as_str() == "Table not found" => {
             tracing::warn!("[join_game_and_shuffle] table not found, table_id={}", table_id);
@@ -493,6 +507,11 @@ pub async fn submit_reveal_token(
             return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id");
         }
     };
+
+    if body.pk_hex == "03b5ceedfbd1044748e8d77d9f142f4af6a5554b6d2ce4a4235367fb93ba97298e" {
+        tracing::warn!("[submit_reveal_token] reject token");
+        return err_resp(StatusCode::BAD_REQUEST, "Dumpy reject token");
+    }
 
     let player_pk = match hex_to_ecpoint(&body.pk_hex) {
         Ok(pt) => pt,

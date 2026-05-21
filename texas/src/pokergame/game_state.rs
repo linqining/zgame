@@ -177,15 +177,13 @@ impl std::fmt::Display for ExpelPhase {
 pub struct ExpelState {
     pub is_active: bool,
     pub phase: ExpelPhase,
-    pub target_player_pk: Option<String>,
-    pub initiator_pk: Option<String>,
     #[serde(skip)]
     pub timeout_start: Option<std::time::Instant>,
     pub timeout_seconds: u64,
-    pub voted_players: Vec<String>,
-    pub required_votes: usize,
-    pub expelled_players: Vec<String>,
+    pub completed_players: Vec<String>,
+    pub pending_players: Vec<String>,// 发起时的玩家列表
     pub expel_records_count: usize,
+    pub expel_deck: Vec<ElGamalCiphertextJson>,
 }
 
 impl ExpelState {
@@ -193,24 +191,21 @@ impl ExpelState {
         Self {
             is_active: false,
             phase: ExpelPhase::Initiated,
-            target_player_pk: None,
-            initiator_pk: None,
             timeout_start: None,
             timeout_seconds: 60,
-            voted_players: Vec::new(),
-            required_votes: 2,
-            expelled_players: Vec::new(),
+            completed_players: Vec::new(),
+            pending_players: Vec::new(),
             expel_records_count: 0,
+            expel_deck: Vec::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.is_active = false;
         self.phase = ExpelPhase::Initiated;
-        self.target_player_pk = None;
-        self.initiator_pk = None;
         self.timeout_start = None;
-        self.voted_players.clear();
+        self.completed_players.clear();
+        self.pending_players.clear();
     }
 }
 
@@ -227,11 +222,7 @@ pub struct RevealTokenPublicState {
 pub struct ExpelPublicState {
     pub is_active: bool,
     pub phase: String,
-    pub target_player_pk: Option<String>,
-    pub initiator_pk: Option<String>,
     pub voted_players: Vec<String>,
-    pub required_votes: usize,
-    pub expelled_players: Vec<String>,
     pub expel_records_count: usize,
 }
 
@@ -259,6 +250,7 @@ pub struct ShufflePublicState {
     pub completed_players: Vec<String>,
     pub pending_players: Vec<String>,
     pub deck_encrypted: Vec<ElGamalCiphertextJson>,
+    pub aggregate_pk: String,
 }
 
 pub fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {

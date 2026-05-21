@@ -4,7 +4,7 @@
 // rust编译wasm
 wasm-pack build --scope linqining --target web
 
-// --target no-modules 纯js
+// wasm-pack build --scope linqining --target no-modules 纯js
 
 //发布npm
 npm publish --access=public

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -13,11 +13,15 @@ use crate::config::Config;
 use crate::models::Database;
 use crate::pokergame::actions;
 use crate::pokergame::deck::Card;
-use crate::pokergame::game_state::{ElGamalCiphertextJson, ExpelPhase, MaskAndShuffleRoundJson, PkProofJson, RevealPhase, ShufflePublicState};
+use crate::pokergame::game_state::{ElGamalCiphertextJson, ExpelPhase, MaskAndShuffleRoundJson, ShuffleProofJson,
+    PkProofJson, RevealPhase, ShufflePublicState};
 use crate::pokergame::player::Player;
-use crate::pokergame::table::{ActionRequest, ClientTable, RoundState, Table};
+use crate::pokergame::table::{ActionRequest, ClientTable, JoinResult, RoundState, Table};
 use poker_protocol::crypto::EcPoint;
 
+fn table_room_name(table_id: u32) -> String {
+    format!("table_{}", table_id)
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,9 +115,11 @@ struct SittingPayload {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ShuffleSubmitPayload {
     table_id: u32,
+    pk_hex: String,
+    output_cards: Vec<ElGamalCiphertextJson>,
+    shuffle_proof: ShuffleProofJson,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -183,13 +189,20 @@ struct RevealNoticePayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct ExpelNoticePayload {
+    table_id: u32,
+    phase: ExpelPhase,
+    completed_players: Vec<String>,
+    pending_players: Vec<String>,
+    expel_deck: Vec<ElGamalCiphertextJson>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ExpelResultPayload {
     table_id: u32,
-    target_socket_id: Option<String>,
     phase: ExpelPhase,
-    voted_players: Vec<String>,
-    required_votes: usize,
+    completed_players: Vec<String>,
     expelled: bool,
 }
 
@@ -241,27 +254,27 @@ struct GameState {
 
 pub struct SocketState {
     pub db: Database,
-    pub state: Mutex<GameState>,
+    pub state: RwLock<GameState>,
     pub config: Config,
-    pub game_loop_registry: Mutex<GameLoopRegistry>,
+    pub game_loop_registry: RwLock<GameLoopRegistry>,
 }
 
 impl SocketState {
     pub fn new(db: Database, tables: HashMap<u32, Table>, config: Config) -> Self {
         Self {
             db,
-            state: Mutex::new(GameState {
+            state: RwLock::new(GameState {
                 tables,
                 players: HashMap::new(),
                 disconnect_cancellers: HashMap::new(),
             }),
             config,
-            game_loop_registry: Mutex::new(GameLoopRegistry::new()),
+            game_loop_registry: RwLock::new(GameLoopRegistry::new()),
         }
     }
 
     fn get_current_tables(&self) -> Vec<TableSummary> {
-        let gs = self.state.lock().unwrap();
+        let gs = self.state.read().unwrap();
         gs.tables
             .values()
             .map(|t| TableSummary {
@@ -277,7 +290,7 @@ impl SocketState {
     }
 
     fn get_current_players(&self) -> Vec<PlayerInfo> {
-        let gs = self.state.lock().unwrap();
+        let gs = self.state.read().unwrap();
         gs.players
             .values()
             .map(|p| PlayerInfo {
@@ -289,13 +302,13 @@ impl SocketState {
     }
 
     pub async fn get_action_sender(&self, table_id: u32) -> Option<tokio::sync::mpsc::Sender<ActionRequest>> {
-        let registry = self.game_loop_registry.lock().unwrap();
+        let registry = self.game_loop_registry.read().unwrap();
         registry.get_sender(table_id)
     }
 
     pub async fn start_game_loop(&self, io: SocketIo, state: Arc<SocketState>, table_id: u32) {
         {
-            let registry = self.game_loop_registry.lock().unwrap();
+            let registry = self.game_loop_registry.read().unwrap();
             if registry.contains(table_id) {
                 return;
             }
@@ -303,7 +316,7 @@ impl SocketState {
         let (tx, rx) = tokio::sync::mpsc::channel::<ActionRequest>(100);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let handle = tokio::spawn(game_loop_task(io, state, table_id, rx, stop_rx));
-        let mut registry = self.game_loop_registry.lock().unwrap();
+        let mut registry = self.game_loop_registry.write().unwrap();
         registry.insert(table_id, GameLoopEntry {
             _handle: handle,
             action_sender: tx,
@@ -317,7 +330,7 @@ impl SocketState {
             return;
         };
         {
-            let registry = self.game_loop_registry.lock().unwrap();
+            let registry = self.game_loop_registry.read().unwrap();
             if registry.contains(table_id) {
                 return;
             }
@@ -325,7 +338,7 @@ impl SocketState {
         let (tx, rx) = tokio::sync::mpsc::channel::<ActionRequest>(100);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let handle = tokio::spawn(game_loop_task(io, state, table_id, rx, stop_rx));
-        let mut registry = self.game_loop_registry.lock().unwrap();
+        let mut registry = self.game_loop_registry.write().unwrap();
         registry.insert(table_id, GameLoopEntry {
             _handle: handle,
             action_sender: tx,
@@ -335,26 +348,37 @@ impl SocketState {
 
     pub async fn stop_game_loop(&self, table_id: u32) {
         tracing::info!("stop_game_loop: {}", table_id);
-        let mut registry = self.game_loop_registry.lock().unwrap();
+        let mut registry = self.game_loop_registry.write().unwrap();
         registry.remove(table_id);
     }
-
+    
     pub fn find_socket_id_by_pk(&self, pk_hex: &str) -> Option<String> {
-        let gs = self.state.lock().unwrap();
+        let gs = self.state.read().unwrap();
         gs.players.values()
             .find(|p| p.pk_hex == pk_hex)
             .map(|p| p.socket_id.clone())
     }
 
+    pub fn is_player_in_seat(&self, pk_hex: &str) -> bool {
+        let gs = self.state.read().unwrap();
+        gs.tables.values().any(|table| {
+            table.seats.values().any(|seat_opt| {
+                seat_opt.as_ref().map_or(false, |seat| {
+                    seat.player.as_ref().map_or(false, |p| p.pk_hex == pk_hex)
+                })
+            })
+        })
+    }
+
     pub fn find_player_by_pk(&self, pk_hex: &str) -> Option<Player> {
-        let gs = self.state.lock().unwrap();
+        let gs = self.state.read().unwrap();
         gs.players.values()
             .find(|p| p.pk_hex == pk_hex)
             .cloned()
     }
 
     pub fn find_table_id_by_pk(&self, pk_hex: &str) -> Option<u32> {
-        let gs = self.state.lock().unwrap();
+        let gs = self.state.read().unwrap();
         for (table_id, table) in &gs.tables {
             if table.players.iter().any(|p| p.pk_hex == pk_hex) {
                 return Some(*table_id);
@@ -364,37 +388,16 @@ impl SocketState {
     }
 
     pub fn get_client_table(&self, table_id: u32) -> Option<ClientTable> {
-        let gs = self.state.lock().unwrap();
+        let gs = self.state.read().unwrap();
         gs.tables.get(&table_id).map(|t| t.to_client())
     }
 
     pub fn add_player_to_table(&self, table_id: u32, player: Player) -> Result<usize, String> {
-        let mut gs = self.state.lock().unwrap();
+        let mut gs = self.state.write().unwrap();
         gs.players.insert(player.socket_id.clone(), player.clone());
         if let Some(table) = gs.tables.get_mut(&table_id) {
             table.add_player(player);
             Ok(table.active_players().len())
-        } else {
-            Err("Table not found".to_string())
-        }
-    }
-
-    pub fn submit_shuffle_for_pk(&self, table_id: u32, socket_id: &str) -> Result<String, String> {
-        let mut gs = self.state.lock().unwrap();
-        if let Some(table) = gs.tables.get_mut(&table_id) {
-            match table.submit_shuffle(socket_id) {
-                Ok(()) => {
-                    if table.is_all_players_shuffled() {
-                        table.shuffle_state.is_active = false;
-                        table.round_state = RoundState::ShuffleComplete;
-                        Ok("all_complete".to_string())
-                    } else {
-                        table.complete_or_continue_next_shuffler();
-                        Ok("partial".to_string())
-                    }
-                }
-                Err(e) => Err(e),
-            }
         } else {
             Err("Table not found".to_string())
         }
@@ -409,12 +412,12 @@ impl SocketState {
         round_json: MaskAndShuffleRoundJson,
         seat_id: u32,
         amount: u64,
-    ) -> Result<bool, String> {
+    ) -> Result<(bool, JoinResult), String> {
         let socket_id = player.socket_id.clone();
         let pk_hex = player.pk_hex.clone();
 
         let result = {
-            let mut gs = self.state.lock().unwrap();
+            let mut gs = self.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 table.join_player_and_shuffle(player, player_pk, pk_proof_json, round_json, seat_id, amount)
             } else {
@@ -422,47 +425,91 @@ impl SocketState {
             }
         };
 
-        if result.is_ok() {
-            let mut gs = self.state.lock().unwrap();
-            let already_exists = gs.players.values().any(|p| p.pk_hex == pk_hex);
-            if !already_exists {
-                gs.players.insert(socket_id.clone(), Player {
-                    socket_id: socket_id.clone(),
-                    id: pk_hex.clone(),
-                    name: pk_hex.clone(),
-                    bankroll: 0,
-                    pk_hex: pk_hex.clone(),
-                    readable_hands: Vec::new(),
-                });
-            }
-
-            if let Some(table) = gs.tables.get_mut(&table_id) {
-                if table.is_pending_shuffle_palyer_empty() && table.players.len() >= 2 {
-                    table.shuffle_state.is_active = false;
-                    table.round_state = RoundState::ShuffleComplete;
-                    tracing::info!("[SHUFFLE] Player {} joined and shuffled, all players shuffled", pk_hex);
-                    return Ok(true);
-                } else {
-                    tracing::info!("[SHUFFLE] Player {} joined and shuffled, but not enough players to start", pk_hex);
-                    table.complete_or_continue_next_shuffler();
+        match &result {
+            Ok(JoinResult::JoinedAndShuffled) => {
+                let mut gs = self.state.write().unwrap();
+                let already_exists = gs.players.values().any(|p| p.pk_hex == pk_hex);
+                if !already_exists {
+                    gs.players.insert(socket_id.clone(), Player {
+                        socket_id: socket_id.clone(),
+                        id: pk_hex.clone(),
+                        name: pk_hex.clone(),
+                        bankroll: 0,
+                        pk_hex: pk_hex.clone(),
+                        readable_hands: Vec::new(),
+                    });
                 }
-            }
-        }
 
-        result.map(|_| false)
+                if let Some(table) = gs.tables.get_mut(&table_id) {
+                    if table.is_pending_shuffle_palyer_empty() && table.complete_shuffle_palyer_count() >= 2 {
+                        table.shuffle_state.is_active = false;
+                        table.round_state = RoundState::ShuffleComplete;
+                        tracing::info!("[SHUFFLE] Player {} joined and shuffled, all players shuffled", pk_hex);
+                        return Ok((true, JoinResult::JoinedAndShuffled));
+                    } else {
+                        tracing::info!("[SHUFFLE] Player {} joined and shuffled, but not enough players to start", pk_hex);
+                        table.complete_or_continue_next_shuffler();
+                    }
+                }
+                Ok((false, JoinResult::JoinedAndShuffled))
+            }
+            Ok(JoinResult::JoinedWaiting) => {
+                let mut gs = self.state.write().unwrap();
+                let already_exists = gs.players.values().any(|p| p.pk_hex == pk_hex);
+                if !already_exists {
+                    gs.players.insert(socket_id.clone(), Player {
+                        socket_id: socket_id.clone(),
+                        id: pk_hex.clone(),
+                        name: pk_hex.clone(),
+                        bankroll: 0,
+                        pk_hex: pk_hex.clone(),
+                        readable_hands: Vec::new(),
+                    });
+                }
+                Ok((false, JoinResult::JoinedWaiting))
+            }
+            Err(e) => Err(e.clone()),
+        }
+    }
+
+    pub fn submit_verified_shuffle_with_round(
+        &self,
+        table_id: u32,
+        pk_hex: &str,
+        round_json: MaskAndShuffleRoundJson,
+    ) -> Result<(), String> {
+        let mut gs = self.state.write().unwrap();
+        if let Some(table) = gs.tables.get_mut(&table_id) {
+            match table.submit_verified_shuffle(pk_hex, round_json.output_cards, round_json.shuffle_proof) {
+                Ok(()) => {
+                    if table.is_all_players_shuffled() && table.complete_shuffle_palyer_count() >= 2 {
+                        table.shuffle_state.is_active = false;
+                        table.round_state = RoundState::ShuffleComplete;
+                    } else {
+                        table.complete_or_continue_next_shuffler();
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            Err("Table not found".to_string())
+        }
     }
 
     pub fn submit_verified_shuffle_for_pk(
         &self,
         table_id: u32,
         pk_hex: &str,
-        round_json: MaskAndShuffleRoundJson,
+        player: Player,
+        output_cards: Vec<ElGamalCiphertextJson>,
+        shuffle_proof: ShuffleProofJson,
     ) -> Result<(), String> {
-        let mut gs = self.state.lock().unwrap();
+        let mut gs = self.state.write().unwrap();
         if let Some(table) = gs.tables.get_mut(&table_id) {
-            match table.submit_verified_shuffle(pk_hex, round_json) {
+            match table.submit_verified_shuffle(pk_hex, output_cards, shuffle_proof) {
                 Ok(()) => {
-                    if table.is_all_players_shuffled() {
+                    if table.is_all_players_shuffled() && table.complete_shuffle_palyer_count() >= 2 {
                         table.shuffle_state.is_active = false;
                         table.round_state = RoundState::ShuffleComplete;
                     } else {
@@ -478,7 +525,7 @@ impl SocketState {
     }
 
     pub fn mark_reveal_complete_for_pk(&self, table_id: u32, pk_hex: &str) -> Result<bool, String> {
-        let mut gs = self.state.lock().unwrap();
+        let mut gs = self.state.write().unwrap();
         if let Some(table) = gs.tables.get_mut(&table_id) {
             Ok(table.mark_player_reveal_complete(pk_hex))
         } else {
@@ -492,7 +539,7 @@ impl SocketState {
         pk_hex: &str,
         tokens: Vec<poker_protocol::z_poker::protocol::RevealToken>,
     ) -> Result<(), String> {
-        let mut gs = self.state.lock().unwrap();
+        let mut gs = self.state.write().unwrap();
         if let Some(table) = gs.tables.get_mut(&table_id) {
             table.submit_player_reveal_tokens(pk_hex, tokens)
         } else {
@@ -501,12 +548,12 @@ impl SocketState {
     }
 
     pub fn get_reveal_phase_for_table(&self, table_id: u32) -> Option<crate::pokergame::game_state::RevealPhase> {
-        let gs = self.state.lock().unwrap();
+        let gs = self.state.read().unwrap();
         gs.tables.get(&table_id).map(|t| t.reveal_token_state.phase)
     }
 
     pub fn get_player_readable_cards(&self, table_id: u32) -> Option<HashMap<String, Vec<poker_protocol::crypto::ElGamalCiphertext>>> {
-        let gs = self.state.lock().unwrap();
+        let gs = self.state.read().unwrap();
         gs.tables.get(&table_id).map(|table| {
             table.mental_poker_game.get_player_readable_tokens()
         })
@@ -522,7 +569,7 @@ impl SocketState {
         };
 
         let (player_cards, socket_id_map) = {
-            let gs = self.state.lock().unwrap();
+            let gs = self.state.read().unwrap();
             let table = match gs.tables.get(&table_id) {
                 Some(t) => t,
                 None => return,
@@ -550,7 +597,6 @@ impl SocketState {
                 player_pk: player_pk.clone(),
                 readable_cards,
             };
-            println!("Hand reveal result sent: ",   );
             if let Ok(sid) = socket_id.parse::<socketioxide::socket::Sid>() {
                 if let Some(socket) = io.get_socket(sid) {
                     println!("[broadcast_hand_reveal_result] socket  found for player {}, socket_id={}", player_pk, socket_id);
@@ -574,7 +620,7 @@ impl SocketState {
         };
 
         {
-            let mut gs = self.state.lock().unwrap();
+            let mut gs = self.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 let (player_revealed_map, _) = table.mental_poker_game.list_revealed_cards();
                 
@@ -608,7 +654,7 @@ impl SocketState {
         };
 
         let community_cards = {
-            let gs = self.state.lock().unwrap();
+            let gs = self.state.read().unwrap();
             match gs.tables.get(&table_id) {
                 Some(table) => table.mental_poker_game.list_revealed_community_cards(),
                 None => return,
@@ -623,11 +669,11 @@ impl SocketState {
             table_id,
             community_cards: cards,
         };
-        let _ = io.emit(actions::COMMUNITY_REVEAL_RESULT, &payload);
+        let _ = io.to(table_room_name(table_id)).emit(actions::COMMUNITY_REVEAL_RESULT, &payload);
     }
 
     pub fn register_http_player(&self, socket_id: String, player: Player) {
-        let mut gs = self.state.lock().unwrap();
+        let mut gs = self.state.write().unwrap();
         gs.players.insert(socket_id, player);
     }
 }
@@ -652,14 +698,14 @@ fn hide_opponent_cards(table: &Table, socket_id: &str) -> ClientTable {
 
 async fn broadcast_to_table(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, message: Option<&str>) {
     let socket_ids = {
-        let gs = state.state.lock().unwrap();
+        let gs = state.state.read().unwrap();
         let Some(table) = gs.tables.get(&table_id) else { return };
         table.players.iter().map(|p| p.socket_id.clone()).collect::<Vec<_>>()
     };
 
     for sid_str in socket_ids {
         let table_view = {
-            let gs = state.state.lock().unwrap();
+            let gs = state.state.read().unwrap();
             match gs.tables.get(&table_id) {
                 Some(t) => hide_opponent_cards(t, &sid_str),
                 None => continue,
@@ -714,7 +760,7 @@ async fn game_loop_task(io: SocketIo, state: Arc<SocketState>, table_id: u32, mu
     }
 
     {
-        let mut registry = state.game_loop_registry.lock().unwrap();
+        let mut registry = state.game_loop_registry.write().unwrap();
         registry.remove(table_id);
     }
     tracing::info!("[GAME-LOOP] Stopped for table {}", table_id);
@@ -723,7 +769,7 @@ async fn game_loop_task(io: SocketIo, state: Arc<SocketState>, table_id: u32, mu
 async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, expel_active: bool, shuffle_active: bool, reveal_active: bool) -> Option<bool> {
     if expel_active {
         let expel_result = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 if table.execute_expel_if_completed() {
                     Some(true)
@@ -746,21 +792,22 @@ async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, table_id: u3
 
     if shuffle_active {
         let shuffle_complete = {
-            let gs = state.state.lock().unwrap();
+            let gs = state.state.read().unwrap();
             gs.tables.get(&table_id).map(|t| t.is_all_players_shuffled()).unwrap_or(false)
         };
         if shuffle_complete {
             {
-                let mut gs = state.state.lock().unwrap();
+                let mut gs = state.state.write().unwrap();
                 if let Some(table) = gs.tables.get_mut(&table_id) {
                     table.shuffle_state.reset();
                     table.round_state = RoundState::ShuffleComplete;
+                    tracing::info!("[ShuffleComplete] Table {} shuffle complete", table_id);
                 }
             }
             return Some(true);
         }
         let timeout_result = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 table.check_shuffle_timeout()
             } else { None }
@@ -768,7 +815,7 @@ async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, table_id: u3
         if let Some(timed_out_pk) = timeout_result {
             tracing::info!("[TICK] Table {} shuffle timeout for player {}", table_id, timed_out_pk);
             let should_stop_early = {
-                let mut gs = state.state.lock().unwrap();
+                let mut gs = state.state.write().unwrap();
                 if let Some(socket_id) = gs.players.values().find(|p| p.pk_hex == timed_out_pk).map(|p| p.socket_id.clone()) {
                     gs.players.remove(&socket_id);
                 }
@@ -796,13 +843,35 @@ async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, table_id: u3
             if should_stop_early {
                 return Some(true);
             }
-            let shuffle_notice = {
-                let gs = state.state.lock().unwrap();
-                gs.tables.get(&table_id).and_then(|t| t.get_shuffle_public_state())
+            let shuffle_notice_data = {
+                let gs = state.state.read().unwrap();
+                if let Some(table) = gs.tables.get(&table_id) {
+                    let shuffle_state = table.get_shuffle_public_state();
+                    let current_pk = table.shuffle_state.current_player_pk.clone();
+                    
+                    let socket_id = if let Some(pk) = &current_pk {
+                        gs.players.values().find(|p| p.pk_hex == *pk).map(|p| p.socket_id.clone())
+                    } else {
+                        None
+                    };
+                    
+                    if let (Some(st), Some(sid)) = (shuffle_state, socket_id) {
+                        Some((st, sid))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             };
-            if let Some(shuffle_state) = shuffle_notice {
-                let notice = ShuffleNoticePayload { table_id, shuffle_state: Some(shuffle_state) };
-                let _ = io.emit(actions::SHUFFLE_NOTICE, &notice).await;
+            
+            if let Some((shuffle_state, socket_id)) = shuffle_notice_data {
+                if let Ok(sid) = socket_id.parse::<socketioxide::socket::Sid>() {
+                    if let Some(socket) = io.get_socket(sid) {
+                        let notice = ShuffleNoticePayload { table_id, shuffle_state: Some(shuffle_state) };
+                        let _ = socket.emit(actions::SHUFFLE_NOTICE, &notice);
+                    }
+                }
             }
             broadcast_to_table(io, state, table_id, None).await;
             return Some(true);
@@ -811,14 +880,49 @@ async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, table_id: u3
 
     if reveal_active {
         let timeout_result = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 table.check_reveal_timeout()
             } else { None }
         };
-        if let Some(timed_out_pk) = timeout_result {
-            tracing::info!("[TICK] Table {} reveal token timeout for player {}", table_id, timed_out_pk);
-            broadcast_to_table(io, state, table_id, Some(&format!("Player {} timed out on reveal", timed_out_pk))).await;
+        if let Some(timed_out_pks) = timeout_result {
+            tracing::info!("[TICK] Table {} reveal token timeout for player {:?}", table_id, timed_out_pks);
+            {
+                let mut gs = state.state.write().unwrap();
+                for timed_out_pk in &timed_out_pks {
+                    if let Some(socket_id) = gs.players.values().find(|p| p.pk_hex == *timed_out_pk).map(|p| p.socket_id.clone()) {
+                        if let Ok(sid) = socket_id.parse::<socketioxide::socket::Sid>() {
+                            if let Some(socket) = io.get_socket(sid) {
+                                socket.leave(table_room_name(table_id));
+                                let _ = socket.emit(actions::TABLE_LEFT, &TableLeftPayload { tables: state.get_current_tables(), table_id });
+                            }
+                        }
+                        gs.players.remove(&socket_id);
+                    }
+                }
+                if let Some(table) = gs.tables.get_mut(&table_id) {
+                    for timed_out_pk in timed_out_pks.clone() {
+                        table.remove_player_by_pk(&timed_out_pk);
+                    }
+                    table.start_expel();
+                }
+            }
+            
+            let expel_notice = {
+                let gs = state.state.read().unwrap();
+                gs.tables.get(&table_id).map(|t| {
+                    let phase = t.expel_state.phase.clone();
+                    let completed_players = t.expel_state.completed_players.clone();
+                    let pending_players = t.expel_state.pending_players.clone();
+                    let expel_deck = t.expel_state.expel_deck.clone().into_iter().map(|c| c.into()).collect::<Vec<_>>();
+                    ExpelNoticePayload { table_id, phase, completed_players, pending_players, expel_deck }
+                })
+            };
+            if let Some(notice) = expel_notice {
+                let _ = io.to(table_room_name(table_id)).emit(actions::EXPEL_NOTICE, &notice).await;
+            }
+
+            broadcast_to_table(io, state, table_id, Some(&format!("Player  timed out on reveal", ))).await;
             return Some(true);
         }
     }
@@ -832,7 +936,7 @@ async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, table_id: u3
 
 async fn handle_reveal_phase(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, next_state: RoundState, is_preflop: bool) {
     {
-        let mut gs = state.state.lock().unwrap();
+        let mut gs = state.state.write().unwrap();
         if let Some(table) = gs.tables.get_mut(&table_id) {
             if table.reveal_token_state.is_active {
                 return;
@@ -851,7 +955,7 @@ async fn handle_reveal_phase(io: &SocketIo, state: &Arc<SocketState>, table_id: 
         }
     }
     let reveal_notice = {
-        let gs = state.state.lock().unwrap();
+        let gs = state.state.read().unwrap();
         gs.tables.get(&table_id).map(|t| {
             let phase = t.reveal_token_state.phase.clone();
             let pending = t.reveal_token_state.pending_players.clone();
@@ -861,7 +965,7 @@ async fn handle_reveal_phase(io: &SocketIo, state: &Arc<SocketState>, table_id: 
         })
     };
     if let Some(notice) = reveal_notice {
-        let _ = io.emit(actions::REVEAL_NOTICE, &notice).await;
+        let _ = io.to(table_room_name(table_id)).emit(actions::REVEAL_NOTICE, &notice).await;
     }
     broadcast_to_table(io, state, table_id, None).await;
 }
@@ -869,7 +973,7 @@ async fn handle_reveal_phase(io: &SocketIo, state: &Arc<SocketState>, table_id: 
 async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) -> bool {
     let (round_state, active_count, _betting_timeout, hand_complete_at, ready_at, showdown_at,
          shuffle_active, reveal_active, expel_active) = {
-        let gs = state.state.lock().unwrap();
+        let gs = state.state.read().unwrap();
         if let Some(table) = gs.tables.get(&table_id) {
             (table.round_state, table.active_players().len(), table.betting_timeout_start, table.hand_complete_at, table.ready_at, table.showdown_at,
              table.shuffle_state.is_active, table.reveal_token_state.is_active, table.expel_state.is_active)
@@ -897,11 +1001,33 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
                         return true;
                     }
                     tracing::info!("[TICK] Table {} Waiting → starting hand ({} active)", table_id, active_count);
-                    {
-                        let mut gs = state_c.state.lock().unwrap();
+                    
+                    let (shuffle_state, current_pk) = {
+                        let mut gs = state_c.state.write().unwrap();
                         if let Some(table) = gs.tables.get_mut(&table_id) {
                             if table.active_players().len() >= 2 {
-                                table.start_shuffle();
+                                let _ = table.start_shuffle();
+                                (table.get_shuffle_public_state(), table.shuffle_state.current_player_pk.clone())
+                            } else {
+                                (None, None)
+                            }
+                        } else {
+                            (None, None)
+                        }
+                    };
+                    
+                    if let (Some(st), Some(pk)) = (shuffle_state, current_pk) {
+                        let socket_id = {
+                            let gs = state_c.state.read().unwrap();
+                            gs.players.values().find(|p| p.pk_hex == pk).map(|p| p.socket_id.clone())
+                        };
+                        tracing::debug!("[TICK] Table {} ShuffleStarted: shuffle notice to {:?}", table_id, socket_id.clone());
+                        if let Some(sid_str) = socket_id {
+                            if let Ok(sid) = sid_str.parse::<socketioxide::socket::Sid>() {
+                                if let Some(socket) = io.get_socket(sid) {
+                                    let notice = ShuffleNoticePayload { table_id, shuffle_state: Some(st) };
+                                    let _ = socket.emit(actions::SHUFFLE_NOTICE, &notice);
+                                }
                             }
                         }
                     }
@@ -909,7 +1035,7 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
                 } else {
                     tracing::info!("[TICK] Table {} Waiting: setting ready_at, starting 5s countdown", table_id);
                     {
-                        let mut gs = state_c.state.lock().unwrap();
+                        let mut gs = state_c.state.write().unwrap();
                         if let Some(table) = gs.tables.get_mut(&table_id) {
                             table.ready_at = Some(std::time::Instant::now());
                         }
@@ -922,12 +1048,19 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
             }
         }
         RoundState::Shuffling => {
+            if active_count < 2 {
+                let mut gs = state.state.write().unwrap();
+                if let Some(table) = gs.tables.get_mut(&table_id) {
+                    table.shuffle_state.is_active = false;
+                    table.round_state = RoundState::Waiting;
+                }
+            }
             let all_shuffled = {
-                let gs = state.state.lock().unwrap();
+                let gs = state.state.read().unwrap();
                 gs.tables.get(&table_id).map(|t| t.is_all_players_shuffled()).unwrap_or(false)
             };
             if all_shuffled {
-                let mut gs = state.state.lock().unwrap();
+                let mut gs = state.state.write().unwrap();
                 if let Some(table) = gs.tables.get_mut(&table_id) {
                     table.shuffle_state.is_active = false;
                     table.round_state = RoundState::ShuffleComplete;
@@ -935,9 +1068,16 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
             }
         }
         RoundState::ShuffleComplete => {
+            if active_count < 2 {
+                let mut gs = state.state.write().unwrap();
+                if let Some(table) = gs.tables.get_mut(&table_id) {
+                    table.shuffle_state.is_active = false;
+                    table.round_state = RoundState::Waiting;
+                }
+            }
             tracing::info!("[TICK] Table {} ShuffleComplete, resetting shuffle and starting hand", table_id);
             {
-                let mut gs = state.state.lock().unwrap();
+                let mut gs = state.state.write().unwrap();
                 if let Some(table) = gs.tables.get_mut(&table_id) {
                     table.reset_shuffle();
                     table.start_hand();
@@ -970,7 +1110,7 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
         }
         RoundState::PreFlop | RoundState::Flop | RoundState::Turn | RoundState::River => {
             let timeout_result = {
-                let mut gs = state.state.lock().unwrap();
+                let mut gs = state.state.write().unwrap();
                 if let Some(table) = gs.tables.get_mut(&table_id) {
                     table.check_betting_timeout(15)
                 } else { None }
@@ -985,7 +1125,7 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
             handle_auto_fold(io, state, table_id).await;
 
             let is_complete = {
-                let gs = state.state.lock().unwrap();
+                let gs = state.state.read().unwrap();
                 if let Some(table) = gs.tables.get(&table_id) {
                     table.is_betting_round_complete()
                 } else { false }
@@ -1002,7 +1142,7 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
                 if elapsed >= 3 {
                     tracing::info!("[TICK] Table {} Showdown: 3s elapsed, finishing showdown", table_id);
                     {
-                        let mut gs = state.state.lock().unwrap();
+                        let mut gs = state.state.write().unwrap();
                         if let Some(table) = gs.tables.get_mut(&table_id) {
                             table.finish_showdown();
                         }
@@ -1014,7 +1154,7 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
             } else {
                 tracing::warn!("[TICK] Table {} Showdown: showdown_at is None, finishing immediately", table_id);
                 {
-                    let mut gs = state.state.lock().unwrap();
+                    let mut gs = state.state.write().unwrap();
                     if let Some(table) = gs.tables.get_mut(&table_id) {
                         table.finish_showdown();
                     }
@@ -1027,7 +1167,7 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
                 let elapsed = complete_at.elapsed().as_secs();
                 if elapsed >= 5 {
                     let (active, broke_players) = {
-                        let mut gs = state.state.lock().unwrap();
+                        let mut gs = state.state.write().unwrap();
                         if let Some(table) = gs.tables.get_mut(&table_id) {
                             let mut broke = Vec::new();
                             for seat_opt in table.seats.values_mut() {
@@ -1047,6 +1187,27 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
                             (table.active_players().len(), broke)
                         } else { (0, Vec::new()) }
                     };
+
+                    let tables_info = state.get_current_tables();
+                    let _ = io.emit(actions::TABLES_UPDATED, &tables_info).await;
+                    
+                    for (_, socket_id) in broke_players.iter() {
+                        if let Ok(sid) = socket_id.parse::<socketioxide::socket::Sid>() {
+                            if let Some(socket) = io.get_socket(sid) {
+                                let _ = socket.emit(actions::TABLE_LEFT, &TableLeftPayload { tables: tables_info.clone(), table_id });
+                            }
+                        }
+                    }
+
+                    for (_, socket_id) in broke_players.iter() {
+                        let player_name = {
+                            let gs = state.state.read().unwrap();
+                            gs.players.get(socket_id).map(|p| p.name.clone())
+                        };
+                        if let Some(name) = player_name {
+                            broadcast_to_table(&io, &state, table_id, Some(&format!("{} left the table (broke).", name))).await;
+                        }
+                    }
 
                     tracing::info!("[TICK] Table {} HandComplete: {} active after reset, {} broke players removed", table_id, active, broke_players.len());
                     if active < 2 {
@@ -1068,7 +1229,7 @@ async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) ->
 
 async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) {
     let auto_fold = {
-        let gs = state.state.lock().unwrap();
+        let gs = state.state.read().unwrap();
         if let Some(table) = gs.tables.get(&table_id) {
             if let Some(turn_id) = table.turn {
                 table.seats.get(&turn_id)
@@ -1089,7 +1250,7 @@ async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, table_id: u32
     };
     if let Some(socket_id) = auto_fold {
         let fold_result = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 table.handle_fold(&socket_id)
             } else {
@@ -1104,7 +1265,7 @@ async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, table_id: u32
 
 async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) {
     let result = {
-        let mut gs = state.state.lock().unwrap();
+        let mut gs = state.state.write().unwrap();
         if let Some(table) = gs.tables.get_mut(&table_id) {
             if table.unfolded_players().len() <= 1 {
                 table.end_without_showdown();
@@ -1145,7 +1306,7 @@ async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>, table_id: 
 
 async fn process_action(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, req: ActionRequest) {
     let result = {
-        let mut gs = state.state.lock().unwrap();
+        let mut gs = state.state.write().unwrap();
         if let Some(table) = gs.tables.get_mut(&table_id) {
             for seat_opt in table.seats.values_mut() {
                 if let Some(seat) = seat_opt {
@@ -1171,7 +1332,7 @@ async fn process_action(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, 
 
 async fn clear_for_one_player(io: &SocketIo, state: Arc<SocketState>, table_id: u32) {
     {
-        let mut gs = state.state.lock().unwrap();
+        let mut gs = state.state.write().unwrap();
         if let Some(table) = gs.tables.get_mut(&table_id) {
             table.clear_win_messages();
         }
@@ -1184,7 +1345,7 @@ async fn clear_for_one_player(io: &SocketIo, state: Arc<SocketState>, table_id: 
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
         {
-            let mut gs = state_c.state.lock().unwrap();
+            let mut gs = state_c.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 table.clear_seat_hands();
                 table.reset_board_and_pot();
@@ -1195,85 +1356,6 @@ async fn clear_for_one_player(io: &SocketIo, state: Arc<SocketState>, table_id: 
     });
 }
 
-fn schedule_disconnect_cleanup(io: SocketIo, state: Arc<SocketState>, user_id: String, socket_id: String) {
-    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
-    {
-        let mut gs = state.state.lock().unwrap();
-        if let Some(old_tx) = gs.disconnect_cancellers.insert(socket_id.clone(), cancel_tx) {
-            let _ = old_tx.send(true);
-        }
-    }
-
-    tokio::spawn(async move {
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
-            _ = cancel_rx.changed() => {
-                tracing::info!("[DISCONNECT-CLEANUP] Cancelled for socket {}", socket_id);
-                return;
-            }
-        }
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let (chips_returns, affected_table_ids): (Vec<(String, i64)>, Vec<u32>) = {
-            let mut guard = state.state.lock().unwrap();
-            let gs = &mut *guard;
-
-            gs.disconnect_cancellers.remove(&socket_id);
-
-            let player_id = gs.players.get(&socket_id).map(|p| p.id.clone());
-
-            let mut updates = Vec::new();
-            let mut affected = Vec::new();
-            for (table_id, table) in gs.tables.iter_mut() {
-                let should_remove = table.seats.values()
-                    .filter_map(|s| s.as_ref())
-                    .any(|s| {
-                        s.player.as_ref().map_or(false, |p| p.socket_id == socket_id)
-                            && s.disconnected
-                            && s.disconnected_at.map_or(true, |t| now - t >= 60)
-                    });
-
-                if should_remove {
-                    if let Some(seat) = table.find_player_by_socket_id(&socket_id) {
-                        if let Some(ref pid) = player_id {
-                            updates.push((pid.clone(), seat.stack as i64));
-                        }
-                    }
-                    tracing::info!("remove_player: {}", socket_id);
-                    table.remove_player(&socket_id);
-                    affected.push(*table_id);
-                }
-            }
-
-            if !updates.is_empty() {
-                gs.players.remove(&socket_id);
-            }
-
-            (updates, affected)
-        };
-
-        for (pid, stack) in chips_returns {
-            let _ = state.db.update_chips(&pid, stack).await;
-        }
-
-        for tid in &affected_table_ids {
-            broadcast_to_table(&io, &state, *tid, None).await;
-        }
-
-        if !affected_table_ids.is_empty() {
-            let tables_info = state.get_current_tables();
-            let players_info = state.get_current_players();
-            let _ = io.emit(actions::TABLES_UPDATED, &tables_info).await;
-            let _ = io.emit(actions::PLAYERS_UPDATED, &players_info).await;
-        }
-
-        let _ = user_id;
-    });
-}
 
 pub fn register_handlers(io: &SocketIo) {
     io.ns("/", async move |socket: SocketRef, io: SocketIo, State(state): State<Arc<SocketState>>| {
@@ -1292,7 +1374,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         let user_id = claims.user.id.clone();
 
         let old_sid = {
-            let gs = state.state.lock().unwrap();
+            let gs = state.state.read().unwrap();
             gs.tables.values().find_map(|t| t.find_disconnected_socket_by_user_id(&user_id))
         };
         tracing::info!("on_connect FETCH_LOBBY_INFO: {} old_sid={:?}", claims.user.id.clone(), old_sid.clone());
@@ -1301,13 +1383,13 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         let (table_ids_to_broadcast, is_reconnect) = if let Some(old) = old_sid {
             tracing::info!("[RECONNECT] user {} found disconnected seat, old_sid={}, new_sid={}", user_id, old, new_socket_id);
             {
-                let mut gs = state.state.lock().unwrap();
+                let mut gs = state.state.write().unwrap();
                 if let Some(cancel_tx) = gs.disconnect_cancellers.remove(&old) {
                     let _ = cancel_tx.send(true);
                 }
             }
             let reconnected_table_ids = {
-                let mut gs = state.state.lock().unwrap();
+                let mut gs = state.state.write().unwrap();
                 let mut ids = Vec::new();
                 for table in gs.tables.values_mut() {
                     if table.reconnect_player(&old, &new_socket_id) {
@@ -1319,7 +1401,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
             let db_user = state.db.find_user_by_id(&user_id).await;
             if let Some(user) = db_user {
-                let mut gs = state.state.lock().unwrap();
+                let mut gs = state.state.write().unwrap();
                 gs.players.insert(new_socket_id.clone(), Player {
                     socket_id: new_socket_id.clone(),
                     id: user.id,
@@ -1339,14 +1421,14 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         // 这个替换players里面的player
         {
             let old_sid_from_players = {
-                let gs = state.state.lock().unwrap();
+                let gs = state.state.read().unwrap();
                 gs.players.values().find(|p| p.id == user_id).map(|p| p.socket_id.clone())
             };
             tracing::info!("on_connect FETCH_LOBBY_INFO: {} old_sid_from_players={:?}", claims.user.id.clone(), old_sid_from_players.clone());
 
             if let Some(ref old) = old_sid_from_players {
                 tracing::info!("[RECONNECT] user {} found active session in players, replacing old_sid={}", user_id, old);
-                let mut gs = state.state.lock().unwrap();
+                let mut gs = state.state.write().unwrap();
                 if let Some(cancel_tx) = gs.disconnect_cancellers.remove(old) {
                     let _ = cancel_tx.send(true);
                 }
@@ -1370,7 +1452,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             let db_user = state.db.find_user_by_id(&claims.user.id).await;
             if let Some(user) = db_user {
                 tracing::info!("on_connect FETCH_LOBBY_INFO: {} user={:?}", claims.user.id.clone(), user);
-                state.state.lock().unwrap().players.insert(s.id.to_string(), Player {
+                state.state.write().unwrap().players.insert(s.id.to_string(), Player {
                     socket_id: s.id.to_string(),
                     id: user.id,
                     name: user.name,
@@ -1392,9 +1474,10 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
     });
 
     socket.on(actions::JOIN_TABLE, async move |s: SocketRef, Data::<u32>(table_id), io: SocketIo, State(state): State<Arc<SocketState>>| {
+        s.join(table_room_name(table_id));
         let socket_id = s.id.to_string();
         let join_msg = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
 
             let player_data = gs.players.get(&socket_id).map(|p| (p.clone(), p.name.clone()));
 
@@ -1409,7 +1492,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
         let tables_info = state.get_current_tables();
         {
-            let gs = state.state.lock().unwrap();
+            let gs = state.state.read().unwrap();
             if let Some(table) = gs.tables.get(&table_id) {
                 let table_view = hide_opponent_cards(table, &socket_id);
                 let _ = s.emit(actions::TABLE_JOINED, &TableUpdatePayload {
@@ -1429,7 +1512,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         let socket_id = s.id.to_string();
 
         let (is_playing, player_name) = {
-            let gs = state.state.lock().unwrap();
+            let gs = state.state.read().unwrap();
             if let Some(table) = gs.tables.get(&table_id) {
                 let name = table.find_player_by_socket_id(&socket_id)
                     .and_then(|_| gs.players.get(&socket_id).map(|p| p.name.clone()));
@@ -1440,7 +1523,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         if is_playing {
             tracing::info!("[LEAVE_TABLE] Table {}: {} is leaving while hand is in progress, marking sitting_out", table_id, socket_id);
             {
-                let mut gs = state.state.lock().unwrap();
+                let mut gs = state.state.write().unwrap();
                 if let Some(table) = gs.tables.get_mut(&table_id) {
                     for seat_opt in table.seats.values_mut() {
                         if let Some(seat) = seat_opt {
@@ -1455,9 +1538,10 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             broadcast_to_table(&io, &state, table_id, msg.as_deref()).await;
             return;
         }
+        s.leave(table_room_name(table_id));
 
         let chips_update = {
-            let gs = state.state.lock().unwrap();
+            let gs = state.state.read().unwrap();
             if let Some(table) = gs.tables.get(&table_id) {
                 table.find_player_by_socket_id(&socket_id)
                     .and_then(|seat| {
@@ -1471,7 +1555,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
 
         let (leave_msg, need_clear) = {
-            let mut guard = state.state.lock().unwrap();
+            let mut guard = state.state.write().unwrap();
             let gs = &mut *guard;
             let name = gs.players.get(&socket_id).map(|p| p.name.clone());
             if let Some(table) = gs.tables.get_mut(&table_id) {
@@ -1528,7 +1612,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
     socket.on(actions::TABLE_MESSAGE, async move |_s: SocketRef, Data::<TableMessagePayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let socket_ids = {
-            let gs = state.state.lock().unwrap();
+            let gs = state.state.read().unwrap();
             gs.tables.get(&payload.table_id).map(|t| {
                 t.players.iter().map(|p| p.socket_id.clone()).collect::<Vec<_>>()
             })
@@ -1537,7 +1621,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         if let Some(sids) = socket_ids {
             for sid_str in sids {
                 let table_view = {
-                    let gs = state.state.lock().unwrap();
+                    let gs = state.state.read().unwrap();
                     gs.tables.get(&payload.table_id).map(|t| hide_opponent_cards(t, &sid_str))
                 };
                 if let Some(table_view) = table_view {
@@ -1561,7 +1645,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         tracing::info!("sit down msg getinfo: {:?}", payload);
 
         let (should_start, chips_deduct, sit_msg) = {
-            let mut guard = state.state.lock().unwrap();
+            let mut guard = state.state.write().unwrap();
             let gs = &mut *guard;
 
             let player_data = gs.players.get(&socket_id).map(|p| (p.clone(), p.name.clone(), p.id.clone()));
@@ -1606,7 +1690,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         };
 
         let player = {
-            let gs = state.state.lock().unwrap();
+            let gs = state.state.read().unwrap();
             gs.players.get(&socket_id).cloned()
         };
 
@@ -1638,10 +1722,13 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         );
 
         match result {
-            Ok(all_complete) => {
+            Ok((all_complete, join_result)) => {
                 let _ = state.db.update_chips(&player.id, -(payload.amount as i64)).await;
                 
-                let msg = format!("{} sat down in Seat {} and shuffled", player.name, payload.seat_id);
+                let msg = match join_result {
+                    JoinResult::JoinedAndShuffled => format!("{} sat down in Seat {} and shuffled", player.name, payload.seat_id),
+                    JoinResult::JoinedWaiting => format!("{} sat down in Seat {}, waiting for next hand", player.name, payload.seat_id),
+                };
                 broadcast_to_table(&io, &state, payload.table_id, Some(&msg)).await;
 
                 if all_complete {
@@ -1658,7 +1745,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
     socket.on(actions::REBUY, async move |s: SocketRef, Data::<RebuyPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let socket_id = s.id.to_string();
         let chips_deduct = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
 
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
                 table.rebuy_player(payload.seat_id, payload.amount);
@@ -1677,7 +1764,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         let socket_id = s.id.to_string();
 
         let (is_playing, player_name) = {
-            let gs = state.state.lock().unwrap();
+            let gs = state.state.read().unwrap();
             if let Some(table) = gs.tables.get(&table_id) {
                 (table.is_playing(), table.find_player_by_socket_id(&socket_id)
                     .and_then(|seat| seat.player.as_ref().map(|p| p.name.clone())))
@@ -1687,7 +1774,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         if is_playing {
             tracing::info!("[STAND_UP] Table {}: {} standing up while hand in progress, marking sitting_out", table_id, socket_id);
             {
-                let mut gs = state.state.lock().unwrap();
+                let mut gs = state.state.write().unwrap();
                 if let Some(table) = gs.tables.get_mut(&table_id) {
                     for seat_opt in table.seats.values_mut() {
                         if let Some(seat) = seat_opt {
@@ -1703,7 +1790,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
 
         let chips_return = {
-            let gs = state.state.lock().unwrap();
+            let gs = state.state.read().unwrap();
             if let Some(table) = gs.tables.get(&table_id) {
                 table.find_player_by_socket_id(&socket_id)
                     .and_then(|seat| {
@@ -1717,7 +1804,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
 
         let (stand_msg, need_clear) = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 let msg = table.find_player_by_socket_id(&socket_id)
                     .and_then(|seat| {
@@ -1740,7 +1827,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
     socket.on(actions::SITTING_OUT, async move |_s: SocketRef, Data::<SittingPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
         {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
                 if let Some(Some(seat)) = table.seats.get_mut(&payload.seat_id) {
                     seat.sitting_out = true;
@@ -1752,7 +1839,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
     socket.on(actions::SITTING_IN, async move |_s: SocketRef, Data::<SittingPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let should_start = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
                 if let Some(Some(seat)) = table.seats.get_mut(&payload.seat_id) {
                     seat.sitting_out = false;
@@ -1768,53 +1855,80 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
     });
 
-    socket.on(actions::SHUFFLE_SUBMIT, async move |s: SocketRef, Data::<ShuffleSubmitPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::SHUFFLE_SUBMIT, async move |s: SocketRef, Data::<serde_json::Value>(data), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let socket_id = s.id.to_string();
-        let (result, shuffle_state) = {
-            let mut gs = state.state.lock().unwrap();
-            if let Some(table) = gs.tables.get_mut(&payload.table_id) {
-                let res = table.submit_shuffle(&socket_id);
-                let st = table.get_shuffle_public_state();
-                (res, st)
-            } else {
-                (Err("Table not found".to_string()), None)
-            }
-        };
+        let payload: Result<ShuffleSubmitPayload, _> = serde_json::from_value(data.clone());
+        match payload {
+            Ok(payload) => {
+                let socket_id = s.id.to_string();
+                tracing::debug!("[SHUFFLE_SUBMIT] request received, pk_hex={}, table_id={}", payload.pk_hex, payload.table_id);
 
-        match result {
-            Ok(()) => {
-                let all_done = {
-                    let gs = state.state.lock().unwrap();
-                    gs.tables.get(&payload.table_id).map(|t| t.is_all_players_shuffled()).unwrap_or(false)
+                let player = {
+                    let gs = state.state.read().unwrap();
+                    gs.players.get(&socket_id).cloned()
                 };
-                if all_done {
-                    let mut gs = state.state.lock().unwrap();
-                    if let Some(table) = gs.tables.get_mut(&payload.table_id) {
-                        table.shuffle_state.is_active = false;
-                        table.round_state = RoundState::ShuffleComplete;
+
+                let player = match player {
+                    Some(p) => p,
+                    None => {
+                        tracing::warn!("[SIT_DOWN_V2] Player not found for socket_id: {}", socket_id);
+                        return;
                     }
-                } else {
-                    let mut gs = state.state.lock().unwrap();
-                    if let Some(table) = gs.tables.get_mut(&payload.table_id) {
-                        table.complete_or_continue_next_shuffler();
+                };
+                
+                let result = state.submit_verified_shuffle_for_pk(payload.table_id, &payload.pk_hex,player, payload.output_cards.clone(), payload.shuffle_proof.clone());
+
+                match result {
+                    Ok(()) => {
+                        tracing::debug!("[SHUFFLE_SUBMIT] shuffle submitted and verified, pk_hex={}, table_id={}", payload.pk_hex, payload.table_id);
+                        let is_active_and_next_player = {
+                            let gs = state.state.read().unwrap();
+                            if let Some(table) = gs.tables.get(&payload.table_id) {
+                                if table.shuffle_state.is_active {
+                                    let current_pk = table.shuffle_state.current_player_pk.clone();
+                                    let socket_id = current_pk.and_then(|pk| {
+                                        gs.players.values().find(|p| p.pk_hex == pk).map(|p| p.socket_id.clone())
+                                    });
+                                    socket_id.map(|sid| (table.get_shuffle_public_state(), sid))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        
+                        if let Some((Some(shuffle_state), socket_id)) = is_active_and_next_player {
+                            if let Ok(sid) = socket_id.parse::<socketioxide::socket::Sid>() {
+                                if let Some(socket) = io.get_socket(sid) {
+                                    let notice = ShuffleNoticePayload { 
+                                        table_id: payload.table_id, 
+                                        shuffle_state: Some(shuffle_state) 
+                                    };
+                                    let _ = socket.emit(actions::SHUFFLE_NOTICE, &notice);
+                                }
+                            }
+                        }
+                        
+                        broadcast_to_table(&io, &state, payload.table_id, None).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("[SHUFFLE_SUBMIT] shuffle verification failed, pk_hex={}, table_id={}, error={}", payload.pk_hex, payload.table_id, e);
                     }
                 }
-                if let Some(st) = shuffle_state {
-                    let notice = ShuffleNoticePayload { table_id: payload.table_id, shuffle_state: Some(st) };
-                    let _ = io.emit(actions::SHUFFLE_NOTICE, &notice).await;
-                }
-                broadcast_to_table(&io, &state, payload.table_id, None).await;
             }
             Err(e) => {
-                tracing::warn!("[SHUFFLE_SUBMIT] Failed for player {}: {}", socket_id, e);
+                tracing::error!("[SHUFFLE_SUBMIT] Failed to parse payload: {}, raw: {:?}", e, data);
             }
         }
     });
 
+    
+
     socket.on(actions::REVEAL_SUBMIT, async move |s: SocketRef, Data::<RevealSubmitPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let socket_id = s.id.to_string();
         let result = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             let player = gs.players.get(&socket_id).cloned();
             if let Some(player) = gs.players.get(&socket_id){
                 Some(player.pk_hex.clone())
@@ -1828,7 +1942,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         }
         let pk_hex = result.unwrap();
         let all_complete = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
                 table.mark_player_reveal_complete(pk_hex.as_str())
             } else {
@@ -1844,9 +1958,9 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
     socket.on(actions::EXPEL_INITIATE, async move |s: SocketRef, Data::<ExpelInitiatePayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let socket_id = s.id.to_string();
         let result = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
-                table.start_expel(&payload.target_socket_id, &socket_id)
+                table.start_expel()
             } else {
                 Err("Table not found".to_string())
             }
@@ -1855,18 +1969,16 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         match result {
             Ok(()) => {
                 let expel_payload = {
-                    let gs = state.state.lock().unwrap();
+                    let gs = state.state.read().unwrap();
                     gs.tables.get(&payload.table_id).map(|t| ExpelResultPayload {
                         table_id: payload.table_id,
-                        target_socket_id: t.expel_state.target_player_pk.clone(),
                         phase: t.expel_state.phase,
-                        voted_players: t.expel_state.voted_players.clone(),
-                        required_votes: t.expel_state.required_votes,
+                        completed_players: t.expel_state.completed_players.clone(),
                         expelled: false,
                     })
                 };
                 if let Some(p) = expel_payload {
-                    let _ = io.emit(actions::EXPEL_RESULT, &p).await;
+                    let _ = io.to(table_room_name(payload.table_id)).emit(actions::EXPEL_RESULT, &p).await;
                 }
                 broadcast_to_table(&io, &state, payload.table_id, Some("Expel vote initiated")).await;
             }
@@ -1879,7 +1991,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
     socket.on(actions::EXPEL_VOTE, async move |s: SocketRef, Data::<ExpelVotePayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let socket_id = s.id.to_string();
         let result = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
                 table.vote_expel(&socket_id, payload.vote)
             } else {
@@ -1890,18 +2002,16 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         match result {
             Ok(phase) => {
                 let expel_payload = {
-                    let gs = state.state.lock().unwrap();
+                    let gs = state.state.read().unwrap();
                     gs.tables.get(&payload.table_id).map(|t| ExpelResultPayload {
                         table_id: payload.table_id,
-                        target_socket_id: t.expel_state.target_player_pk.clone(),
                         phase,
-                        voted_players: t.expel_state.voted_players.clone(),
-                        required_votes: t.expel_state.required_votes,
+                        completed_players: t.expel_state.completed_players.clone(),
                         expelled: phase == ExpelPhase::Completed,
                     })
                 };
                 if let Some(p) = expel_payload {
-                    let _ = io.emit(actions::EXPEL_RESULT, &p).await;
+                    let _ = io.to(table_room_name(payload.table_id)).emit(actions::EXPEL_RESULT, &p).await;
                 }
                 broadcast_to_table(&io, &state, payload.table_id, None).await;
             }
@@ -1913,7 +2023,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
     socket.on(actions::EXPEL_FORCE, async move |_s: SocketRef, Data::<ExpelForcePayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let result = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
                 table.force_expel(&payload.target_socket_id)
             } else {
@@ -1925,13 +2035,11 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             Ok(()) => {
                 let expel_payload = ExpelResultPayload {
                     table_id: payload.table_id,
-                    target_socket_id: Some(payload.target_socket_id.clone()),
                     phase: ExpelPhase::Forced,
-                    voted_players: vec![],
-                    required_votes: 0,
+                    completed_players: vec![],
                     expelled: true,
                 };
-                let _ = io.emit(actions::EXPEL_RESULT, &expel_payload).await;
+                let _ = io.to(table_room_name(payload.table_id)).emit(actions::EXPEL_RESULT, &expel_payload).await;
                 broadcast_to_table(&io, &state, payload.table_id, Some("Player forcefully expelled")).await;
             }
             Err(e) => {
@@ -1943,7 +2051,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
     socket.on_disconnect(async move |s: SocketRef, io: SocketIo, State(state): State<Arc<SocketState>>| {
         let socket_id = s.id.to_string();
         let (auto_fold_table_ids, user_id, affected_table_ids, need_cleanup): (Vec<u32>, Option<String>, Vec<u32>, bool) = {
-            let mut gs = state.state.lock().unwrap();
+            let mut gs = state.state.write().unwrap();
 
             let uid = gs.players.get(&socket_id).map(|p| p.id.clone());
             let mut fold_tables = Vec::new();
@@ -1992,10 +2100,10 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         let _ = io.emit(actions::TABLES_UPDATED, &tables_info).await;
         let _ = io.emit(actions::PLAYERS_UPDATED, &players_info).await;
 
-        if need_cleanup {
-            if let Some(ref uid) = user_id {
-                schedule_disconnect_cleanup(io, state, uid.clone(), socket_id);
-            }
-        }
+        // if need_cleanup {
+        //     if let Some(ref uid) = user_id {
+        //         schedule_disconnect_cleanup(io, state, uid.clone(), socket_id);
+        //     }
+        // }
     });
 }

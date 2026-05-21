@@ -12,3 +12,10 @@ pub struct Player {
     pub pk_hex: String,
     pub readable_hands: Vec<ElGamalCiphertextJson>
 }
+
+#[derive(Debug, Clone)]
+pub struct PlayerWithProof {
+    pub player: Player,
+    pub pk: poker_protocol::crypto::EcPoint,
+    pub pk_proof: poker_protocol::z_poker::PKOwnershipProof,
+}

@@ -387,6 +387,7 @@ pub enum VerificationError {
     PlayerNotFound,
     TooManyCardsReplaced,
     InvalidC2Consistency,
+    InvalidPlaintext,
     InvalidDummyCount,
     // 🆕🆕🆕 Anti-Replay & SK Validation
     InvalidSecretKey,

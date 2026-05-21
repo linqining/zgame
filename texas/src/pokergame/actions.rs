@@ -31,3 +31,4 @@ pub const EXPEL_INITIATE: &str = "EXPEL_INITIATE";
 pub const EXPEL_VOTE: &str = "EXPEL_VOTE";
 pub const EXPEL_FORCE: &str = "EXPEL_FORCE";
 pub const EXPEL_RESULT: &str = "EXPEL_RESULT";
+pub const EXPEL_NOTICE: &str = "EXPEL_NOTICE";

@@ -17,6 +17,7 @@ import {
   TABLE_LEFT,
   TABLE_UPDATED,
   SHUFFLE_NOTICE,
+  SHUFFLE_SUBMIT,
   REVEAL_NOTICE,
   HAND_REVEAL_RESULT,
   COMMUNITY_REVEAL_RESULT,
@@ -24,6 +25,7 @@ import {
   EXPEL_VOTE,
   EXPEL_FORCE,
   EXPEL_RESULT,
+  EXPEL_NOTICE,
 } from '../../pokergame/actions';
 import authContext from '../auth/authContext';
 import socketContext from '../websocket/socketContext';
@@ -117,35 +119,35 @@ const GameState = ({ history, children }) => {
 
   const handleShuffleNotice = useCallback(async (data) => {
     console.log(SHUFFLE_NOTICE, data);
-    const { tableId, shuffle_state } = data;
-    if (!shuffle_state?.is_active) return;
+    const { tableId, shuffleState } = data;
+    if (!shuffleState?.is_active) return null;
 
     const keys = playerKeys || getPlayerKeys();
     if (!keys) {
       console.warn('[Shuffle] No player keys available');
-      return;
+      return null;
     }
-
-    if (shuffle_state.current_player_pk !== pkHex) {
+    console.log('[SHUFFLE_NOTICE] Current player:', pkHex,keys.pk_hex);
+    if (shuffleState.current_player_pk !== pkHex) {
       console.log('[Shuffle] Not my turn, waiting...');
-      return;
+      return null;
     }
 
     if (shuffleLoadingRef.current) {
       console.log('[Shuffle] Already processing a shuffle');
-      return;
+      return null;
     }
 
-    const deckEncrypted = shuffle_state.deck_encrypted;
-    const aggregatePk = shuffle_state.aggregate_pk;
+    const deckEncrypted = shuffleState.deck_encrypted;
+    const aggregatePk = shuffleState.aggregate_pk;
 
     if (!deckEncrypted || deckEncrypted.length === 0) {
       console.warn('[Shuffle] No deck_encrypted in shuffle state');
-      return;
+      return null;
     }
     if (!aggregatePk) {
       console.warn('[Shuffle] No aggregate_pk');
-      return;
+      return null;
     }
 
     shuffleLoadingRef.current = true;
@@ -164,18 +166,18 @@ const GameState = ({ history, children }) => {
       }
 
       const gameId = String(tableId);
-      await gameApi.shuffle(gameId, {
-        pk_hex: pkHex,
-        shuffle_data: {
-          output_cards: shuffleResult.output_cards,
-          proof: shuffleResult.proof,
-        },
-      });
-
-      addMessage(`Shuffle submitted (${shuffleResult.output_cards.length} cards)`);
+      console.log(SHUFFLE_SUBMIT, { gameId, pkHex, cardCount: shuffleResult.output_cards.length });
+      
+      return {
+        tableId,
+        gameId,
+        pkHex,
+        shuffleResult,
+      };
     } catch (e) {
       console.error('[Shuffle] Failed:', e);
       addMessage(`Shuffle failed: ${e.message || e}`);
+      return null;
     } finally {
       shuffleLoadingRef.current = false;
       setShuffleLoading(false);
@@ -323,6 +325,19 @@ const GameState = ({ history, children }) => {
     addMessage(`Community cards revealed: ${cards.length} cards`);
   }, [addMessage]);
 
+  const handleExpelNotice = useCallback((data) => {
+    console.log(EXPEL_NOTICE, data);
+    console.log(HAND_REVEAL_RESULT, data);
+    const { table_id, phase, completed_players, pending_players, expel_deck } = data;
+    const keys = playerKeys || getPlayerKeys();
+    if (!keys) {
+      console.warn('[HandReveal] No player keys available for decryption');
+      return;
+    }
+    keys.decrypt_expel_deck(expel_deck);
+    
+  }, [playerKeys, pkHex, getPlayerKeys, addMessage]);
+
   useEffect(() => {
     if (socket) {
       window.addEventListener('unload', leaveTable);
@@ -348,12 +363,27 @@ const GameState = ({ history, children }) => {
         setCommunityCards([]);
       });
 
-      socket.on(SHUFFLE_NOTICE, (data) => {
-        handleShuffleNotice(data);
+      socket.on(SHUFFLE_NOTICE, async (data) => {
+        const result = await handleShuffleNotice(data);
+        if (result) {
+          console.log('SHUFFLE_NOTICE shuffle proof', result.shuffleResult.shuffle_proof);
+          socket.emit(SHUFFLE_SUBMIT, {
+            table_id: result.tableId,
+            pk_hex: result.pkHex,
+            output_cards: result.shuffleResult.output_cards,
+            shuffle_proof: result.shuffleResult.shuffle_proof,
+          });
+          console.log(SHUFFLE_SUBMIT, result);
+          addMessage(`Shuffle submitted (${result.shuffleResult.output_cards.length} cards)`);
+        }
       });
 
       socket.on(REVEAL_NOTICE, (data) => {
         handleRevealNotice(data);
+      });
+
+      socket.on(EXPEL_NOTICE, (data) => {
+        handleExpelNotice(data);
       });
 
       socket.on(EXPEL_RESULT, (data) => {
