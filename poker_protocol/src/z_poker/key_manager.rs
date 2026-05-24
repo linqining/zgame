@@ -1,13 +1,12 @@
 use crate::crypto::{EcPoint, Scalar, BASE_G};
 use sha2::{Sha256, Digest};
-use rand_core::RngCore;
-use ff::{Field, PrimeField};
-use group::{Group, GroupEncoding};
+use rand_core::{RngCore, CryptoRng};
+use curve25519_dalek::traits::{Identity, IsIdentity};
 use std::collections::HashMap;
 use hex;
 
 fn pk_to_hex(pk: &EcPoint) -> String {
-    hex::encode(pk.to_affine().to_bytes())
+    hex::encode(pk.compress().as_bytes())
 }
 
 #[derive(Debug, Clone)]
@@ -17,19 +16,18 @@ pub struct PKOwnershipProof {
 }
 
 impl PKOwnershipProof {
-    pub fn prove(sk: &Scalar, pk: &EcPoint, rng: &mut impl RngCore) -> Self {
+    pub fn prove(sk: &Scalar, pk: &EcPoint, rng: &mut (impl RngCore + CryptoRng)) -> Self {
         let w = Scalar::random(rng);
         let commitment = *BASE_G * w;
 
         let mut hasher = Sha256::new();
-        hasher.update(BASE_G.to_affine().to_bytes());
-        hasher.update(pk.to_affine().to_bytes());
-        hasher.update(commitment.to_affine().to_bytes());
+        hasher.update(BASE_G.compress().as_bytes());
+        hasher.update(pk.compress().as_bytes());
+        hasher.update(commitment.compress().as_bytes());
         let challenge_bytes = hasher.finalize();
         let mut challenge_arr = [0u8; 32];
         challenge_arr.copy_from_slice(&challenge_bytes[..32]);
-        let challenge = Option::<Scalar>::from(Scalar::from_repr(challenge_arr.into()))
-            .unwrap_or(Scalar::ZERO);
+        let challenge = Scalar::from_bytes_mod_order(challenge_arr);
 
         let response = w + challenge * sk;
 
@@ -37,19 +35,18 @@ impl PKOwnershipProof {
     }
 
     pub fn verify(&self, pk: &EcPoint) -> bool {
-        if bool::from(self.commitment.is_identity()) {
+        if self.commitment.is_identity() {
             return false;
         }
 
         let mut hasher = Sha256::new();
-        hasher.update(BASE_G.to_affine().to_bytes());
-        hasher.update(pk.to_affine().to_bytes());
-        hasher.update(self.commitment.to_affine().to_bytes());
+        hasher.update(BASE_G.compress().as_bytes());
+        hasher.update(pk.compress().as_bytes());
+        hasher.update(self.commitment.compress().as_bytes());
         let challenge_bytes = hasher.finalize();
         let mut challenge_arr = [0u8; 32];
         challenge_arr.copy_from_slice(&challenge_bytes[..32]);
-        let challenge = Option::<Scalar>::from(Scalar::from_repr(challenge_arr.into()))
-            .unwrap_or(Scalar::ZERO);
+        let challenge = Scalar::from_bytes_mod_order(challenge_arr);
 
         let lhs = *BASE_G * &self.response;
         let rhs = self.commitment + pk * &challenge;
@@ -74,7 +71,7 @@ impl KeyManager {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
-            aggregated_pk: EcPoint::IDENTITY,
+            aggregated_pk: EcPoint::identity(),
         }
     }
 
@@ -164,7 +161,7 @@ impl KeyManager {
     }
 
     pub fn compute_aggregate_from_pks(pks: &[EcPoint]) -> EcPoint {
-        pks.iter().fold(EcPoint::IDENTITY, |agg, pk| agg + pk)
+        pks.iter().fold(EcPoint::identity(), |agg, pk| agg + pk)
     }
 }
 
@@ -276,7 +273,7 @@ mod tests {
         let entry = km.remove_player(pk_to_hex(&pk));
         assert!(entry.is_some());
         assert!(!km.contains_player(pk_to_hex(&pk)));
-        assert_eq!(km.get_aggregated_pk(), EcPoint::IDENTITY);
+        assert_eq!(km.get_aggregated_pk(), EcPoint::identity());
     }
 
     #[test]
@@ -295,7 +292,7 @@ mod tests {
     #[test]
     fn test_empty_aggregate_is_identity() {
         let km = KeyManager::new();
-        assert_eq!(km.get_aggregated_pk(), EcPoint::IDENTITY);
+        assert_eq!(km.get_aggregated_pk(), EcPoint::identity());
         assert_eq!(km.player_count(), 0);
     }
 

@@ -1,6 +1,11 @@
 pub mod shuffle_proof;
 pub mod remask_proof;
+pub mod reconstruction;
+pub mod reveal_token_proof;
+pub mod generalized_schnorr_proof;
+pub mod error;
+pub mod transcript_ext;
 
 pub use shuffle_proof::*;
-pub type ConsistencyProof = ZKConsistencyProof;
-pub type ShuffleProof = ZKShuffleProofV3;
+use crate::crypto::curve::RistrettoCurve;
+pub type ShuffleProof = ZKShuffleProof<RistrettoCurve>;

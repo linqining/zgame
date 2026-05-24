@@ -6,8 +6,8 @@ use poker_protocol::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext};
 use poker_protocol::card_reveal::VerificationError;
 use poker_protocol::crypto::types::BASE_G;
 use rand_core::OsRng;
-use ff::{Field, PrimeField};
-use elliptic_curve::group::GroupEncoding;
+use curve25519_dalek::ristretto::CompressedRistretto;
+use curve25519_dalek::traits::Identity;
 use serde_wasm_bindgen;
 use poker_protocol::card_reveal;
 
@@ -22,7 +22,7 @@ fn console_log(msg: &str) {
 }
 
 pub fn scalar_to_hex(s: &Scalar) -> String {
-    hex::encode(s.to_bytes())
+    hex::encode(s.as_bytes())
 }
 
 fn hex_to_scalar(hex_str: &str) -> Result<Scalar, String> {
@@ -32,26 +32,23 @@ fn hex_to_scalar(hex_str: &str) -> Result<Scalar, String> {
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
-    Option::<Scalar>::from(Scalar::from_repr(arr.into()))
-        .ok_or_else(|| "Invalid scalar value".to_string())
+    Option::from(Scalar::from_canonical_bytes(arr)).ok_or_else(|| "Invalid scalar value".to_string())
 }
 
 pub fn ecpoint_to_hex(p: &EcPoint) -> String {
-    hex::encode(p.to_bytes())
+    hex::encode(p.compress().as_bytes())
 }
 
 fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
     let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    Option::<EcPoint>::from(EcPoint::from_bytes(bytes.as_slice().into()))
-        .ok_or_else(|| "Invalid EC point".to_string())
+    CompressedRistretto::from_slice(&bytes).ok().and_then(|c| c.decompress()).ok_or_else(|| "Invalid EC point".to_string())
 }
 
 fn ct_to_json(ct: &ElGamalCiphertext) -> String {
     format!(
-        r#"{{"c1_hex":"{}","c2_hex":"{}","c3_hex":"{}"}}"#,
+        r#"{{"c1_hex":"{}","c2_hex":"{}"}}"#,
         ecpoint_to_hex(&ct.c1),
-        ecpoint_to_hex(&ct.c2),
-        ecpoint_to_hex(&ct.c3)
+        ecpoint_to_hex(&ct.c2)
     )
 }
 
@@ -61,7 +58,6 @@ fn obj_string_to_ct(val: serde_json::Value) -> Result<ElGamalCiphertext, String>
             Ok(ElGamalCiphertext {
                 c1: hex_to_ecpoint(obj["c1_hex"].as_str().unwrap_or(""))?,
                 c2: hex_to_ecpoint(obj["c2_hex"].as_str().unwrap_or(""))?,
-                c3: hex_to_ecpoint(obj["c3_hex"].as_str().unwrap_or(""))?,
             })
         }
         _ => {
@@ -77,7 +73,6 @@ fn json_to_ct(json_str: &str) -> Result<ElGamalCiphertext, String> {
     Ok(ElGamalCiphertext {
         c1: hex_to_ecpoint(val["c1_hex"].as_str().unwrap_or(""))?,
         c2: hex_to_ecpoint(val["c2_hex"].as_str().unwrap_or(""))?,
-        c3: hex_to_ecpoint(val["c3_hex"].as_str().unwrap_or(""))?,
     })
 }
 
@@ -218,7 +213,7 @@ impl WasmClientPlayer {
         }
 
         let pt = self.inner.peek_card(&ct, &tokens).map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-        Ok(ecpoint_to_hex(&pt))
+        Ok(ecpoint_to_hex(&pt.0))
     }
 
     pub fn generate_reveal_token(&self, ct_json: &str) -> Result<JsValue, JsValue> {
@@ -296,10 +291,9 @@ impl WasmClientPlayer {
         );
 
         let triple_dleq_json = format!(
-            r#"{{"a_g_hex":"{}","a_pk_hex":"{}","a_h_hex":"{}","s_hex":"{}"}}"#,
+            r#"{{"a_g_hex":"{}","a_pk_hex":"{}","s_hex":"{}"}}"#,
             ecpoint_to_hex(&round.proof.triple_dleq.A_g),
             ecpoint_to_hex(&round.proof.triple_dleq.A_pk),
-            ecpoint_to_hex(&round.proof.triple_dleq.A_h),
             scalar_to_hex(&round.proof.triple_dleq.s),
         );
 
@@ -361,10 +355,9 @@ impl WasmClientPlayer {
         );
 
         let triple_dleq_json = format!(
-            r#"{{"a_g_hex":"{}","a_pk_hex":"{}","a_h_hex":"{}","s_hex":"{}"}}"#,
+            r#"{{"a_g_hex":"{}","a_pk_hex":"{}","s_hex":"{}"}}"#,
             ecpoint_to_hex(&ms.proof.triple_dleq.A_g),
             ecpoint_to_hex(&ms.proof.triple_dleq.A_pk),
-            ecpoint_to_hex(&ms.proof.triple_dleq.A_h),
             scalar_to_hex(&ms.proof.triple_dleq.s),
         );
 
@@ -488,20 +481,10 @@ impl WasmClientPlayer {
     pub fn generate_expel_proof(
         &self,
         hand_encrypted_json: &str,
-        deck_plaintext_json: &str,
         agg_pk_hex: &str,
         per_card_tokens_json: &str,
     ) -> Result<JsValue, JsValue> {
         let hand = json_to_ct_vec(hand_encrypted_json).map_err(|e| JsValue::from_str(&e))?;
-
-        let pt_arr: Vec<String> = match serde_json::from_str(deck_plaintext_json) {
-            Ok(arr) => arr,
-            Err(e) => return Err(JsValue::from_str(&format!("JSON error: {}", e))),
-        };
-        let deck_pt: Vec<Plaintext> = pt_arr.iter()
-            .map(|s| hex_to_ecpoint(s))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| JsValue::from_str(&e))?;
 
         let agg_pk = hex_to_ecpoint(agg_pk_hex).map_err(|e| JsValue::from_str(&e))?;
 
@@ -514,15 +497,12 @@ impl WasmClientPlayer {
             }
         };
 
-        use poker_protocol::z_poker::protocol::RevealToken as RT;
-        let mut per_card_tokens: Vec<Vec<RT>> = vec![];
-        for card_tokens in &tokens_outer {
-            let mut card_token_vec = vec![];
+        use poker_protocol::card_reveal::reveal_token_proof::{ExpelHandState, RevealTokenAndProof};
+        let mut expel_hand_states: Vec<ExpelHandState> = vec![];
+        for (card_idx, card_tokens) in tokens_outer.iter().enumerate() {
+            let hand_encrypted = hand.get(card_idx).cloned().unwrap_or_else(|| ElGamalCiphertext::new_placeholder_card());
+            let mut reveal_tokens = vec![];
             for tval in card_tokens {
-                let encrypted_card = match json_to_ct(&tval.to_string()) {
-                    Ok(ct) => ct,
-                    Err(e) => return Err(JsValue::from_str(&e)),
-                };
                 let reveal_token = match hex_to_ecpoint(tval["reveal_token"].as_str().unwrap_or("")) {
                     Ok(p) => p,
                     Err(e) => return Err(JsValue::from_str(&e)),
@@ -531,12 +511,12 @@ impl WasmClientPlayer {
                     Ok(p) => p,
                     Err(e) => return Err(JsValue::from_str(&e)),
                 };
-                card_token_vec.push(RT { user_public_key: hex_to_ecpoint(tval["user_public_key"].as_str().unwrap_or(""))?, encrypted_card, proof, reveal_token });
+                reveal_tokens.push(RevealTokenAndProof { reveal_token, proof });
             }
-            per_card_tokens.push(card_token_vec);
+            expel_hand_states.push(ExpelHandState { hand_encrypted, reveal_tokens });
         }
 
-        let record = self.inner.generate_expel_proof(&hand, &deck_pt, &agg_pk, &per_card_tokens)
+        let record = self.inner.generate_expel_proof(&agg_pk, expel_hand_states)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
         let pos_str: Vec<String> = record.expelled_card_positions.iter().map(|x| x.to_string()).collect();
@@ -636,7 +616,7 @@ pub fn compute_aggregate_key(pk_hexes: &str) -> Result<String, JsValue> {
         Err(e) => return Err(JsValue::from_str(&format!("JSON error: {}", e))),
     };
 
-    let mut agg = EcPoint::IDENTITY;
+    let mut agg = EcPoint::identity();
     for pk_hex in &pks {
         let pk = match hex_to_ecpoint(pk_hex) {
             Ok(p) => p,

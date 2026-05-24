@@ -171,7 +171,7 @@ impl PlayingCard {
 
     pub fn from_plaintext(pt: &EcPoint) -> Option<Self> {
         standard_deck().iter().find(|card| {
-            *pt == *BASE_G * Scalar::from(card.id() as u32 + 1)
+            *pt == *BASE_G * Scalar::from(card.id() as u64 + 1)
         }).copied()
     }
 }
@@ -269,14 +269,14 @@ mod tests {
     #[test]
     fn test_from_plaintext_roundtrip() {
         for card in standard_deck() {
-            let pt = *BASE_G * Scalar::from(card.id() as u32 + 1);
+            let pt = *BASE_G * Scalar::from(card.id() as u64 + 1);
             assert_eq!(PlayingCard::from_plaintext(&pt), Some(card), "Roundtrip failed for {}", card);
         }
     }
 
     #[test]
     fn test_from_plaintext_invalid() {
-        let invalid = *BASE_G * Scalar::from(999u32);
+        let invalid = *BASE_G * Scalar::from(999u64);
         assert!(PlayingCard::from_plaintext(&invalid).is_none());
     }
 }

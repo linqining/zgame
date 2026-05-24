@@ -1,6 +1,5 @@
 pub mod crypto;
 pub mod zk_shuffle;
-pub mod card_reveal;
 pub mod z_poker;
 
 pub fn add(left: u64, right: u64) -> u64 {

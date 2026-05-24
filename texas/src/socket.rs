@@ -14,10 +14,13 @@ use crate::models::Database;
 use crate::pokergame::actions;
 use crate::pokergame::deck::Card;
 use crate::pokergame::game_state::{ElGamalCiphertextJson, ExpelPhase, MaskAndShuffleRoundJson, ShuffleProofJson,
-    PkProofJson, RevealPhase, ShufflePublicState};
+    PkProofJson, RevealPhase, ShufflePublicState, RevealTokenProofJson};
 use crate::pokergame::player::Player;
 use crate::pokergame::table::{ActionRequest, ClientTable, JoinResult, RoundState, Table};
 use poker_protocol::crypto::EcPoint;
+use poker_protocol::z_poker::convert::ecpoint_to_hex;
+
+
 
 fn table_room_name(table_id: u32) -> String {
     format!("table_{}", table_id)
@@ -189,12 +192,34 @@ struct RevealNoticePayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct RevealTokenAndProof {
+    pub reveal_token_proof: RevealTokenProofJson,
+    pub reveal_token_hex: String,
+}
+
+impl RevealTokenAndProof {
+    pub fn new(reveal_token_proof: RevealTokenProofJson, reveal_token_hex: String) -> Self {
+        Self {
+            reveal_token_proof,
+            reveal_token_hex,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExpelHandStateJson {
+    hand_encrypted: ElGamalCiphertextJson,
+    reveal_tokens: Vec<RevealTokenAndProof>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct ExpelNoticePayload {
     table_id: u32,
     phase: ExpelPhase,
     completed_players: Vec<String>,
     pending_players: Vec<String>,
     expel_deck: Vec<ElGamalCiphertextJson>,
+    player_hand_state: HashMap<String, Vec<ExpelHandStateJson>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -887,7 +912,7 @@ async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, table_id: u3
         };
         if let Some(timed_out_pks) = timeout_result {
             tracing::info!("[TICK] Table {} reveal token timeout for player {:?}", table_id, timed_out_pks);
-            {
+            let should_reset_hand = {
                 let mut gs = state.state.write().unwrap();
                 for timed_out_pk in &timed_out_pks {
                     if let Some(socket_id) = gs.players.values().find(|p| p.pk_hex == *timed_out_pk).map(|p| p.socket_id.clone()) {
@@ -900,12 +925,32 @@ async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, table_id: u3
                         gs.players.remove(&socket_id);
                     }
                 }
+                let mut should_reset = false;
                 if let Some(table) = gs.tables.get_mut(&table_id) {
                     for timed_out_pk in timed_out_pks.clone() {
                         table.remove_player_by_pk(&timed_out_pk);
                     }
-                    table.start_expel();
+                    if table.active_players().len() < 2 {
+                        table.round_state = RoundState::Waiting;
+                        table.reveal_token_state.reset();
+                        return Some(true);
+                    }
+
+                    if table.round_state == RoundState::PreFlopReveal {
+                        // 没有用户开到过牌，直接重开牌
+                        table.reset_for_next_hand();
+                        should_reset = true;
+                    } else {
+                        table.start_expel();
+                    }
                 }
+                should_reset
+            };
+            
+            // 在锁外广播，避免死锁
+            if should_reset_hand {
+                broadcast_to_table(io, state, table_id, Some("Player timed out reset hand")).await;
+                return Some(true);
             }
             
             let expel_notice = {
@@ -915,7 +960,22 @@ async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, table_id: u3
                     let completed_players = t.expel_state.completed_players.clone();
                     let pending_players = t.expel_state.pending_players.clone();
                     let expel_deck = t.expel_state.expel_deck.clone().into_iter().map(|c| c.into()).collect::<Vec<_>>();
-                    ExpelNoticePayload { table_id, phase, completed_players, pending_players, expel_deck }
+                    let mut player_hand_state: HashMap<String, Vec<ExpelHandStateJson>> = HashMap::new();
+                    for (pk, hand) in t.mental_poker_game.players.iter() {
+                        let mut player_hands = vec![];
+                        for card in hand.hand_encrypted.clone() {
+                            let mut reveal_token_and_proofs = vec![];
+                            for token in card.reveal_state.reveal_tokens.clone(){
+                                reveal_token_and_proofs.push(RevealTokenAndProof::new(RevealTokenProofJson::from_proof(token.proof), ecpoint_to_hex(&token.reveal_token)));
+                            }
+                            player_hands.push(ExpelHandStateJson{
+                                hand_encrypted: ElGamalCiphertextJson::from_ciphertext(&card.encrypted_card),
+                                reveal_tokens: reveal_token_and_proofs,
+                            });
+                        }
+                        player_hand_state.insert(pk.clone(), player_hands);
+                    }
+                    ExpelNoticePayload { table_id, phase, completed_players, pending_players, expel_deck, player_hand_state }
                 })
             };
             if let Some(notice) = expel_notice {

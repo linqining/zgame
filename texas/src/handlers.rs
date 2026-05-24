@@ -20,7 +20,7 @@ use crate::pokergame::table::JoinResult;
 use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::crypto::EcPoint;
 use poker_protocol::z_poker::convert::hex_to_ecpoint;
-use group::{GroupEncoding, Group};
+use curve25519_dalek::ristretto::CompressedRistretto;
 use sui_sdk::sui_crypto::SuiVerifier;
 
 #[derive(Clone)]
@@ -324,7 +324,7 @@ pub async fn join_game_and_shuffle(
 
     let player_pk = match hex::decode(&body.pk_hex)
         .ok()
-        .and_then(|bytes| EcPoint::from_bytes(bytes.as_slice().into()).into_option())
+        .and_then(|bytes| CompressedRistretto::from_slice(&bytes).ok().and_then(|c| c.decompress()))
     {
         Some(pk) => {
             tracing::debug!("[join_game_and_shuffle] pk_hex decoded to EcPoint successfully");
@@ -692,10 +692,10 @@ fn verify_sui_wallet_signature(
         ));
     }
 
-    let ecpoint = poker_protocol::crypto::EcPoint::from_bytes(pk_bytes.into());
-    let pk_hex = match Option::<poker_protocol::crypto::EcPoint>::from(ecpoint) {
+    let ecpoint: Option<EcPoint> = CompressedRistretto::from_slice(&pk_bytes).ok().and_then(|c| c.decompress());
+    let pk_hex = match ecpoint {
         Some(point) => {
-            let hex = hex::encode(point.to_affine().to_bytes());
+            let hex = hex::encode(point.compress().as_bytes());
             tracing::debug!("[verify_sui_wallet_signature] derived pk_hex={}", hex);
             hex
         }

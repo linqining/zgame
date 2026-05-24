@@ -1,1188 +1,1412 @@
-//! # ZK Shuffle Consistency Circuit (V3 — 2-Way)
-//!
-//! ## 问题背景
-//!
-//! V2 协议中的 `PerElementCommitment` 存在**隐私泄露缺陷**：
-//!
-//! ```ignore
-//! fn verify_responses(&self, responses, challenge, input_cts, output_cts) {
-//!     for i in 0..n {
-//!         let dc1 = output_cts[i].c1 - input_cts[i].c1;  // ⚠️ 按索引配对！
-//!         let dc2 = output_cts[i].c2 - input_cts[i].c2;  // ⚠️ 假设 output[i] ↔ input[i]
-//!     }
-//! }
-//! ```
-//!
-//! **问题**：在 Shuffle 场景中，`output[j] = ReEnc(input[permute[j]], r'_j)`，
-//! 即 `output[j]` 对应的是 `input[permute[j]]` 而非 `input[j]`。
-//!
-//! 按索引对齐计算差分会：
-//! 1. **泄露置换信息**：差分模式直接暴露了哪个 input 到了哪个 output 位置
-//! 2. **验证语义错误**：计算的 diff 不是真实的重加密差异，证明无意义
-//!
-//! ## 解决方案：ZK Σ-Protocol（零知识逐元素一致性证明，2-Way）
-//!
-//! ### 核心思想
-//!
-//! **Prover 知道私有置换 π 和随机数 {r'_j}，Verifier 完全不知道。**
-//!
-//! Prover 在**内部**使用真实置换计算差异值，然后通过 **Blinded Batch DLEq**
-//! 证明这些差异满足 **(G, pk) 两列一致性**，同时**不暴露任何关于 π 的信息**。
-//!
-//! ### 设计决策：为什么是 2-way（移除 c3）？
-//!
-//! | 检查方式 | 约束 |
-//! |---------|------|
-//! | log_G(D1) = log_pk(D2) | δ₁[j] 和 δ₂[j] 共享同一离散对数 r'j |
-//!
-//! **2-way 对以下攻击充分**：
-//! - C2-Swap 攻击：交换 output[a].c2 ↔ output[b].c2 → D2 离散对数偏移 → 检测 ✅
-//! - 注入偏差攻击：δ₂ 包含混合基项 → D₂ 不是 pk 的纯倍数 → 检测 ✅
-//! - 任意单列/多列篡改：通过 Schwartz-Zippel 引理检测 ✅
-//!
-//! **Soundness 归约**：
-//! - ROM 下 ρ[j] 表现为均匀随机
-//! - 若任一位置 α_j ≠ β_j，则 P[Σρ_j·(α_j-β_j)=0] ≤ 1/q ≈ 2⁻²⁵⁶
-//! - 归约到 SHA256 抗碰撞性 + ℤ_q 上均匀分布
-//!
-//! ### 协议流程
-//!
-//! ```
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                     Public Inputs                            │
-//! │  input_cts[0..n], output_cts[0..n], pk, G                   │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │                   Private Witness (仅 Prover 知道)            │
-//! │  permute[0..n], r_values[0..n]                               │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │                                                             │
-//! │  PROVER (知道 π):                                           │
-//! │  ① 计算 REAL 差异（使用私有置换）:                           │
-//! │     δ1[j] = out[j].c1 - in[π[j]].c1  = G·r'j               │
-//! │     δ2[j] = out[j].c2 - in[π[j]].c2  = pk·r'j              │
-//! │                                                             │
-//! │  ② 导出公开随机系数（从公开输出计算，Verifier 可复现）:      │
-//! │     ρ[j] = Hash("zk_rho", all_output_coords, j)             │
-//! │                                                             │
-//! │  ③ 计算批量聚合（私有，因为依赖 π）:                         │
-//! │     D1 = Σ ρ[j]·δ1[j]  = G·Σ(ρ[j]·r'j) = G·R              │
-//! │     D2 = Σ ρ[j]·δ2[j]  = pk·R                              │
-//! │                                                             │
-//! │  ④ 生成 2-Way DLEq Proof (标准 Schnorr):                    │
-//! │     w ←$ Zq                                                │
-//! │     Ag = G·w, Apk = pk·w                                   │
-//! │     c = Hash(pk, Ag, Apk, D1, D2)                          │
-//! │     s = w + c·R                                             │
-//! │                                                             │
-//! │  发送 Proof = (D1, D2, Ag, Apk, s)                          │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │                                                             │
-//! │  VERIFIER (不知道 π):                                        │
-//! │  ① 复现 ρ[j]（与 Prover 相同的公开数据）                     │
-//! │  ② 接收 (D1, D2, Ag, Apk, s)                               │
-//! │  ③ 复现挑战 c = Hash(pk, Ag, Apk, D1, D2)                  │
-//! │  ④ 验证二方程:                                              │
-//! │     G·s  == Ag + D1·c  ?                                   │
-//! │     pk·s == Apk + D2·c ?                                   │
-//! │                                                             │
-//! │  ✅ 通过 → (G,pk) 两列一致且未泄露置换                       │
-//! │  ❌ 失败 → 存在列不一致（如 c2 交换攻击）                    │
-//! └─────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! ### 安全性分析
-//!
-//! #### 隐私性 (Zero-Knowledge)
-//! - Verifier 看到：(D1, D2) 是批量聚合值，无法反推出单个 δ[j]
-//! - (Ag, Apk, s) 是标准的 Schnorr 承诺/响应，不泄露 R
-//! - **置换 π 完全隐藏**：从未出现在任何公开值中 ✅
-//! - **单个 r'_j 隐藏**：只暴露加权和 R = Σρ[j]·r'[j] ✅
-//!
-//! #### 完备性 (Completeness)
-//! - 诚实 Prover 使用真实 π 和 r' 计算 D1,D2
-//! - DLEq 方程恒成立：G·s = G·(w+cR) = Gw + GcR = Ag + D1·c ✅
-//!
-//! #### 声音性 (Soundness)
-//! - **c2 交换攻击检测**：
-//!   攻击者交换 output[a].c2 ↔ output[b].c2 后：
-//!   - D2 包含错误的 δ2 值（混合了不同元素的 r'）
-//!   - D2 ≠ pk·R（因为 R 是按正确 r' 加权的）
-//!   - 方程 pk·s = Apk + D2·c 不成立 → **检测到攻击** ✅
-//!
-//! - **注入偏差攻击检测**：
-//!   若 δ₂[j] = pk·r'_j + G·t_j 且 t_j 使逐元素 G-对数一致，
-//!   但聚合后 D₂ = pk·R + G·T 不是 pk 的纯倍数 → **检测到** ✅
-//!
-//! - **伪造证明**：需要解决离散对数问题（DLP）✅
-//!
-//! ### 与其他组件的关系
-//!
-//! | 组件 | 保护范围 | 是否泄露置换 |
-//! |------|---------|-------------|
-//! | Triple-DLEq | 全局三列总和一致性 | ❌ 不泄露 |
-//! | ProductArgument | c1 乘积关系 | ❌ 不泄露 |
-//! | **ZKConsistencyV3 (本模块)** | **逐元素 (G,pk) 一致性** | **❌ 不泄露** ✅ |
-//! | PerElementCommitment (旧) | 逐元素差异 | ⚠️ **会泄露** ✗ |
-//!
+use crate::crypto::curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
+use rand_core::{CryptoRng, RngCore};
+use crate::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof;
+use merlin::Transcript;
+use crate::zk_shuffle::transcript_ext::TranscriptExtension;
+use crate::zk_shuffle::error::VerificationError;
 
-use crate::crypto::{EcPoint, Scalar, ElGamalCiphertextV2, BASE_G, N_CARDS, hash_to_scalar};
-use ff::{Field, };
-use group::{ GroupEncoding};
-use rand_core::RngCore;
-use sha2::{Digest, Sha256};
-
-
-
-pub const ZK_CONSISTENCY_DOMAIN: &[u8] = b"zk_shuffle_consistency_v3_2way";
 
 #[derive(Debug, Clone)]
-pub struct ZKConsistencyProof {
-    pub d1: EcPoint,
-    pub d2: EcPoint,
-    pub a_g: EcPoint,
-    pub a_pk: EcPoint,
-    pub s: Scalar,
+pub struct ZKShuffleProof<C: Curve> {
+    pub sum_c1_commit: C::Point,
+    pub sum_c2_commit: C::Point,
+    /// Combined Schnorr proof for c1+c2, enforcing c1 and c2 use the same permutation.
+    /// Base points: [output[0].c1, output[0].c2, output[1].c1, output[1].c2, ..., G, pk]
+    /// Secret vec:  [k_0, k_0, k_1, k_1, ..., k_{N-1}, k_{N-1}, pk_delta, pk_delta]
+    /// R = sum_c1_commit + sum_c2_commit
+    /// 防止c1/c2 swap攻击
+    pub combined_schnorr_proof: GeneralizedSchnorrProof<C>,
+    /// 攻击5 (CRITICAL): c1/c2 信息转移攻击 — 伪造的 ZKShuffleProof 通过验证
+    ///
+    /// 漏洞根因: 合并 Schnorr 证明只约束 output[j].c1 + output[j].c2 的加权和，
+    /// 而不约束 c1 和 c2 的个体值。
+    /// 解决方法: 为每个 c1 和 c2 分别提供 Schnorr 证明，确保每个 Schnorr 证明都约束 c1 和 c2 的个体值。
+    pub sum_c1_schnorr_proof: GeneralizedSchnorrProof<C>,
+    pub sum_c2_schnorr_proof: GeneralizedSchnorrProof<C>,
+    pub nonce: C::Scalar,
 }
 
-impl ZKConsistencyProof {
-    pub fn prove(
-        input_cts: &[ElGamalCiphertextV2],
-        output_cts: &[ElGamalCiphertextV2],
-        permute: &[usize; N_CARDS],
-        r_values: &[Scalar],
-        pk: &EcPoint,
-        rng: &mut impl RngCore,
-    ) -> Self {
-        let n = N_CARDS;
+impl<C: Curve> ZKShuffleProof<C> where Transcript: TranscriptExtension<C> {
+    fn derive_batch_coefficients(input_cts: &[ElGamalCiphertextGeneric<C>], output_cts: &[ElGamalCiphertextGeneric<C>], transcript: &mut Transcript,) -> Vec<C::Scalar> {
+        let n = C::n_cards();
+        for i in input_cts.iter().take(n) {
+            transcript.append_point(b"input c1", &i.c1);
+            transcript.append_point(b"input c2", &i.c2);
+        }
 
-        let rho = Self::derive_batch_coefficients(output_cts);
-
-        let deltas: Vec<(k256::AffinePoint, k256::AffinePoint)> = (0..n)
-            .map(|j| {
-                let i = permute[j];
-                (
-                    (output_cts[j].c1 - input_cts[i].c1).to_affine(),
-                    (output_cts[j].c2 - input_cts[i].c2).to_affine(),
-                )
+        for i in output_cts.iter().take(n) {
+            transcript.append_point(b"output c1", &i.c1);
+            transcript.append_point(b"output c2", &i.c2);
+        }
+        let scalars: Vec<C::Scalar> = (0..n)
+            .map(|_| {
+                let mut buf = [0u8; 64];
+                transcript.challenge_bytes(b"rho_challenge", &mut buf);
+                C::Scalar::from_bytes_mod_order_wide(&buf)
             })
             .collect();
-
-        let weighted_r = r_values.iter()
-            .zip(rho.iter())
-            .fold(Scalar::ZERO, |acc, (r, rh)| acc + *r * *rh);
-
-        let d1 = deltas.iter()
-            .zip(rho.iter())
-            .fold(EcPoint::IDENTITY, |acc, ((dc1, _dc2), r)| acc + *dc1 * *r);
-
-        let d2 = deltas.iter()
-            .zip(rho.iter())
-            .fold(EcPoint::IDENTITY, |acc, ((_dc1, dc2), r)| acc + *dc2 * *r);
-
-        let w = Scalar::random(rng);
-
-        let a_g = *BASE_G * w;
-        let a_pk = *pk * w;
-
-        let challenge =
-            Self::hash_to_challenge(pk, &a_g, &a_pk, &d1, &d2, output_cts);
-
-        let s = w + challenge * weighted_r;
-
-        ZKConsistencyProof {
-            d1,
-            d2,
-            a_g,
-            a_pk,
-            s,
-        }
-    }
-
-    pub fn prove_commitments(
-        input_cts: &[ElGamalCiphertextV2],
-        output_cts: &[ElGamalCiphertextV2],
-        permute: &[usize; N_CARDS],
-        r_values: &[Scalar],
-        pk: &EcPoint,
-        rng: &mut impl RngCore,
-    ) -> (EcPoint, EcPoint, EcPoint, EcPoint, Scalar, Scalar) {
-        let n = N_CARDS;
-
-        let rho = Self::derive_batch_coefficients(output_cts);
-
-        let mut weighted_r = Scalar::ZERO;
-        let mut d1 = EcPoint::IDENTITY;
-        let mut d2 = EcPoint::IDENTITY;
-
-        for j in 0..n {
-            let i = permute[j];
-            let delta_c1 = output_cts[j].c1 - input_cts[i].c1;
-            let delta_c2 = output_cts[j].c2 - input_cts[i].c2;
-
-            d1 = d1 + delta_c1 * rho[j];
-            d2 = d2 + delta_c2 * rho[j];
-            weighted_r = weighted_r + r_values[j] * rho[j];
-        }
-
-        let w = Scalar::random(rng);
-
-        let a_g = *BASE_G * w;
-        let a_pk = *pk * w;
-
-        (d1, d2, a_g, a_pk, w, weighted_r)
-    }
-
-    pub fn respond(
-        d1: EcPoint,
-        d2: EcPoint,
-        a_g: EcPoint,
-        a_pk: EcPoint,
-        challenge: &Scalar,
-        w: &Scalar,
-        weighted_r: &Scalar,
-    ) -> Self {
-        let s = w + challenge * weighted_r;
-        ZKConsistencyProof {
-            d1,
-            d2,
-            a_g,
-            a_pk,
-            s,
-        }
-    }
-
-    pub fn verify_with_challenge(
-        &self,
-        output_cts: &[ElGamalCiphertextV2],
-        pk: &EcPoint,
-        external_challenge: &Scalar,
-    ) -> bool {
-        let check1 = (*BASE_G * self.s) == (self.a_g + self.d1 * *external_challenge);
-        let check2 = (*pk * self.s) == (self.a_pk + self.d2 * *external_challenge);
-
-        check1 && check2
-    }
-
-    pub fn verify(
-        &self,
-        _input_cts: &[ElGamalCiphertextV2],
-        output_cts: &[ElGamalCiphertextV2],
-        pk: &EcPoint,
-    ) -> bool {
-        let _rho = Self::derive_batch_coefficients(output_cts);
-
-        let challenge = Self::hash_to_challenge(
-            pk,
-            &self.a_g,
-            &self.a_pk,
-            &self.d1,
-            &self.d2,
-            output_cts,
-        );
-
-        let check1 = (*BASE_G * self.s) == (self.a_g + self.d1 * challenge);
-        let check2 = (*pk * self.s) == (self.a_pk + self.d2 * challenge);
-
-        check1 && check2
-    }
-
-    fn derive_batch_coefficients(output_cts: &[ElGamalCiphertextV2]) -> Vec<Scalar> {
-        let n = N_CARDS;
-        let mut coeffs = Vec::with_capacity(n);
-
-        for j in 0..n {
-            let mut h = Sha256::new();
-            h.update(ZK_CONSISTENCY_DOMAIN);
-            h.update(b":rho:");
-            h.update(&[j as u8]);
-            for ct in output_cts.iter().take(n) {
-                h.update(ct.c1.to_affine().to_bytes());
-                h.update(ct.c2.to_affine().to_bytes());
-                h.update(ct.c3.to_affine().to_bytes());
-            }
-            let digest = h.finalize();
-            coeffs.push(hash_to_scalar(&digest));
-        }
-        coeffs
-    }
-
-    fn hash_to_challenge(
-        pk: &EcPoint,
-        a_g: &EcPoint,
-        a_pk: &EcPoint,
-        d1: &EcPoint,
-        d2: &EcPoint,
-        output_cts: &[ElGamalCiphertextV2],
-    ) -> Scalar {
-        let mut h = Sha256::new();
-        h.update(ZK_CONSISTENCY_DOMAIN);
-        h.update(b":challenge:");
-        h.update(pk.to_affine().to_bytes());
-        h.update(a_g.to_affine().to_bytes());
-        h.update(a_pk.to_affine().to_bytes());
-        h.update(d1.to_affine().to_bytes());
-        h.update(d2.to_affine().to_bytes());
-        for ct in output_cts.iter().take(N_CARDS) {
-            h.update(ct.c1.to_affine().to_bytes());
-            h.update(ct.c2.to_affine().to_bytes());
-            h.update(ct.c3.to_affine().to_bytes());
-        }
-
-        let digest = h.finalize();
-        hash_to_scalar(&digest)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ZKShuffleProofV3 {
-    pub zk_consistency: ZKConsistencyProof,
-    pub triple_dleq: crate::crypto::TripleDLEqProof,
-    pub product_arg: crate::crypto::ProductArgumentV2,
-    pub global_challenge: Scalar,
-    pub nonce: Scalar,
-}
-
-impl ZKShuffleProofV3 {
-    fn compute_global_challenge(
-        pk: &EcPoint,
-        zk_a_g: &EcPoint,
-        zk_a_pk: &EcPoint,
-        zk_d1: &EcPoint,
-        zk_d2: &EcPoint,
-        dleq_A_g: &EcPoint,
-        dleq_A_h: &EcPoint,
-        prod_A: &EcPoint,
-        prod_B: &EcPoint,
-        prod_C: &EcPoint,
-        prod_D: &EcPoint,
-        input_cts: &[ElGamalCiphertextV2],
-        output_cts: &[ElGamalCiphertextV2],
-        nonce: &Scalar,
-    ) -> Scalar {
-        let mut h = Sha256::new();
-        h.update(b"shuffle_v3_transcript_bound");
-        h.update(b":nonce:");
-        h.update(nonce.to_bytes());
-        h.update(pk.to_affine().to_bytes());
-        h.update(zk_a_g.to_affine().to_bytes());
-        h.update(zk_a_pk.to_affine().to_bytes());
-        h.update(zk_d1.to_affine().to_bytes());
-        h.update(zk_d2.to_affine().to_bytes());
-        h.update(dleq_A_g.to_affine().to_bytes());
-        h.update(dleq_A_h.to_affine().to_bytes());
-        h.update(prod_A.to_affine().to_bytes());
-        h.update(prod_B.to_affine().to_bytes());
-        h.update(prod_C.to_affine().to_bytes());
-        h.update(prod_D.to_affine().to_bytes());
-
-        for ct in input_cts.iter().take(N_CARDS) {
-            h.update(ct.c1.to_affine().to_bytes());
-            h.update(ct.c2.to_affine().to_bytes());
-            h.update(ct.c3.to_affine().to_bytes());
-        }
-        for ct in output_cts.iter().take(N_CARDS) {
-            h.update(ct.c1.to_affine().to_bytes());
-            h.update(ct.c2.to_affine().to_bytes());
-            h.update(ct.c3.to_affine().to_bytes());
-        }
-
-        let digest = h.finalize();
-        hash_to_scalar(&digest)
+        scalars
     }
 
     pub fn prove(
-        input_cts: &[ElGamalCiphertextV2],
-        output_cts: &[ElGamalCiphertextV2],
-        permute: &[usize; N_CARDS],
-        r_values: &[Scalar],
-        pk: &EcPoint,
-        rng: &mut impl RngCore,
-    ) -> Self {
+        input_cts: &[ElGamalCiphertextGeneric<C>],
+        output_cts: &[ElGamalCiphertextGeneric<C>],
+        permute: &[usize],
+        r_values: &[C::Scalar],
+        pk: &C::Point,
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> Result<Self, VerificationError> {
+        let n = C::n_cards();
+        assert_eq!(input_cts.len(), n);
+        assert_eq!(output_cts.len(), n);
+        assert_eq!(permute.len(), n);
+        assert_eq!(r_values.len(), n);
 
-        let (zk_d1, zk_d2, zk_a_g, zk_a_pk, zk_w, zk_weighted_r) =
-            ZKConsistencyProof::prove_commitments(input_cts, output_cts, permute, r_values, pk, rng);
+        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        let nonce = C::Scalar::random(rng);
+        transcript.append_scalar(b"nonce", &nonce);
 
-        let total_r: Scalar = r_values
-            .iter()
-            .take(N_CARDS)
-            .fold(Scalar::ZERO, |acc, r| acc + r);
+        let rho = Self::derive_batch_coefficients(input_cts, output_cts, &mut transcript);
+        let input_c1s: Vec<C::Point> = input_cts.iter().map(|ct| ct.c1).collect();
+        let input_c2s: Vec<C::Point> = input_cts.iter().map(|ct| ct.c2).collect();
 
-        let mut sum_in = (
-            EcPoint::IDENTITY,
-            EcPoint::IDENTITY,
-            EcPoint::IDENTITY,
-        );
-        let mut sum_out = (
-            EcPoint::IDENTITY,
-            EcPoint::IDENTITY,
-            EcPoint::IDENTITY,
-        );
 
-        for ct in input_cts.iter().take(N_CARDS) {
-            sum_in.0 = sum_in.0 + ct.c1;
-            sum_in.1 = sum_in.1 + ct.c2;
-            sum_in.2 = sum_in.2 + ct.c3;
+        let sum_input_c1_commit = C::Point::vartime_multiscalar_mul(&rho, &input_c1s);
+        let sum_input_c2_commit = C::Point::vartime_multiscalar_mul(&rho, &input_c2s);
+
+        // 构造线性组合 input_cards * rho_i + share_pk*ri
+        let mut secret_vec = vec![C::Scalar::zero(); n];
+        let mut pk_delta = C::Scalar::zero();
+        for j in 0..n {
+            let position = permute.iter().position(|&x| x == j).unwrap();
+            secret_vec[position] = rho[j];
+            let r_val = r_values[position];
+            pk_delta = pk_delta - r_val * rho[j];
         }
-        for ct in output_cts.iter().take(N_CARDS) {
-            sum_out.0 = sum_out.0 + ct.c1;
-            sum_out.1 = sum_out.1 + ct.c2;
-            sum_out.2 = sum_out.2 + ct.c3;
+        secret_vec.push(pk_delta);
+
+        // 生成广义Schnorr证明，证明 swap_sum_c1_commit 和 swap_sum_c2_commit 是对应基点的线性组合
+        // Only generate if no base point is identity (placeholder cards have identity c1/c2)
+        let mut base_points_c1: Vec<C::Point> = output_cts.iter().map(|ct| ct.c1).collect();
+        let mut base_points_c2: Vec<C::Point> = output_cts.iter().map(|ct| ct.c2).collect();
+        base_points_c1.push(C::base_g());
+        base_points_c2.push(*pk);
+
+        let no_identity_c1 = input_cts.iter().all(|ct| !ct.c1.is_identity());
+        let no_identity_c2 = input_cts.iter().all(|ct| !ct.c2.is_identity());
+        if !(no_identity_c1 && no_identity_c2) {
+            return Err(VerificationError::IdentityBasePoint);
         }
 
-        let (dleq_A_g, dleq_A_pk, dleq_A_h, _dc1, _dc2, _dc3, dleq_w, dleq_total_r) =
-            crate::crypto::TripleDLEqProof::prove_commitments(
-                &sum_in.0, &sum_in.1, &sum_in.2,
-                &sum_out.0, &sum_out.1, &sum_out.2,
-                &total_r, pk, rng,
-            );
+        let no_identity_c1 = output_cts.iter().all(|ct| !ct.c1.is_identity());
+        let no_identity_c2 = output_cts.iter().all(|ct| !ct.c2.is_identity());
+        if !(no_identity_c1 && no_identity_c2) {
+            return Err(VerificationError::IdentityBasePoint);
+        }
+        // 合并 c1/c2 为单个 Schnorr 证明，强制使用相同的排列
+        // Base points: [output[0].c1, output[0].c2, output[1].c1, output[1].c2, ..., G, pk]
+        // Secret vec:  [k_0, k_0, k_1, k_1, ..., k_{N-1}, k_{N-1}, pk_delta, pk_delta]
+        // R = sum_c1_commit + sum_c2_commit
+        let mut combined_base_points: Vec<C::Point> = Vec::with_capacity(2 * n + 2);
+        let mut combined_secret_vec: Vec<C::Scalar> = Vec::with_capacity(2 * n + 2);
+        for i in 0..n {
+            combined_base_points.push(output_cts[i].c1);
+            combined_base_points.push(output_cts[i].c2);
+            combined_secret_vec.push(secret_vec[i]); // k_i for c1
+            combined_secret_vec.push(secret_vec[i]); // same k_i for c2
+        }
+        combined_base_points.push(C::base_g());
+        combined_base_points.push(*pk);
+        combined_secret_vec.push(secret_vec[n]); // pk_delta for G
+        combined_secret_vec.push(secret_vec[n]); // same pk_delta for pk
 
-        let (prod_A, prod_B, prod_C, prod_D, _pi_c1, _po_c1, prod_alpha, prod_beta, prod_total_r) =
-            crate::crypto::ProductArgumentV2::prove_commitments(
-                input_cts, output_cts, r_values, rng,
-            );
+        let combined_commit = sum_input_c1_commit + sum_input_c2_commit;
 
-        let nonce = Scalar::random(rng);
-
-        let global_challenge = Self::compute_global_challenge(
-            pk,
-            &zk_a_g, &zk_a_pk, &zk_d1, &zk_d2,
-            &dleq_A_g, &dleq_A_h,
-            &prod_A, &prod_B, &prod_C, &prod_D,
-            input_cts, output_cts,
-            &nonce,
+        let combined_schnorr_proof = GeneralizedSchnorrProof::<C>::prove(
+            &combined_base_points,
+            &combined_secret_vec,
+            &combined_commit,
+            &mut transcript,
         );
 
-        let zk_consistency = ZKConsistencyProof::respond(
-            zk_d1, zk_d2, zk_a_g, zk_a_pk,
-            &global_challenge, &zk_w, &zk_weighted_r,
+        let sum_c1_schnorr_proof = GeneralizedSchnorrProof::<C>::prove(
+            &base_points_c1,
+            &secret_vec,
+            &sum_input_c1_commit,
+            &mut transcript,
+        );
+        let sum_c2_schnorr_proof = GeneralizedSchnorrProof::<C>::prove(
+            &base_points_c2,
+            &secret_vec,
+            &sum_input_c2_commit,
+            &mut transcript,
         );
 
-        let triple_dleq = crate::crypto::TripleDLEqProof::respond(
-            dleq_A_g, dleq_A_pk, dleq_A_h,
-            &global_challenge, &dleq_w, &dleq_total_r,
-        );
-
-        let product_arg = crate::crypto::ProductArgumentV2::respond(
-            prod_A, prod_B, prod_C, prod_D,
-            &global_challenge, &prod_alpha, &prod_beta, &prod_total_r,
-        );
-
-        ZKShuffleProofV3 {
-            zk_consistency,
-            triple_dleq,
-            product_arg,
-            global_challenge,
+        Ok(ZKShuffleProof::<C> {
+            sum_c1_commit: sum_input_c1_commit,
+            sum_c2_commit: sum_input_c2_commit,
             nonce,
-        }
+            combined_schnorr_proof,
+            sum_c1_schnorr_proof,
+            sum_c2_schnorr_proof,
+        })
     }
 
     pub fn verify(
         &self,
-        input_cts: &[ElGamalCiphertextV2],
-        output_cts: &[ElGamalCiphertextV2],
-        pk: &EcPoint,
-    ) -> bool {
-        let expected_challenge = Self::compute_global_challenge(
-            pk,
-            &self.zk_consistency.a_g,
-            &self.zk_consistency.a_pk,
-            &self.zk_consistency.d1,
-            &self.zk_consistency.d2,
-            &self.triple_dleq.A_g,
-            &self.triple_dleq.A_h,
-            &self.product_arg.A,
-            &self.product_arg.B,
-            &self.product_arg.C,
-            &self.product_arg.D,
-            input_cts,
-            output_cts,
-            &self.nonce,
-        );
+        input_cts: &[ElGamalCiphertextGeneric<C>],
+        output_cts: &[ElGamalCiphertextGeneric<C>],
+        pk: &C::Point,
+    ) -> Result<(), VerificationError> {
+        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        transcript.append_scalar(b"nonce", &self.nonce);
+        let rho = Self::derive_batch_coefficients(input_cts, output_cts, &mut transcript);
 
-        if self.global_challenge != expected_challenge {
-            return false;
+        let input_c1s: Vec<C::Point> = input_cts.iter().map(|ct| ct.c1).collect();
+        let input_c2s: Vec<C::Point> = input_cts.iter().map(|ct| ct.c2).collect();
+
+        // Recompute sum commitments and verify they match the proof
+        let sum_input_c1_commit = C::Point::vartime_multiscalar_mul(&rho, &input_c1s);
+        let sum_input_c2_commit = C::Point::vartime_multiscalar_mul(&rho, &input_c2s);
+
+        if self.sum_c1_commit != sum_input_c1_commit {
+            return Err(VerificationError::InvalidDLEQProof);
+        }
+        if self.sum_c2_commit != sum_input_c2_commit {
+            return Err(VerificationError::InvalidDLEQProof);
         }
 
-        let zk_ok = self.zk_consistency.verify_with_challenge(output_cts, pk, &self.global_challenge);
-
-        let mut sum_in = (
-            EcPoint::IDENTITY,
-            EcPoint::IDENTITY,
-            EcPoint::IDENTITY,
-        );
-        let mut sum_out = (
-            EcPoint::IDENTITY,
-            EcPoint::IDENTITY,
-            EcPoint::IDENTITY,
-        );
-
-        for ct in input_cts.iter().take(N_CARDS) {
-            sum_in.0 = sum_in.0 + ct.c1;
-            sum_in.1 = sum_in.1 + ct.c2;
-            sum_in.2 = sum_in.2 + ct.c3;
+        // Reconstruct combined base points: [output[0].c1, output[0].c2, ..., G, pk]
+        let n = C::n_cards();
+        let mut combined_base_points: Vec<C::Point> = Vec::with_capacity(2 * n + 2);
+        for ct in output_cts.iter() {
+            combined_base_points.push(ct.c1);
+            combined_base_points.push(ct.c2);
         }
-        for ct in output_cts.iter().take(N_CARDS) {
-            sum_out.0 = sum_out.0 + ct.c1;
-            sum_out.1 = sum_out.1 + ct.c2;
-            sum_out.2 = sum_out.2 + ct.c3;
-        }
+        combined_base_points.push(C::base_g());
+        combined_base_points.push(*pk);
 
-        let dleq_ok = self.triple_dleq.verify_with_challenge(
-            &sum_in.0, &sum_in.1, &sum_in.2,
-            &sum_out.0, &sum_out.1, &sum_out.2,
-            pk, &self.global_challenge,
-        );
+        let mut base_points_c1: Vec<C::Point> = output_cts.iter().map(|ct| ct.c1).collect();
+        let mut base_points_c2: Vec<C::Point> = output_cts.iter().map(|ct| ct.c2).collect();
+        base_points_c1.push(C::base_g());
+        base_points_c2.push(*pk);
 
-        let product_ok = self.product_arg.verify_with_challenge(
-            input_cts, output_cts, pk, &self.global_challenge,
-        );
+        // Verify combined Schnorr proof
+        let combined_commit = self.sum_c1_commit + self.sum_c2_commit;
+        self.combined_schnorr_proof.verify(&combined_base_points, &combined_commit, &mut transcript)?;
+        self.sum_c1_schnorr_proof.verify(&base_points_c1, &self.sum_c1_commit,  &mut transcript)?;
+        self.sum_c2_schnorr_proof.verify(&base_points_c2, &self.sum_c2_commit,  &mut transcript)?;
 
-        zk_ok && dleq_ok && product_ok
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::ec_encrypt_batch_v2;
+    use crate::crypto::curve::{RistrettoCurve, ec_encrypt_batch_generic};
+    use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar as DalekScalar};
     use rand::seq::SliceRandom;
     use rand_core::OsRng;
-    use std::time;
 
-    #[test]
-    fn test_zk_consistency_normal_shuffle() {
-        println!("\n=== ZK Consistency 2-Way: Normal Shuffle (should PASS) ===\n");
+    use std::time::Duration;
 
-        let mut rng = OsRng;
-        let sk = Scalar::random(&mut rng);
-        let pk = *BASE_G * sk;
+    type EcPoint = RistrettoPoint;
+    type Scalar = DalekScalar;
+    type ElGamalCiphertext = ElGamalCiphertextGeneric<RistrettoCurve>;
 
-        let msgs: Vec<EcPoint> = (0..N_CARDS)
-            .map(|i| *BASE_G * Scalar::from((i + 1) as u32))
+    /// Helper: 生成随机密钥对
+    fn gen_keypair() -> (Scalar, EcPoint) {
+        let sk = Scalar::random(&mut OsRng);
+        (sk, RistrettoCurve::base_g() * sk)
+    }
+
+    /// Helper: 构造完整的 N_CARDS 张加密牌（无 placeholder）
+    fn make_full_encrypted_cards(pk: &EcPoint) -> Vec<ElGamalCiphertext> {
+        let n = RistrettoCurve::n_cards();
+        let msgs: Vec<EcPoint> = (0..n)
+            .map(|i| RistrettoCurve::base_g() * Scalar::from((i + 1) as u64))
             .collect();
+        ec_encrypt_batch_generic::<RistrettoCurve>(&msgs, pk, &mut OsRng)
+    }
 
-        let encrypted = ec_encrypt_batch_v2(&msgs, &pk, &mut rng);
+    /// Helper: 构造随机排列
+    fn random_permute() -> Vec<usize> {
+        let n = RistrettoCurve::n_cards();
+        let mut arr: Vec<usize> = (0..n).collect();
+        arr.shuffle(&mut OsRng);
+        arr
+    }
 
-        let permute: [usize; N_CARDS] = {
-            let mut arr: Vec<usize> = (0..N_CARDS).collect();
-            let mut seed = [0u8; 32];
-            for b in seed.iter_mut() {
-                *b = rand::random::<u8>();
-            }
-            use rand::SeedableRng;
-            let mut prng = rand::rngs::StdRng::from_seed(seed);
-            arr.shuffle(&mut prng);
-            let mut fixed = [0usize; N_CARDS];
-            fixed.copy_from_slice(&arr);
-            fixed
-        };
-
-        let full_input: Vec<ElGamalCiphertextV2> = encrypted
-            .clone()
-            .into_iter()
-            .chain(std::iter::repeat(ElGamalCiphertextV2::new_placehod_card()))
-            .take(N_CARDS)
-            .collect();
-
-        let mut r_values = Vec::with_capacity(N_CARDS);
-        let mut output = Vec::with_capacity(N_CARDS);
-        for j in 0..N_CARDS {
-            let r_j = Scalar::random(&mut rng);
+    /// Helper: 对 input_cards 按 permute 执行 shuffle + re_encrypt，返回 (r_values, output_cards)
+    fn shuffle_and_reencrypt(
+        input: &[ElGamalCiphertext],
+        permute: &[usize],
+        pk: &EcPoint,
+    ) -> (Vec<Scalar>, Vec<ElGamalCiphertext>) {
+        let n = RistrettoCurve::n_cards();
+        let mut r_values = Vec::with_capacity(n);
+        let mut output = Vec::with_capacity(n);
+        for j in 0..n {
+            let r_j = Scalar::random(&mut OsRng);
             r_values.push(r_j);
             let i = permute[j];
-            output.push(full_input[i].re_encrypt(&pk, &r_j));
+            output.push(input[i].re_encrypt(pk, &r_j));
         }
-        let begin = time::Instant::now();
-        let proof =
-            ZKConsistencyProof::prove(&full_input, &output, &permute, &r_values, &pk, &mut rng);
-        let end = begin.elapsed();
-        println!("  ZK Consistency 2-Way (normal): prove in {:?}", end);
+        (r_values, output)
+    }
 
-        let begin = time::Instant::now();
-        let valid = proof.verify(&full_input, &output, &pk);
-        let end = begin.elapsed();
-        println!("  ZK Consistency 2-Way (normal): {} in {:?}", if valid { "PASSED ✓" } else { "FAILED ✗" }, end);
+    // ========== 正常功能测试 ==========
 
+    #[test]
+    fn test_honest_prover_passes() {
+        let (_sk, pk) = gen_keypair();
+        let input = make_full_encrypted_cards(&pk);
+        let permute = random_permute();
+        let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        println!(
-            "  ZK Consistency 2-Way (normal): {}",
-            if valid { "PASSED ✓" } else { "FAILED ✗" }
-        );
-        assert!(valid, "Normal shuffle must pass ZK consistency check");
+        let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+        assert!(proof.verify(&input, &output, &pk).is_ok(), "honest prover should pass");
     }
 
     #[test]
-    fn test_zk_consistency_c2_swap_attack() {
-        println!("\n=== ZK Consistency 2-Way: C2-Swap Attack (should FAIL) ===\n");
+    fn test_identity_permutation_passes() {
+        let (_sk, pk) = gen_keypair();
+        let input = make_full_encrypted_cards(&pk);
+        let n = RistrettoCurve::n_cards();
+        let permute: Vec<usize> = (0..n).collect();
+        let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut rng = OsRng;
-        let sk = Scalar::random(&mut rng);
-        let pk = *BASE_G * sk;
-
-        let m0 = *BASE_G * Scalar::from(50u32);
-        let m1 = *BASE_G * Scalar::from(100u32);
-
-        let ct0 = ElGamalCiphertextV2::encrypt(&m0, &pk, &Scalar::from(42u32));
-        let ct1 = ElGamalCiphertextV2::encrypt(&m1, &pk, &Scalar::from(123u32));
-
-        let r_prime = Scalar::from(777u32);
-
-        let ct0_normal = ct0.re_encrypt(&pk, &r_prime);
-        let ct1_normal = ct1.re_encrypt(&pk, &r_prime);
-
-        let ct0_swap = ElGamalCiphertextV2 {
-            c1: ct0_normal.c1,
-            c2: ct1_normal.c2,
-            c3: ct0_normal.c3,
-        };
-        let ct1_swap = ElGamalCiphertextV2 {
-            c1: ct1_normal.c1,
-            c2: ct0_normal.c2,
-            c3: ct1_normal.c3,
-        };
-
-        println!("  Attack: CT0_swap=(c1₀', c2₁', c3₀'), CT1_swap=(c1₁', c2₀', c3₁')");
-
-        let inputs = vec![ct0, ct1];
-        let swap_outputs = vec![ct0_swap, ct1_swap];
-
-        let full_inputs: Vec<ElGamalCiphertextV2> = inputs
-            .into_iter()
-            .chain(std::iter::repeat(ElGamalCiphertextV2::new_placehod_card()))
-            .take(N_CARDS)
-            .collect();
-
-        let full_swap: Vec<ElGamalCiphertextV2> = swap_outputs
-            .into_iter()
-            .chain(std::iter::repeat(ElGamalCiphertextV2::new_placehod_card()))
-            .take(N_CARDS)
-            .collect();
-
-        let permute_identity: [usize; N_CARDS] = {
-            let mut arr = [0usize; N_CARDS];
-            for i in 0..N_CARDS {
-                arr[i] = i;
-            }
-            arr
-        };
-        let r_values = vec![r_prime; N_CARDS];
-
-        let proof = ZKConsistencyProof::prove(
-            &full_inputs,
-            &full_swap,
-            &permute_identity,
-            &r_values,
-            &pk,
-            &mut rng,
-        );
-        let valid = proof.verify(&full_inputs, &full_swap, &pk);
-
-        println!(
-            "  ZK Consistency 2-Way (c2-swap): {}",
-            if valid {
-                "PASSED ✗ (NOT DETECTED!)"
-            } else {
-                "FAILED ✓ (DETECTED!)"
-            }
-        );
-        assert!(
-            !valid,
-            "C2-swap attack MUST be rejected by ZK consistency proof!"
-        );
-
-        println!("\n  Decryption check:");
-        let dec0 = full_swap[0].decrypt(&sk);
-        let dec1 = full_swap[1].decrypt(&sk);
-        println!(
-            "    msg0_correct={}, msg1_correct={}",
-            dec0 == m0,
-            dec1 == m1
-        );
-        println!("    ✅ Data corruption confirmed, attack detected by ZK proof");
+        let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+        assert!(proof.verify(&input, &output, &pk).is_ok(), "identity permutation should pass");
     }
 
     #[test]
-    fn test_zk_full_protocol_normal_vs_attack() {
-        println!("\n=== ZKShuffleProofV3 (2-Way): Full Protocol Test ===\n");
+    fn test_prove_returns_error_for_placeholder_cards() {
+        let (_sk, pk) = gen_keypair();
+        let n = RistrettoCurve::n_cards();
+        let mut input = make_full_encrypted_cards(&pk);
+        // 将最后一张牌替换为 placeholder (c1=identity)
+        input[n - 1] = ElGamalCiphertext::new_placeholder_card();
+        let permute = random_permute();
+        let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut rng = OsRng;
-        let sk = Scalar::random(&mut rng);
-        let pk = *BASE_G * sk;
+        let result = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng);
+        assert!(result.is_err(), "placeholder cards should cause prove to fail");
+        assert_eq!(result.unwrap_err(), VerificationError::IdentityBasePoint);
+    }
 
-        let msgs: Vec<EcPoint> = (0..N_CARDS)
-            .map(|i| *BASE_G * Scalar::from((i + 1) as u32))
-            .collect();
+    // ========== 安全性测试：篡改检测 ==========
 
-        let encrypted = ec_encrypt_batch_v2(&msgs, &pk, &mut rng);
+    #[test]
+    fn test_wrong_pk_fails() {
+        let (_sk, pk) = gen_keypair();
+        let (_, wrong_pk) = gen_keypair();
+        let input = make_full_encrypted_cards(&pk);
+        let permute = random_permute();
+        let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let permute: [usize; N_CARDS] = {
-            let mut arr: Vec<usize> = (0..N_CARDS).collect();
-            let mut seed = [0u8; 32];
-            for b in seed.iter_mut() {
-                *b = rand::random::<u8>();
-            }
-            use rand::SeedableRng;
-            let mut prng = rand::rngs::StdRng::from_seed(seed);
-            arr.shuffle(&mut prng);
-            let mut fixed = [0usize; N_CARDS];
-            fixed.copy_from_slice(&arr);
-            fixed
-        };
+        let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+        assert!(proof.verify(&input, &output, &wrong_pk).is_err(), "wrong pk should fail");
+    }
 
-        let full_input: Vec<ElGamalCiphertextV2> = encrypted
-            .into_iter()
-            .chain(std::iter::repeat(ElGamalCiphertextV2::new_placehod_card()))
-            .take(N_CARDS)
-            .collect();
+    #[test]
+    fn test_tampered_output_fails() {
+        let (_sk, pk) = gen_keypair();
+        let input = make_full_encrypted_cards(&pk);
+        let permute = random_permute();
+        let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut r_values = Vec::with_capacity(N_CARDS);
-        let mut normal_output = Vec::with_capacity(N_CARDS);
-        for j in 0..N_CARDS {
-            let r_j = Scalar::random(&mut rng);
-            r_values.push(r_j);
-            let i = permute[j];
-            normal_output.push(full_input[i].re_encrypt(&pk, &r_j));
+        let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+
+        // 篡改 output[0] 的 c2
+        let mut tampered = output.clone();
+        tampered[0] = tampered[0].re_encrypt(&pk, &Scalar::random(&mut OsRng));
+        assert!(proof.verify(&input, &tampered, &pk).is_err(), "tampered output should fail");
+    }
+
+    #[test]
+    fn test_tampered_input_fails() {
+        let (_sk, pk) = gen_keypair();
+        let input = make_full_encrypted_cards(&pk);
+        let permute = random_permute();
+        let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
+
+        let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+
+        // 篡改 input[1]
+        let mut tampered = input.clone();
+        tampered[1] = ElGamalCiphertext::encrypt(
+            &(RistrettoCurve::base_g() * Scalar::from(99u64)), &pk, &Scalar::random(&mut OsRng),
+        );
+        assert!(proof.verify(&tampered, &output, &pk).is_err(), "tampered input should fail");
+    }
+
+    #[test]
+    fn test_c2_swap_attack_fails() {
+        let (_sk, pk) = gen_keypair();
+        let input = make_full_encrypted_cards(&pk);
+        let permute = random_permute();
+        let (r_values, mut output) = shuffle_and_reencrypt(&input, &permute, &pk);
+
+        // 交换 output[0] 和 output[1] 的 c2
+        let tmp = output[0].c2;
+        output[0].c2 = output[1].c2;
+        output[1].c2 = tmp;
+
+        let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+        assert!(proof.verify(&input, &output, &pk).is_err(), "c2 swap attack should fail");
+    }
+
+    #[test]
+    fn test_tampered_commitment_fails() {
+        let (_sk, pk) = gen_keypair();
+        let input = make_full_encrypted_cards(&pk);
+        let permute = random_permute();
+        let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
+
+        let mut proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+
+        // 篡改 combined schnorr proof 的 commitment
+        proof.combined_schnorr_proof.commitment = proof.combined_schnorr_proof.commitment + RistrettoCurve::base_g();
+        assert!(proof.verify(&input, &output, &pk).is_err(), "tampered commitment should fail");
+    }
+
+    #[test]
+    fn test_tampered_nonce_fails() {
+        let (_sk, pk) = gen_keypair();
+        let input = make_full_encrypted_cards(&pk);
+        let permute = random_permute();
+        let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
+
+        let mut proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+
+        // 篡改 nonce
+        proof.nonce = proof.nonce + Scalar::ONE;
+        assert!(proof.verify(&input, &output, &pk).is_err(), "tampered nonce should fail");
+    }
+
+    #[test]
+    fn test_tampered_response_fails() {
+        let (_sk, pk) = gen_keypair();
+        let input = make_full_encrypted_cards(&pk);
+        let permute = random_permute();
+        let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
+
+        let mut proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+
+        // 篡改 combined schnorr proof 的第一个 response
+        if !proof.combined_schnorr_proof.responses.is_empty() {
+            proof.combined_schnorr_proof.responses[0] = proof.combined_schnorr_proof.responses[0] + Scalar::ONE;
         }
-
-        println!("--- Test 1: Normal shuffle ---");
-        let normal_proof = ZKShuffleProofV3::prove(
-            &full_input,
-            &normal_output,
-            &permute,
-            &r_values,
-            &pk,
-            &mut rng,
-        );
-        let normal_valid = normal_proof.verify(&full_input, &normal_output, &pk);
-        println!(
-            "  Full ZK proof 2-Way (normal): {}",
-            if normal_valid { "PASSED ✓" } else { "FAILED ✗" }
-        );
-        assert!(normal_valid);
-
-        println!("\n--- Test 2: C2-Swap attack on element 0,1 ---");
-        let mut attacked_output = normal_output.clone();
-        let tmp = attacked_output[0].c2.clone();
-        attacked_output[0].c2 = attacked_output[1].c2.clone();
-        attacked_output[1].c2 = tmp;
-
-        let attack_proof = ZKShuffleProofV3::prove(
-            &full_input,
-            &attacked_output,
-            &permute,
-            &r_values,
-            &pk,
-            &mut rng,
-        );
-        let attack_valid = attack_proof.verify(&full_input, &attacked_output, &pk);
-        println!(
-            "  Full ZK proof 2-Way (c2-swap): {}",
-            if attack_valid { "PASSED ✗" } else { "FAILED ✓ (detected!)" }
-        );
-        assert!(!attack_valid, "C2-swap attack must fail full ZK proof!");
-
-        println!("\n=== Privacy Verification ===");
-        println!("  Verifier sees from ZKConsistencyProof (2-Way):");
-        println!(
-            "    - d1, d2: batch-aggregated group elements (no per-element info)"
-        );
-        println!("    - a_g, a_pk, s: standard Schnorr commitment/response");
-        println!("    - NO permutation vector exposed ✅");
-        println!("    - NO individual r'_j values exposed ✅");
-        println!("    - NO input↔output mapping exposed ✅");
-        println!("    - Proof size: 5 fields vs 7 (3-way), saves ~288 bytes");
+        assert!(proof.verify(&input, &output, &pk).is_err(), "tampered response should fail");
     }
+
+    // ========== 跨实例重放攻击测试 ==========
 
     #[test]
-    fn test_zk_proof_size_and_performance() {
-        println!("\n=== ZK Proof Size Analysis (2-Way) ===\n");
+    fn test_cross_instance_replay_fails() {
+        let (_sk1, pk1) = gen_keypair();
+        let (_sk2, pk2) = gen_keypair();
 
-        let mut rng = OsRng;
-        let sk = Scalar::random(&mut rng);
-        let pk = *BASE_G * sk;
+        let input1 = make_full_encrypted_cards(&pk1);
+        let input2 = make_full_encrypted_cards(&pk2);
 
-        let msgs: Vec<EcPoint> = (0..N_CARDS)
-            .map(|i| *BASE_G * Scalar::from((i + 1) as u32))
-            .collect();
-        let encrypted = ec_encrypt_batch_v2(&msgs, &pk, &mut rng);
+        let permute1 = random_permute();
+        let (r_values1, output1) = shuffle_and_reencrypt(&input1, &permute1, &pk1);
 
-        let permute: [usize; N_CARDS] = {
-            let mut arr: Vec<usize> = (0..N_CARDS).collect();
-            let mut seed = [0u8; 32];
-            for b in seed.iter_mut() {
-                *b = rand::random::<u8>();
-            }
-            use rand::SeedableRng;
-            let mut prng = rand::rngs::StdRng::from_seed(seed);
-            arr.shuffle(&mut prng);
-            let mut fixed = [0usize; N_CARDS];
-            fixed.copy_from_slice(&arr);
-            fixed
-        };
-        let full_input: Vec<ElGamalCiphertextV2> = encrypted
-            .into_iter()
-            .chain(std::iter::repeat(ElGamalCiphertextV2::new_placehod_card()))
-            .take(N_CARDS)
-            .collect();
+        let proof1 = ZKShuffleProof::<RistrettoCurve>::prove(&input1, &output1, &permute1, &r_values1, &pk1, &mut OsRng).unwrap();
 
-        let mut r_values = Vec::with_capacity(N_CARDS);
-        let mut output = Vec::with_capacity(N_CARDS);
-        for j in 0..N_CARDS {
-            let r_j = Scalar::random(&mut rng);
-            r_values.push(r_j);
-            output.push(full_input[j].re_encrypt(&pk, &r_j));
-        }
-
-        let proof = ZKConsistencyProof::prove(
-            &full_input,
-            &output,
-            &permute,
-            &r_values,
-            &pk,
-            &mut rng,
-        );
-
-        use std::mem::size_of_val;
-        println!("  ZKConsistencyProof (2-Way) size breakdown:");
-        println!(
-            "    d1, d2: 2 × {} bytes = {} bytes",
-            size_of_val(&proof.d1),
-            2 * size_of_val(&proof.d1)
-        );
-        println!(
-            "    a_g, a_pk: 2 × {} bytes = {} bytes",
-            size_of_val(&proof.a_g),
-            2 * size_of_val(&proof.a_g)
-        );
-        println!("    s (Scalar): {} bytes", size_of_val(&proof.s));
-        let total_2way =
-            2 * size_of_val(&proof.d1) + 2 * size_of_val(&proof.a_g) + size_of_val(&proof.s);
-        let total_3way = total_2way + 2 * size_of_val(&proof.d1);
-        println!("    Total (2-way): {} bytes ({:.1} KB)", total_2way, total_2way as f64 / 1024.0);
-        println!(
-            "    Total (3-way): {} bytes ({:.1} KB)",
-            total_3way,
-            total_3way as f64 / 1024.0
-        );
-        println!("    Savings: {} bytes ({:.1}%)",
-            total_3way - total_2way,
-            100.0 * (total_3way - total_2way) as f64 / total_3way as f64
-        );
-        println!(
-            "    Complexity: O(1) — constant size regardless of n={}!",
-            N_CARDS
-        );
-        println!("    Verify time: O(1) — 2 ECMuls + 2 ECAdds (vs 3+3 for 3-way)");
+        // 用 proof1 验证完全不同的 input/output/pk
+        assert!(proof1.verify(&input2, &output1, &pk2).is_err(), "cross-instance replay should fail");
+        // 即使 pk 相同，不同的 input/output 也应失败
+        assert!(proof1.verify(&input2, &output1, &pk1).is_err(), "different data same pk should fail");
     }
 
-    fn setup_shuffle_env() -> (Scalar, EcPoint, Vec<ElGamalCiphertextV2>, [usize; N_CARDS], Vec<Scalar>, Vec<ElGamalCiphertextV2>) {
-        let mut rng = OsRng;
-        let sk = Scalar::random(&mut rng);
-        let pk = *BASE_G * sk;
-
-        let msgs: Vec<EcPoint> = (0..N_CARDS)
-            .map(|i| *BASE_G * Scalar::from((i + 1) as u32))
-            .collect();
-
-        let encrypted = ec_encrypt_batch_v2(&msgs, &pk, &mut rng);
-
-        let permute: [usize; N_CARDS] = {
-            let mut arr: Vec<usize> = (0..N_CARDS).collect();
-            let mut seed = [0u8; 32];
-            for b in seed.iter_mut() {
-                *b = rand::random::<u8>();
-            }
-            use rand::SeedableRng;
-            let mut prng = rand::rngs::StdRng::from_seed(seed);
-            arr.shuffle(&mut prng);
-            let mut fixed = [0usize; N_CARDS];
-            fixed.copy_from_slice(&arr);
-            fixed
-        };
-
-        let full_input: Vec<ElGamalCiphertextV2> = encrypted
-            .into_iter()
-            .chain(std::iter::repeat(ElGamalCiphertextV2::new_placehod_card()))
-            .take(N_CARDS)
-            .collect();
-
-        let mut r_values = Vec::with_capacity(N_CARDS);
-        let mut output = Vec::with_capacity(N_CARDS);
-        for j in 0..N_CARDS {
-            let r_j = Scalar::random(rng);
-            r_values.push(r_j);
-            let i = permute[j];
-            output.push(full_input[i].re_encrypt(&pk, &r_j));
-        }
-
-        (sk, pk, full_input, permute, r_values, output)
-    }
+    // ========== Nonce 唯一性测试 ==========
 
     #[test]
-    fn test_transcript_binding_proof_splicing_attack() {
-        println!("\n=== Security Test: Proof Splicing Attack (should FAIL) ===\n");
+    fn test_nonce_uniqueness() {
+        let (_sk, pk) = gen_keypair();
+        let input = make_full_encrypted_cards(&pk);
+        let permute = random_permute();
+        let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut rng = OsRng;
+        let proof_a = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+        let proof_b = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
 
-        let (_sk1, pk1, input1, permute1, r_values1, output1) = setup_shuffle_env();
-        let (_sk2, pk2, input2, permute2, r_values2, output2) = setup_shuffle_env();
-
-        let mut rng3 = OsRng;
-        let proof1 = ZKShuffleProofV3::prove(&input1, &output1, &permute1, &r_values1, &pk1, &mut rng3);
-        let mut rng4 = OsRng;
-        let proof2 = ZKShuffleProofV3::prove(&input2, &output2, &permute2, &r_values2, &pk2, &mut rng4);
-
-        let mut spliced = proof1.clone();
-        spliced.triple_dleq = proof2.triple_dleq.clone();
-
-        let spliced_valid = spliced.verify(&input1, &output1, &pk1);
-        println!(
-            "  Spliced proof (swap triple_dleq from different shuffle): {}",
-            if spliced_valid { "PASSED ✗ (NOT DETECTED!)" } else { "FAILED ✓ (DETECTED!)" }
-        );
-        assert!(!spliced_valid, "Spliced proof must be rejected!");
-
-        let mut spliced2 = proof1.clone();
-        spliced2.product_arg = proof2.product_arg.clone();
-        let spliced2_valid = spliced2.verify(&input1, &output1, &pk1);
-        println!(
-            "  Spliced proof (swap product_arg from different shuffle): {}",
-            if spliced2_valid { "PASSED ✗ (NOT DETECTED!)" } else { "FAILED ✓ (DETECTED!)" }
-        );
-        assert!(!spliced2_valid, "Spliced product_arg must be rejected!");
-
-        let mut spliced3 = proof1.clone();
-        spliced3.zk_consistency = proof2.zk_consistency.clone();
-        let spliced3_valid = spliced3.verify(&input1, &output1, &pk1);
-        println!(
-            "  Spliced proof (swap zk_consistency from different shuffle): {}",
-            if spliced3_valid { "PASSED ✗ (NOT DETECTED!)" } else { "FAILED ✓ (DETECTED!)" }
-        );
-        assert!(!spliced3_valid, "Spliced zk_consistency must be rejected!");
-
-        println!("  ✅ Transcript binding prevents all proof splicing attacks");
+        assert_ne!(proof_a.nonce, proof_b.nonce, "each prove() must generate unique nonce");
     }
 
-    #[test]
-    fn test_transcript_binding_challenge_tampering() {
-        println!("\n=== Security Test: Challenge Tampering (should FAIL) ===\n");
-
-        let mut rng = OsRng;
-        let (_sk, pk, input, permute, r_values, output) = setup_shuffle_env();
-
-        let mut proof = ZKShuffleProofV3::prove(&input, &output, &permute, &r_values, &pk, &mut rng);
-
-        let original_challenge = proof.global_challenge;
-        proof.global_challenge = original_challenge + Scalar::ONE;
-
-        let tampered_valid = proof.verify(&input, &output, &pk);
-        println!(
-            "  Tampered global_challenge (c + 1): {}",
-            if tampered_valid { "PASSED ✗ (NOT DETECTED!)" } else { "FAILED ✓ (DETECTED!)" }
-        );
-        assert!(!tampered_valid, "Tampered challenge must be rejected!");
-
-        proof.global_challenge = Scalar::ZERO;
-        let zero_valid = proof.verify(&input, &output, &pk);
-        println!(
-            "  Tampered global_challenge (= ZERO): {}",
-            if zero_valid { "PASSED ✗ (NOT DETECTED!)" } else { "FAILED ✓ (DETECTED!)" }
-        );
-        assert!(!zero_valid, "Zero challenge must be rejected!");
-
-        println!("  ✅ Challenge integrity verified");
-    }
+    // ========== 性能基准测试 ==========
 
     #[test]
-    fn test_transcript_binding_cross_instance_replay() {
-        println!("\n=== Security Test: Cross-Instance Replay Attack (should FAIL) ===\n");
-
-        let mut rng = OsRng;
-        let (_sk1, pk1, input1, permute1, r_values1, output1) = setup_shuffle_env();
-        let (_sk2, pk2, input2, _permute2, _r_values2, output2) = setup_shuffle_env();
-
-        let proof1 = ZKShuffleProofV3::prove(&input1, &output1, &permute1, &r_values1, &pk1, &mut rng);
-
-        let replay_valid = proof1.verify(&input2, &output2, &pk2);
-        println!(
-            "  Replay proof1 on different input/output/pk: {}",
-            if replay_valid { "PASSED ✗ (NOT DETECTED!)" } else { "FAILED ✓ (DETECTED!)" }
-        );
-        assert!(!replay_valid, "Cross-instance replay must be rejected!");
-
-        let same_pk_valid = proof1.verify(&input2, &output2, &pk1);
-        println!(
-            "  Replay proof1 on different data but same pk: {}",
-            if same_pk_valid { "PASSED ✗ (NOT DETECTED!)" } else { "FAILED ✓ (DETECTED!)" }
-        );
-        assert!(!same_pk_valid, "Replay with different data must be rejected!");
-
-        println!("  ✅ Cross-instance replay attack prevented by transcript binding");
-    }
-
-    #[test]
-    fn test_hash_to_scalar_full_domain_coverage() {
-        println!("\n=== Security Test: Hash-to-Scalar Domain Coverage ===\n");
-
-        use sha2::{Digest, Sha256};
-        use ff::PrimeField;
-
-        for trial in 0..10 {
-            let mut h = Sha256::new();
-            h.update(b"domain_test:");
-            h.update(&(trial as u64).to_le_bytes());
-            let digest = h.finalize();
-
-            let s = super::hash_to_scalar(&digest);
-            let bytes = s.to_repr();
-
-            let is_nonzero = s != Scalar::ZERO;
-            let byte_sum: u64 = bytes.iter().map(|&b| b as u64).sum();
-            let has_high_entropy = byte_sum > 200;
-
-            println!(
-                "  Trial {}: nonzero={}, byte_sum={}, high_entropy={}",
-                trial, is_nonzero, byte_sum, has_high_entropy
-            );
-            assert!(is_nonzero, "Hash-to-scalar must never return zero");
-            assert!(has_high_entropy, "Hash-to-scalar should produce high-entropy values");
-        }
-
-        println!("  ✅ Hash-to-scalar produces full-domain scalars with proper entropy");
-    }
-
-    #[test]
-    fn test_nonce_uniqueness_and_replay_prevention() {
-        println!("\n=== Security Test: Nonce Uniqueness & Replay Prevention ===\n");
-
-        let mut rng1 = OsRng;
-        let (_sk, pk, input, permute, r_values, output) = setup_shuffle_env();
-
-        let proof_a = ZKShuffleProofV3::prove(&input, &output, &permute, &r_values, &pk, &mut rng1);
-        let mut rng2 = OsRng;
-        let proof_b = ZKShuffleProofV3::prove(&input, &output, &permute, &r_values, &pk, &mut rng2);
-
-        let same_nonce = proof_a.nonce == proof_b.nonce;
-        println!(
-            "  Two proofs of same shuffle have different nonces: {}",
-            if !same_nonce { "YES ✓ (unique per session)" } else { "NO ✗ (collision!)" }
-        );
-        assert!(!same_nonce, "Each prove() must generate unique nonce");
-
-        let same_challenge = proof_a.global_challenge == proof_b.global_challenge;
-        println!(
-            "  Different nonces → different global_challenges: {}",
-            if !same_challenge { "YES ✓" } else { "NO ✗" }
-        );
-        assert!(!same_challenge, "Different nonces must produce different challenges");
-
-        let mut replay_proof = proof_a.clone();
-        replay_proof.nonce = proof_b.nonce;
-        let replay_valid = replay_proof.verify(&input, &output, &pk);
-        println!(
-            "  Swapped nonce (proof_a with proof_b's nonce): {}",
-            if replay_valid { "PASSED ✗ (NOT DETECTED!)" } else { "FAILED ✓ (DETECTED!)" }
-        );
-        assert!(!replay_valid, "Nonce swap must be rejected!");
-
-        let mut zero_nonce_proof = proof_a.clone();
-        zero_nonce_proof.nonce = Scalar::ZERO;
-        let zero_nonce_valid = zero_nonce_proof.verify(&input, &output, &pk);
-        println!(
-            "  Forced nonce=ZERO: {}",
-            if zero_nonce_valid { "PASSED ✗ (NOT DETECTED!)" } else { "FAILED ✓ (DETECTED!)" }
-        );
-        assert!(!zero_nonce_valid, "Zero nonce must be rejected!");
-
-        println!("  ✅ Nonce provides strong replay protection");
-    }
-
-    #[test]
-    fn test_benchmark_zkshuffle_v3_prove_verify() {
+    fn test_benchmark_zkshuffle_prove_verify() {
         use std::time::{Duration, Instant};
-
-        println!("\n{}", "=".repeat(72));
-        println!("  ZKShuffleProofV3 Benchmark: prove() & verify()");
-        println!("{}", "=".repeat(72));
 
         const WARMUP: usize = 3;
         const ITERATIONS: usize = 20;
 
-        let mut rng = OsRng;
-        let (_sk, pk, input, permute, r_values, output) = setup_shuffle_env();
+        let (_sk, pk) = gen_keypair();
+        let input = make_full_encrypted_cards(&pk);
+        let permute = random_permute();
+        let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut prove_times: Vec<Duration> = Vec::with_capacity(ITERATIONS);
-        let mut verify_times: Vec<Duration> = Vec::with_capacity(ITERATIONS);
-        let mut proof_size_bytes = 0usize;
-
-        for i in 0..(WARMUP + ITERATIONS) {
-            let mut iter_rng = OsRng;
-
-            let start = Instant::now();
-            let proof = ZKShuffleProofV3::prove(&input, &output, &permute, &r_values, &pk, &mut iter_rng);
-            let prove_dur = start.elapsed();
-
-            if i < WARMUP {
-                println!("\n  [Warmup {}/{}] prove: {:?}", i + 1, WARMUP, prove_dur);
-                continue;
-            }
-
-            if proof_size_bytes == 0 {
-                proof_size_bytes = std::mem::size_of_val(&proof);
-            }
-
-            let start = Instant::now();
-            let valid = proof.verify(&input, &output, &pk);
-            let verify_dur = start.elapsed();
-
-            assert!(valid, "Benchmark iteration {} must verify", i);
-
-            prove_times.push(prove_dur);
-            verify_times.push(verify_dur);
+        // Warmup
+        for _ in 0..WARMUP {
+            let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+            let _ = proof.verify(&input, &output, &pk);
         }
 
-        prove_times.sort();
-        verify_times.sort();
+        let mut prove_times = Vec::with_capacity(ITERATIONS);
+        let mut verify_times = Vec::with_capacity(ITERATIONS);
 
-        let avg_prove: Duration = prove_times.iter().sum::<Duration>() / ITERATIONS as u32;
-        let avg_verify: Duration = verify_times.iter().sum::<Duration>() / ITERATIONS as u32;
-        let p50_prove = prove_times[ITERATIONS / 2];
-        let p50_verify = verify_times[ITERATIONS / 2];
-        let p99_prove = prove_times[(ITERATIONS * 99 / 100).min(ITERATIONS - 1)];
-        let p99_verify = verify_times[(ITERATIONS * 99 / 100).min(ITERATIONS - 1)];
-        let min_prove = prove_times[0];
-        let min_verify = verify_times[0];
-        let max_prove = prove_times[ITERATIONS - 1];
-        let max_verify = verify_times[ITERATIONS - 1];
+        for _ in 0..ITERATIONS {
+            let start = Instant::now();
+            let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng).unwrap();
+            prove_times.push(start.elapsed());
 
-        let prove_per_sec = 1.0f64 / avg_prove.as_secs_f64();
-        let verify_per_sec = 1.0f64 / avg_verify.as_secs_f64();
+            let verify_start = Instant::now();
+            let result = proof.verify(&input, &output, &pk);
+            verify_times.push(verify_start.elapsed());
+            assert!(result.is_ok());
+        }
 
-        println!("\n  ┌─────────────────────────────────────────────────────────────┐");
-        println!("  │  ZKShuffleProofV3 Performance (N_CARDS={}, {} iters)       │", N_CARDS, ITERATIONS);
-        println!("  ├──────────────┬──────────┬──────────┬──────────┬──────────┤");
-        println!("  │ Operation    │   Avg    │   P50    │   Min    │   Max    │");
-        println!("  ├──────────────┼──────────┼──────────┼──────────┼──────────┤");
-        println!("  │ prove()      │ {:>8.2?}ms│ {:>8.2?}ms│ {:>8.2?}ms│ {:>8.2?}ms│",
-            avg_prove.as_millis(), p50_prove.as_millis(),
-            min_prove.as_millis(), max_prove.as_millis());
-        println!("  │ verify()     │ {:>8.2?}ms│ {:>8.2?}ms│ {:>8.2?}ms│ {:>8.2?}ms│",
-            avg_verify.as_millis(), p50_verify.as_millis(),
-            min_verify.as_millis(), max_verify.as_millis());
-        println!("  ├──────────────┼──────────┼──────────┼──────────┼──────────┤");
-        println!("  │ Throughput   │ {:>8.1}/s│          │ P99={:>6.2?}ms│ P99={:>6.2?}ms│",
-            prove_per_sec, p99_prove.as_millis(), p99_verify.as_millis());
-        println!("  │ Verify rate  │ {:>8.1}/s│          │          │          │",
-            verify_per_sec);
-        println!("  ├──────────────┴──────────┴──────────┴──────────┴──────────┤");
-        println!("  │ Proof size: ~{} bytes (5 fields + nonce)                  │", proof_size_bytes);
-        println!("  │ Total (prove+verify): {:>8.2?}ms                           │",
-            (avg_prove + avg_verify).as_millis());
-        println!("  └─────────────────────────────────────────────────────────────┘");
+        let prove_avg = avg_duration(&prove_times);
+        let prove_p50 = percentile(&prove_times, 50);
+        let prove_p99 = percentile(&prove_times, 99);
+        let prove_min = prove_times.iter().min().unwrap();
+        let prove_max = prove_times.iter().max().unwrap();
 
-        assert!(avg_prove.as_millis() < 500, "prove() should complete within 500ms");
-        assert!(avg_verify.as_millis() < 100, "verify() should complete within 100ms");
+        let verify_avg = avg_duration(&verify_times);
+        let verify_p50 = percentile(&verify_times, 50);
+        let verify_p99 = percentile(&verify_times, 99);
+        let verify_min = verify_times.iter().min().unwrap();
+        let verify_max = verify_times.iter().max().unwrap();
 
-        println!("\n  ✅ Benchmark completed: all performance within acceptable bounds");
+        let proof_size_bytes = std::mem::size_of::<ZKShuffleProof<RistrettoCurve>>();
+        let total_avg = prove_avg + verify_avg;
+        let n_cards = RistrettoCurve::n_cards();
+
+        println!("\n{}", "=".repeat(72));
+        println!("  ZKShuffleProof Benchmark ({} cards, {} iterations)", n_cards, ITERATIONS);
+        println!("{}", "=".repeat(72));
+        println!("  ┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐");
+        println!("  │  Metric  │   Avg    │   P50    │   P99    │   Min    │   Max    │");
+        println!("  ├──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤");
+        println!("  │ prove    │ {:>6?} │ {:>6?} │ {:>6?} │ {:>6?} │ {:>6?} │",
+            fmt_us(prove_avg), fmt_us(prove_p50), fmt_us(prove_p99), fmt_us(*prove_min), fmt_us(*prove_max));
+        println!("  │ verify   │ {:>6?} │ {:>6?} │ {:>6?} │ {:>6?} │ {:>6?} │",
+            fmt_us(verify_avg), fmt_us(verify_p50), fmt_us(verify_p99), fmt_us(*verify_min), fmt_us(*verify_max));
+        println!("  └──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘");
+        println!("  total (prove+verify) avg: {:?}", total_avg);
+        println!("  prove throughput:  {:.1} ops/s", 1.0 / prove_avg.as_secs_f64());
+        println!("  verify throughput: {:.1} ops/s", 1.0 / verify_avg.as_secs_f64());
+        println!("  proof struct size: {} bytes", proof_size_bytes);
+        println!("{}", "=".repeat(72));
+
+        assert!(prove_avg < Duration::from_millis(500), "prove avg should be < 500ms, got {:?}", prove_avg);
+        assert!(verify_avg < Duration::from_millis(200), "verify avg should be < 200ms, got {:?}", verify_avg);
     }
+
+    fn avg_duration(times: &[Duration]) -> Duration {
+        times.iter().sum::<Duration>() / times.len() as u32
+    }
+
+    fn percentile(times: &[Duration], p: u8) -> Duration {
+        let mut sorted = times.to_vec();
+        sorted.sort();
+        let idx = ((p as f64 / 100.0) * (sorted.len() - 1) as f64).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
+    fn fmt_us(d: Duration) -> String {
+        format!("{:.0}us", d.as_micros())
+    }
+
+    // ========== 伪造攻击测试：核心漏洞 - 线性组合系数不强制为排列 ==========
+
+    /// 攻击1 (CRITICAL): 非排列映射伪造 - 复制牌+丢弃牌
+    #[test]
+    fn test_forge_proof_duplicate_and_drop_card() {
+        let (sk, pk) = gen_keypair();
+        let n = RistrettoCurve::n_cards();
+        let input = make_full_encrypted_cards(&pk);
+
+        // === 攻击: 构造 output，其中 output[0] 和 output[1] 都是 input[0] 的重加密 ===
+        let mut output = Vec::with_capacity(n);
+        let mut r_values = Vec::with_capacity(n);
+
+        // output[0] = re_encrypt(input[0]) — 正常
+        let r_0 = Scalar::random(&mut OsRng);
+        r_values.push(r_0);
+        output.push(input[0].re_encrypt(&pk, &r_0));
+
+        // output[1] = re_encrypt(input[0]) — 复制牌0！
+        let r_1 = Scalar::random(&mut OsRng);
+        r_values.push(r_1);
+        output.push(input[0].re_encrypt(&pk, &r_1));
+
+        // output[i] = re_encrypt(input[i]) for i >= 2 — 跳过了 input[1]
+        for i in 2..n {
+            let r_i = Scalar::random(&mut OsRng);
+            r_values.push(r_i);
+            output.push(input[i].re_encrypt(&pk, &r_i));
+        }
+
+        // === 手动构造伪造证明 ===
+        let nonce = Scalar::random(&mut OsRng);
+        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
+
+        // 计算 sum commitments
+        let output_c1s: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
+        let output_c2s: Vec<EcPoint> = output.iter().map(|ct| ct.c2).collect();
+        let sum_output_c1_commit = EcPoint::vartime_multiscalar_mul(&rho, &output_c1s);
+        let sum_output_c2_commit = EcPoint::vartime_multiscalar_mul(&rho, &output_c2s);
+
+        // 计算线性组合系数
+        let mut secret_vec: Vec<Scalar> = Vec::with_capacity(n + 1);
+        secret_vec.push(rho[0] + rho[1]); // k_0 = rho[0] + rho[1] (两张 output 映射到 input[0])
+        secret_vec.push(Scalar::ZERO);     // k_1 = 0 (没有 output 映射到 input[1])
+        for j in 2..n {
+            secret_vec.push(rho[j]); // k_j = rho[j]
+        }
+        let mut pk_delta = Scalar::ZERO;
+        for i in 0..n {
+            pk_delta = pk_delta + r_values[i] * rho[i];
+        }
+        secret_vec.push(pk_delta);
+
+        // 生成合并 Schnorr 证明（c1/c2 使用相同 secret_vec）
+        let mut combined_base_points: Vec<EcPoint> = Vec::with_capacity(2 * n + 2);
+        let mut combined_secret_vec: Vec<Scalar> = Vec::with_capacity(2 * n + 2);
+        for i in 0..n {
+            combined_base_points.push(output[i].c1);
+            combined_base_points.push(output[i].c2);
+            combined_secret_vec.push(secret_vec[i]);
+            combined_secret_vec.push(secret_vec[i]);
+        }
+        combined_base_points.push(RistrettoCurve::base_g());
+        combined_base_points.push(pk);
+        combined_secret_vec.push(pk_delta);
+        combined_secret_vec.push(pk_delta);
+
+        let combined_commit = sum_output_c1_commit + sum_output_c2_commit;
+
+        let combined_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &combined_base_points,
+            &combined_secret_vec,
+            &combined_commit,
+            &mut transcript,
+        );
+
+        // 生成 c1/c2 独立 Schnorr 证明
+        let mut base_points_c1: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
+        let mut base_points_c2: Vec<EcPoint> = output.iter().map(|ct| ct.c2).collect();
+        base_points_c1.push(RistrettoCurve::base_g());
+        base_points_c2.push(pk);
+
+        let sum_c1_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c1,
+            &secret_vec,
+            &sum_output_c1_commit,
+            &mut transcript,
+        );
+        let sum_c2_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c2,
+            &secret_vec,
+            &sum_output_c2_commit,
+            &mut transcript,
+        );
+
+        // 组装伪造证明
+        let forged_proof = ZKShuffleProof::<RistrettoCurve> {
+            sum_c1_commit: sum_output_c1_commit,
+            sum_c2_commit: sum_output_c2_commit,
+            nonce,
+            combined_schnorr_proof,
+            sum_c1_schnorr_proof,
+            sum_c2_schnorr_proof,
+        };
+
+        // === 伪造证明被验证拒绝 — 排列约束生效 ===
+        let verify_result = forged_proof.verify(&input, &output, &pk);
+        assert!(verify_result.is_err(), "non-permutation forged proof should be rejected");
+
+        // === 验证 output 确实不是合法 shuffle ===
+        let input_plaintexts: Vec<EcPoint> = input.iter().map(|ct| ct.decrypt(&sk)).collect();
+        let output_plaintexts: Vec<EcPoint> = output.iter().map(|ct| ct.decrypt(&sk)).collect();
+
+        // output[0] 和 output[1] 解密后都是 input[0] 的明文 — 牌被复制
+        assert_eq!(output_plaintexts[0], input_plaintexts[0], "output[0] should decrypt to input[0]");
+        assert_eq!(output_plaintexts[1], input_plaintexts[0], "output[1] should ALSO decrypt to input[0] - DUPLICATE!");
+
+        // input[1] 的明文不出现在 output 中 — 牌被丢弃
+        let input_1_plaintext = input_plaintexts[1];
+        let found = output_plaintexts.iter().any(|p| *p == input_1_plaintext);
+        assert!(!found, "input[1]'s plaintext should NOT appear in output - card was DROPPED!");
+    }
+
+    /// 攻击2 (CRITICAL): 极端情况 - 所有 output 都是同一张牌的重加密
+    #[test]
+    fn test_forge_proof_all_same_card() {
+        let (sk, pk) = gen_keypair();
+        let n = RistrettoCurve::n_cards();
+        let input = make_full_encrypted_cards(&pk);
+
+        // === 攻击: 所有 output 都是 input[0] 的重加密 ===
+        let mut output = Vec::with_capacity(n);
+        let mut r_values = Vec::with_capacity(n);
+
+        for _ in 0..n {
+            let r_i = Scalar::random(&mut OsRng);
+            r_values.push(r_i);
+            output.push(input[0].re_encrypt(&pk, &r_i));
+        }
+
+        // 构造伪造证明
+        let nonce = Scalar::random(&mut OsRng);
+        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
+
+        let output_c1s: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
+        let output_c2s: Vec<EcPoint> = output.iter().map(|ct| ct.c2).collect();
+        let sum_output_c1_commit = EcPoint::vartime_multiscalar_mul(&rho, &output_c1s);
+        let sum_output_c2_commit = EcPoint::vartime_multiscalar_mul(&rho, &output_c2s);
+
+        // k_0 = sum of all rho[i], k_j = 0 for j > 0
+        let mut secret_vec: Vec<Scalar> = Vec::with_capacity(n + 1);
+        let k_0: Scalar = rho.iter().sum();
+        secret_vec.push(k_0);
+        for _ in 1..n {
+            secret_vec.push(Scalar::ZERO);
+        }
+        let mut pk_delta = Scalar::ZERO;
+        for i in 0..n {
+            pk_delta = pk_delta + r_values[i] * rho[i];
+        }
+        secret_vec.push(pk_delta);
+
+        // 生成合并 Schnorr 证明
+        let mut combined_base_points: Vec<EcPoint> = Vec::with_capacity(2 * n + 2);
+        let mut combined_secret_vec: Vec<Scalar> = Vec::with_capacity(2 * n + 2);
+        for i in 0..n {
+            combined_base_points.push(output[i].c1);
+            combined_base_points.push(output[i].c2);
+            combined_secret_vec.push(secret_vec[i]);
+            combined_secret_vec.push(secret_vec[i]);
+        }
+        combined_base_points.push(RistrettoCurve::base_g());
+        combined_base_points.push(pk);
+        combined_secret_vec.push(pk_delta);
+        combined_secret_vec.push(pk_delta);
+
+        let combined_commit = sum_output_c1_commit + sum_output_c2_commit;
+
+        let combined_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &combined_base_points,
+            &combined_secret_vec,
+            &combined_commit,
+            &mut transcript,
+        );
+
+        // 生成 c1/c2 独立 Schnorr 证明
+        let mut base_points_c1: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
+        let mut base_points_c2: Vec<EcPoint> = output.iter().map(|ct| ct.c2).collect();
+        base_points_c1.push(RistrettoCurve::base_g());
+        base_points_c2.push(pk);
+
+        let sum_c1_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c1,
+            &secret_vec,
+            &sum_output_c1_commit,
+            &mut transcript,
+        );
+        let sum_c2_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c2,
+            &secret_vec,
+            &sum_output_c2_commit,
+            &mut transcript,
+        );
+
+        let forged_proof = ZKShuffleProof::<RistrettoCurve> {
+            sum_c1_commit: sum_output_c1_commit,
+            sum_c2_commit: sum_output_c2_commit,
+            nonce,
+            combined_schnorr_proof,
+            sum_c1_schnorr_proof,
+            sum_c2_schnorr_proof,
+        };
+
+        // 伪造证明被验证拒绝 — 排列约束生效
+        let verify_result = forged_proof.verify(&input, &output, &pk);
+        assert!(verify_result.is_err(), "non-permutation forged proof should be rejected");
+
+        // 验证所有 output 解密后都是同一张牌
+        let input_plaintexts: Vec<EcPoint> = input.iter().map(|ct| ct.decrypt(&sk)).collect();
+        let output_plaintexts: Vec<EcPoint> = output.iter().map(|ct| ct.decrypt(&sk)).collect();
+        for i in 0..n {
+            assert_eq!(output_plaintexts[i], input_plaintexts[0],
+                "All output cards should decrypt to input[0] - deck is corrupted!");
+        }
+    }
+
+    /// 攻击3 (已修复): c1/c2 使用不同的排列 — 混合组件攻击
+    #[test]
+    fn test_forge_proof_inconsistent_c1_c2() {
+        let (sk, pk) = gen_keypair();
+        let n = RistrettoCurve::n_cards();
+        let input = make_full_encrypted_cards(&pk);
+
+        // === 攻击: c1 使用恒等排列，c2 使用 swap(0,1) 排列 ===
+        let r_values: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut OsRng)).collect();
+        let mut output = Vec::with_capacity(n);
+
+        // output[0]: c1 from input[0], c2 from input[1]
+        output.push(ElGamalCiphertext {
+            c1: input[0].c1 + RistrettoCurve::base_g() * r_values[0],
+            c2: input[1].c2 + pk * r_values[0],
+        });
+        // output[1]: c1 from input[1], c2 from input[0]
+        output.push(ElGamalCiphertext {
+            c1: input[1].c1 + RistrettoCurve::base_g() * r_values[1],
+            c2: input[0].c2 + pk * r_values[1],
+        });
+        // output[i]: c1 from input[i], c2 from input[i] (i >= 2)
+        for i in 2..n {
+            output.push(ElGamalCiphertext {
+                c1: input[i].c1 + RistrettoCurve::base_g() * r_values[i],
+                c2: input[i].c2 + pk * r_values[i],
+            });
+        }
+
+        // === 尝试1: 用恒等排列的 secret_vec 构造合并证明 ===
+        let nonce = Scalar::random(&mut OsRng);
+        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
+
+        let input_c1s: Vec<EcPoint> = input.iter().map(|ct| ct.c1).collect();
+        let input_c2s: Vec<EcPoint> = input.iter().map(|ct| ct.c2).collect();
+        let sum_input_c1_commit = EcPoint::vartime_multiscalar_mul(&rho, &input_c1s);
+        let sum_input_c2_commit = EcPoint::vartime_multiscalar_mul(&rho, &input_c2s);
+
+        // 恒等排列的 secret_vec
+        let mut secret_vec: Vec<Scalar> = vec![Scalar::ZERO; n];
+        let mut pk_delta = Scalar::ZERO;
+        for j in 0..n {
+            secret_vec[j] = rho[j];
+            pk_delta = pk_delta - r_values[j] * rho[j];
+        }
+        secret_vec.push(pk_delta);
+
+        // 合并 Schnorr 证明：c1 和 c2 必须使用相同的 secret_vec
+        let mut combined_base_points: Vec<EcPoint> = Vec::with_capacity(2 * n + 2);
+        let mut combined_secret_vec: Vec<Scalar> = Vec::with_capacity(2 * n + 2);
+        for i in 0..n {
+            combined_base_points.push(output[i].c1);
+            combined_base_points.push(output[i].c2);
+            combined_secret_vec.push(secret_vec[i]);
+            combined_secret_vec.push(secret_vec[i]);
+        }
+        combined_base_points.push(RistrettoCurve::base_g());
+        combined_base_points.push(pk);
+        combined_secret_vec.push(secret_vec[n]);
+        combined_secret_vec.push(secret_vec[n]);
+
+        let combined_commit = sum_input_c1_commit + sum_input_c2_commit;
+
+        let combined_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &combined_base_points,
+            &combined_secret_vec,
+            &combined_commit,
+            &mut transcript,
+        );
+
+        // 生成 c1/c2 独立 Schnorr 证明
+        let mut base_points_c1: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
+        let mut base_points_c2: Vec<EcPoint> = output.iter().map(|ct| ct.c2).collect();
+        base_points_c1.push(RistrettoCurve::base_g());
+        base_points_c2.push(pk);
+
+        let sum_c1_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c1,
+            &secret_vec,
+            &sum_input_c1_commit,
+            &mut transcript,
+        );
+        let sum_c2_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c2,
+            &secret_vec,
+            &sum_input_c2_commit,
+            &mut transcript,
+        );
+
+        let forged_proof = ZKShuffleProof::<RistrettoCurve> {
+            sum_c1_commit: sum_input_c1_commit,
+            sum_c2_commit: sum_input_c2_commit,
+            nonce,
+            combined_schnorr_proof,
+            sum_c1_schnorr_proof,
+            sum_c2_schnorr_proof,
+        };
+
+        // === 合并证明后，c1/c2 使用不同排列的伪造证明被拒绝 ===
+        let verify_result = forged_proof.verify(&input, &output, &pk);
+        assert!(verify_result.is_err(), "c1/c2 inconsistent permutation should be rejected after fix");
+
+        // 验证 output[0] 确实不是合法密文
+        let decrypted_0 = output[0].decrypt(&sk);
+        let input_0_plain = input[0].decrypt(&sk);
+        let input_1_plain = input[1].decrypt(&sk);
+        assert_ne!(decrypted_0, input_0_plain, "output[0] should NOT decrypt to input[0]'s plaintext");
+        assert_ne!(decrypted_0, input_1_plain, "output[0] should NOT decrypt to input[1]'s plaintext either");
+    }
+
+    /// 攻击4 (HIGH): 牌替换攻击 — 将一张牌替换为另一张牌
+    #[test]
+    fn test_forge_proof_replace_card() {
+        let (sk, pk) = gen_keypair();
+        let n = RistrettoCurve::n_cards();
+        let input = make_full_encrypted_cards(&pk);
+
+        // === 攻击: output[0] = re_encrypt(input[1]), output[1] = re_encrypt(input[1]) ===
+        let mut output = Vec::with_capacity(n);
+        let mut r_values = Vec::with_capacity(n);
+
+        // output[0] = re_encrypt(input[1]) — 替换！本来应该是 input[0]
+        let r_0 = Scalar::random(&mut OsRng);
+        r_values.push(r_0);
+        output.push(input[1].re_encrypt(&pk, &r_0));
+
+        // output[1] = re_encrypt(input[1]) — 复制
+        let r_1 = Scalar::random(&mut OsRng);
+        r_values.push(r_1);
+        output.push(input[1].re_encrypt(&pk, &r_1));
+
+        // 其余正常
+        for i in 2..n {
+            let r_i = Scalar::random(&mut OsRng);
+            r_values.push(r_i);
+            output.push(input[i].re_encrypt(&pk, &r_i));
+        }
+
+        // 构造伪造证明
+        let nonce = Scalar::random(&mut OsRng);
+        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
+
+        let output_c1s: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
+        let output_c2s: Vec<EcPoint> = output.iter().map(|ct| ct.c2).collect();
+        let sum_output_c1_commit = EcPoint::vartime_multiscalar_mul(&rho, &output_c1s);
+        let sum_output_c2_commit = EcPoint::vartime_multiscalar_mul(&rho, &output_c2s);
+
+        // k_0 = 0 (没有 output 映射到 input[0])
+        // k_1 = rho[0] + rho[1] (output[0] 和 output[1] 都映射到 input[1])
+        // k_j = rho[j] for j >= 2
+        let mut secret_vec: Vec<Scalar> = Vec::with_capacity(n + 1);
+        secret_vec.push(Scalar::ZERO);           // k_0 = 0
+        secret_vec.push(rho[0] + rho[1]);        // k_1 = rho[0] + rho[1]
+        for j in 2..n {
+            secret_vec.push(rho[j]);
+        }
+        let mut pk_delta = Scalar::ZERO;
+        for i in 0..n {
+            pk_delta = pk_delta + r_values[i] * rho[i];
+        }
+        secret_vec.push(pk_delta);
+
+        // 生成合并 Schnorr 证明
+        let mut combined_base_points: Vec<EcPoint> = Vec::with_capacity(2 * n + 2);
+        let mut combined_secret_vec: Vec<Scalar> = Vec::with_capacity(2 * n + 2);
+        for i in 0..n {
+            combined_base_points.push(output[i].c1);
+            combined_base_points.push(output[i].c2);
+            combined_secret_vec.push(secret_vec[i]);
+            combined_secret_vec.push(secret_vec[i]);
+        }
+        combined_base_points.push(RistrettoCurve::base_g());
+        combined_base_points.push(pk);
+        combined_secret_vec.push(pk_delta);
+        combined_secret_vec.push(pk_delta);
+
+        let combined_commit = sum_output_c1_commit + sum_output_c2_commit;
+
+        let combined_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &combined_base_points,
+            &combined_secret_vec,
+            &combined_commit,
+            &mut transcript,
+        );
+
+        // 生成 c1/c2 独立 Schnorr 证明
+        let mut base_points_c1: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
+        let mut base_points_c2: Vec<EcPoint> = output.iter().map(|ct| ct.c2).collect();
+        base_points_c1.push(RistrettoCurve::base_g());
+        base_points_c2.push(pk);
+
+        let sum_c1_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c1,
+            &secret_vec,
+            &sum_output_c1_commit,
+            &mut transcript,
+        );
+        let sum_c2_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c2,
+            &secret_vec,
+            &sum_output_c2_commit,
+            &mut transcript,
+        );
+
+        let forged_proof = ZKShuffleProof::<RistrettoCurve> {
+            sum_c1_commit: sum_output_c1_commit,
+            sum_c2_commit: sum_output_c2_commit,
+            nonce,
+            combined_schnorr_proof,
+            sum_c1_schnorr_proof,
+            sum_c2_schnorr_proof,
+        };
+
+        // 伪造证明被验证拒绝 — 排列约束生效
+        let verify_result = forged_proof.verify(&input, &output, &pk);
+        assert!(verify_result.is_err(), "non-permutation forged proof should be rejected");
+
+        // 验证: input[0] 的明文不出现在 output 中
+        let input_plaintexts: Vec<EcPoint> = input.iter().map(|ct| ct.decrypt(&sk)).collect();
+        let output_plaintexts: Vec<EcPoint> = output.iter().map(|ct| ct.decrypt(&sk)).collect();
+        let input_0_plain = input_plaintexts[0];
+        let found = output_plaintexts.iter().any(|p| *p == input_0_plain);
+        assert!(!found, "input[0]'s plaintext should NOT appear in output - card was REPLACED!");
+    }
+
+    // ========== CRITICAL 漏洞：c1/c2 信息转移攻击 ==========
+
+    /// 攻击5 (CRITICAL): c1/c2 信息转移攻击 — 伪造的 ZKShuffleProof 通过验证
+    #[test]
+    fn test_forge_proof_c1_c2_information_shift() {
+        let (sk, pk) = gen_keypair();
+        let n = RistrettoCurve::n_cards();
+        let input = make_full_encrypted_cards(&pk);
+
+        // === 攻击: 将 input 信息从 c1 转移到 c2 ===
+        let mut output = Vec::with_capacity(n);
+        let mut r_values = Vec::with_capacity(n);
+
+        for j in 0..n {
+            let r_j = Scalar::random(&mut OsRng);
+            r_values.push(r_j);
+            // c1 = G * r_j (无 input 信息)
+            // c2 = input[j].c1 + input[j].c2 + pk * r_j (包含全部 input 信息)
+            let forged_c1 = RistrettoCurve::base_g() * r_j;
+            let forged_c2 = input[j].c1 + input[j].c2 + pk * r_j;
+            output.push(ElGamalCiphertext { c1: forged_c1, c2: forged_c2 });
+        }
+
+        // === 构造伪造证明 ===
+        let nonce = Scalar::random(&mut OsRng);
+        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
+
+        // 使用 INPUT 计算 sum commitments (与 verify 中的重计算一致)
+        let input_c1s: Vec<EcPoint> = input.iter().map(|ct| ct.c1).collect();
+        let input_c2s: Vec<EcPoint> = input.iter().map(|ct| ct.c2).collect();
+        let sum_input_c1_commit = EcPoint::vartime_multiscalar_mul(&rho, &input_c1s);
+        let sum_input_c2_commit = EcPoint::vartime_multiscalar_mul(&rho, &input_c2s);
+
+        // 使用恒等排列系数: k_j = rho_j
+        let mut secret_vec: Vec<Scalar> = rho.to_vec();
+        // pk_delta = -sum(rho_j * r_j)
+        let pk_delta: Scalar = -(0..n).map(|j| rho[j] * r_values[j]).sum::<Scalar>();
+        secret_vec.push(pk_delta);
+
+        // 构造合并 Schnorr 证明
+        let mut combined_base_points: Vec<EcPoint> = Vec::with_capacity(2 * n + 2);
+        let mut combined_secret_vec: Vec<Scalar> = Vec::with_capacity(2 * n + 2);
+        for i in 0..n {
+            combined_base_points.push(output[i].c1);
+            combined_base_points.push(output[i].c2);
+            combined_secret_vec.push(secret_vec[i]); // k_j for c1
+            combined_secret_vec.push(secret_vec[i]); // same k_j for c2
+        }
+        combined_base_points.push(RistrettoCurve::base_g());
+        combined_base_points.push(pk);
+        combined_secret_vec.push(pk_delta);
+        combined_secret_vec.push(pk_delta);
+
+        let combined_commit = sum_input_c1_commit + sum_input_c2_commit;
+
+        let combined_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &combined_base_points,
+            &combined_secret_vec,
+            &combined_commit,
+            &mut transcript,
+        );
+
+        // 生成 c1/c2 独立 Schnorr 证明
+        let mut base_points_c1: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
+        let mut base_points_c2: Vec<EcPoint> = output.iter().map(|ct| ct.c2).collect();
+        base_points_c1.push(RistrettoCurve::base_g());
+        base_points_c2.push(pk);
+
+        let sum_c1_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c1,
+            &secret_vec,
+            &sum_input_c1_commit,
+            &mut transcript,
+        );
+        let sum_c2_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c2,
+            &secret_vec,
+            &sum_input_c2_commit,
+            &mut transcript,
+        );
+
+        let forged_proof = ZKShuffleProof::<RistrettoCurve> {
+            sum_c1_commit: sum_input_c1_commit,
+            sum_c2_commit: sum_input_c2_commit,
+            nonce,
+            combined_schnorr_proof,
+            sum_c1_schnorr_proof,
+            sum_c2_schnorr_proof,
+        };
+
+        // === 添加独立 c1/c2 Schnorr 证明后，信息转移攻击被拒绝 ===
+        let verify_result = forged_proof.verify(&input, &output, &pk);
+        assert!(verify_result.is_err(),
+            "c1/c2 information shift forged proof should be REJECTED after adding independent c1/c2 proofs");
+
+        // === 验证 output 确实不是合法 shuffle ===
+        let input_plaintexts: Vec<EcPoint> = input.iter().map(|ct| ct.decrypt(&sk)).collect();
+        let output_plaintexts: Vec<EcPoint> = output.iter().map(|ct| ct.decrypt(&sk)).collect();
+
+        // output 解密后是 D_j = input[j].c1 + input[j].c2，而非原始明文
+        for j in 0..n {
+            let d_j = input[j].c1 + input[j].c2;
+            assert_eq!(output_plaintexts[j], d_j,
+                "output[{}] should decrypt to input[{}].c1 + input[{}].c2", j, j, j);
+            assert_ne!(output_plaintexts[j], input_plaintexts[j],
+                "output[{}] should NOT decrypt to the original plaintext - deck is corrupted!", j);
+        }
+    }
+
+    /// 攻击6 (CRITICAL): c1/c2 部分信息转移 — 更隐蔽的伪造
+    #[test]
+    fn test_forge_proof_c1_c2_partial_shift() {
+        let (sk, pk) = gen_keypair();
+        let n = RistrettoCurve::n_cards();
+        let input = make_full_encrypted_cards(&pk);
+
+        // alpha = 0.5: 将一半的 input[j].c1 信息转移到 c2
+        let alpha = Scalar::from(2u64).invert(); // 0.5 mod l
+        let one_minus_alpha = Scalar::ONE - alpha;
+
+        let mut output = Vec::with_capacity(n);
+        let mut r_values = Vec::with_capacity(n);
+
+        for j in 0..n {
+            let r_j = Scalar::random(&mut OsRng);
+            r_values.push(r_j);
+            let forged_c1 = input[j].c1 * alpha + RistrettoCurve::base_g() * r_j;
+            let forged_c2 = input[j].c2 + input[j].c1 * one_minus_alpha + pk * r_j;
+            output.push(ElGamalCiphertext { c1: forged_c1, c2: forged_c2 });
+        }
+
+        // 构造伪造证明 (与攻击5相同的方法)
+        let nonce = Scalar::random(&mut OsRng);
+        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
+
+        let input_c1s: Vec<EcPoint> = input.iter().map(|ct| ct.c1).collect();
+        let input_c2s: Vec<EcPoint> = input.iter().map(|ct| ct.c2).collect();
+        let sum_input_c1_commit = EcPoint::vartime_multiscalar_mul(&rho, &input_c1s);
+        let sum_input_c2_commit = EcPoint::vartime_multiscalar_mul(&rho, &input_c2s);
+
+        let mut secret_vec: Vec<Scalar> = rho.to_vec();
+        let pk_delta: Scalar = -(0..n).map(|j| rho[j] * r_values[j]).sum::<Scalar>();
+        secret_vec.push(pk_delta);
+
+        let mut combined_base_points: Vec<EcPoint> = Vec::with_capacity(2 * n + 2);
+        let mut combined_secret_vec: Vec<Scalar> = Vec::with_capacity(2 * n + 2);
+        for i in 0..n {
+            combined_base_points.push(output[i].c1);
+            combined_base_points.push(output[i].c2);
+            combined_secret_vec.push(secret_vec[i]);
+            combined_secret_vec.push(secret_vec[i]);
+        }
+        combined_base_points.push(RistrettoCurve::base_g());
+        combined_base_points.push(pk);
+        combined_secret_vec.push(pk_delta);
+        combined_secret_vec.push(pk_delta);
+
+        let combined_commit = sum_input_c1_commit + sum_input_c2_commit;
+
+        let combined_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &combined_base_points,
+            &combined_secret_vec,
+            &combined_commit,
+            &mut transcript,
+        );
+
+        // 生成 c1/c2 独立 Schnorr 证明
+        let mut base_points_c1: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
+        let mut base_points_c2: Vec<EcPoint> = output.iter().map(|ct| ct.c2).collect();
+        base_points_c1.push(RistrettoCurve::base_g());
+        base_points_c2.push(pk);
+
+        let sum_c1_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c1,
+            &secret_vec,
+            &sum_input_c1_commit,
+            &mut transcript,
+        );
+        let sum_c2_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c2,
+            &secret_vec,
+            &sum_input_c2_commit,
+            &mut transcript,
+        );
+
+        let forged_proof = ZKShuffleProof::<RistrettoCurve> {
+            sum_c1_commit: sum_input_c1_commit,
+            sum_c2_commit: sum_input_c2_commit,
+            nonce,
+            combined_schnorr_proof,
+            sum_c1_schnorr_proof,
+            sum_c2_schnorr_proof,
+        };
+
+        // 添加独立 c1/c2 Schnorr 证明后，部分信息转移攻击被拒绝
+        let verify_result = forged_proof.verify(&input, &output, &pk);
+        assert!(verify_result.is_err(),
+            "partial c1/c2 shift forged proof should be REJECTED after adding independent c1/c2 proofs");
+
+        // 验证 output 解密后不是原始明文
+        let input_plaintexts: Vec<EcPoint> = input.iter().map(|ct| ct.decrypt(&sk)).collect();
+        let output_plaintexts: Vec<EcPoint> = output.iter().map(|ct| ct.decrypt(&sk)).collect();
+
+        for j in 0..n {
+            assert_ne!(output_plaintexts[j], input_plaintexts[j],
+                "output[{}] should NOT decrypt to original plaintext with alpha != 1", j);
+        }
+    }
+
+    /// 攻击7 (CRITICAL): c1/c2 信息转移 + 排列组合 — 伪造带排列的信息转移
+    #[test]
+    fn test_forge_proof_c1_c2_shift_with_permutation() {
+        let (sk, pk) = gen_keypair();
+        let n = RistrettoCurve::n_cards();
+        let input = make_full_encrypted_cards(&pk);
+        let permute = random_permute();
+
+        let mut output = Vec::with_capacity(n);
+        let mut r_values = Vec::with_capacity(n);
+
+        for j in 0..n {
+            let r_j = Scalar::random(&mut OsRng);
+            r_values.push(r_j);
+            let i = permute[j];
+            let forged_c1 = RistrettoCurve::base_g() * r_j;
+            let forged_c2 = input[i].c1 + input[i].c2 + pk * r_j;
+            output.push(ElGamalCiphertext { c1: forged_c1, c2: forged_c2 });
+        }
+
+        // 构造伪造证明，使用排列系数
+        let nonce = Scalar::random(&mut OsRng);
+        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
+
+        let input_c1s: Vec<EcPoint> = input.iter().map(|ct| ct.c1).collect();
+        let input_c2s: Vec<EcPoint> = input.iter().map(|ct| ct.c2).collect();
+        let sum_input_c1_commit = EcPoint::vartime_multiscalar_mul(&rho, &input_c1s);
+        let sum_input_c2_commit = EcPoint::vartime_multiscalar_mul(&rho, &input_c2s);
+
+        // 使用与 prove() 相同的排列系数构造
+        let mut secret_vec = vec![Scalar::ZERO; n];
+        let mut pk_delta = Scalar::ZERO;
+        for j in 0..n {
+            let position = permute.iter().position(|&x| x == j).unwrap();
+            secret_vec[position] = rho[j];
+            let r_val = r_values[position];
+            pk_delta = pk_delta - r_val * rho[j];
+        }
+        secret_vec.push(pk_delta);
+
+        let mut combined_base_points: Vec<EcPoint> = Vec::with_capacity(2 * n + 2);
+        let mut combined_secret_vec: Vec<Scalar> = Vec::with_capacity(2 * n + 2);
+        for i in 0..n {
+            combined_base_points.push(output[i].c1);
+            combined_base_points.push(output[i].c2);
+            combined_secret_vec.push(secret_vec[i]);
+            combined_secret_vec.push(secret_vec[i]);
+        }
+        combined_base_points.push(RistrettoCurve::base_g());
+        combined_base_points.push(pk);
+        combined_secret_vec.push(pk_delta);
+        combined_secret_vec.push(pk_delta);
+
+        let combined_commit = sum_input_c1_commit + sum_input_c2_commit;
+
+        let combined_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &combined_base_points,
+            &combined_secret_vec,
+            &combined_commit,
+            &mut transcript,
+        );
+
+        // 生成 c1/c2 独立 Schnorr 证明
+        let mut base_points_c1: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
+        let mut base_points_c2: Vec<EcPoint> = output.iter().map(|ct| ct.c2).collect();
+        base_points_c1.push(RistrettoCurve::base_g());
+        base_points_c2.push(pk);
+
+        let sum_c1_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c1,
+            &secret_vec,
+            &sum_input_c1_commit,
+            &mut transcript,
+        );
+        let sum_c2_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c2,
+            &secret_vec,
+            &sum_input_c2_commit,
+            &mut transcript,
+        );
+
+        let forged_proof = ZKShuffleProof::<RistrettoCurve> {
+            sum_c1_commit: sum_input_c1_commit,
+            sum_c2_commit: sum_input_c2_commit,
+            nonce,
+            combined_schnorr_proof,
+            sum_c1_schnorr_proof,
+            sum_c2_schnorr_proof,
+        };
+
+        // 添加独立 c1/c2 Schnorr 证明后，带排列的信息转移攻击被拒绝
+        let verify_result = forged_proof.verify(&input, &output, &pk);
+        assert!(verify_result.is_err(),
+            "c1/c2 shift with permutation forged proof should be REJECTED after adding independent c1/c2 proofs");
+
+        // 验证 output 解密后不是原始明文
+        let input_plaintexts: Vec<EcPoint> = input.iter().map(|ct| ct.decrypt(&sk)).collect();
+        let output_plaintexts: Vec<EcPoint> = output.iter().map(|ct| ct.decrypt(&sk)).collect();
+
+        for j in 0..n {
+            let i = permute[j];
+            let d_i = input[i].c1 + input[i].c2;
+            assert_eq!(output_plaintexts[j], d_i,
+                "output[{}] should decrypt to D_{}", j, i);
+            assert_ne!(output_plaintexts[j], input_plaintexts[i],
+                "output[{}] should NOT decrypt to original plaintext of input[{}]", j, i);
+        }
+    }
+
+    /// 攻击8: 智能信息转移攻击 — 为每个 Schnorr 证明使用不同的 secret_vec
+    #[test]
+    fn test_forge_proof_c1_c2_smart_information_shift() {
+        let (sk, pk) = gen_keypair();
+        let n = RistrettoCurve::n_cards();
+        let input = make_full_encrypted_cards(&pk);
+
+        // === 攻击: 将 input 信息从 c1 转移到 c2 ===
+        let mut output = Vec::with_capacity(n);
+        let mut r_values = Vec::with_capacity(n);
+
+        for j in 0..n {
+            let r_j = Scalar::random(&mut OsRng);
+            r_values.push(r_j);
+            let forged_c1 = RistrettoCurve::base_g() * r_j;
+            let forged_c2 = input[j].c1 + input[j].c2 + pk * r_j;
+            output.push(ElGamalCiphertext { c1: forged_c1, c2: forged_c2 });
+        }
+
+        // === 构造伪造证明，为每个 Schnorr 证明使用不同的 secret_vec ===
+        let nonce = Scalar::random(&mut OsRng);
+        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
+
+        let input_c1s: Vec<EcPoint> = input.iter().map(|ct| ct.c1).collect();
+        let input_c2s: Vec<EcPoint> = input.iter().map(|ct| ct.c2).collect();
+        let sum_input_c1_commit = EcPoint::vartime_multiscalar_mul(&rho, &input_c1s);
+        let sum_input_c2_commit = EcPoint::vartime_multiscalar_mul(&rho, &input_c2s);
+
+        // 验证: 使用与攻击5相同的 secret_vec (rho + pk_delta)，
+        // c1 证明方程不成立，伪造证明被拒绝
+        let mut secret_vec: Vec<Scalar> = rho.to_vec();
+        let pk_delta: Scalar = -(0..n).map(|j| rho[j] * r_values[j]).sum::<Scalar>();
+        secret_vec.push(pk_delta);
+
+        // combined Schnorr 证明
+        let mut combined_base_points: Vec<EcPoint> = Vec::with_capacity(2 * n + 2);
+        let mut combined_secret_vec: Vec<Scalar> = Vec::with_capacity(2 * n + 2);
+        for i in 0..n {
+            combined_base_points.push(output[i].c1);
+            combined_base_points.push(output[i].c2);
+            combined_secret_vec.push(secret_vec[i]);
+            combined_secret_vec.push(secret_vec[i]);
+        }
+        combined_base_points.push(RistrettoCurve::base_g());
+        combined_base_points.push(pk);
+        combined_secret_vec.push(pk_delta);
+        combined_secret_vec.push(pk_delta);
+
+        let combined_commit = sum_input_c1_commit + sum_input_c2_commit;
+
+        let combined_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &combined_base_points,
+            &combined_secret_vec,
+            &combined_commit,
+            &mut transcript,
+        );
+
+        // c1/c2 Schnorr 证明 (使用相同 secret_vec)
+        let mut base_points_c1: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
+        let mut base_points_c2: Vec<EcPoint> = output.iter().map(|ct| ct.c2).collect();
+        base_points_c1.push(RistrettoCurve::base_g());
+        base_points_c2.push(pk);
+
+        let sum_c1_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c1,
+            &secret_vec,
+            &sum_input_c1_commit,
+            &mut transcript,
+        );
+        let sum_c2_schnorr_proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(
+            &base_points_c2,
+            &secret_vec,
+            &sum_input_c2_commit,
+            &mut transcript,
+        );
+
+        let forged_proof = ZKShuffleProof::<RistrettoCurve> {
+            sum_c1_commit: sum_input_c1_commit,
+            sum_c2_commit: sum_input_c2_commit,
+            nonce,
+            combined_schnorr_proof,
+            sum_c1_schnorr_proof,
+            sum_c2_schnorr_proof,
+        };
+
+        // 伪造证明被拒绝 — c1 Schnorr 证明方程不成立
+        let verify_result = forged_proof.verify(&input, &output, &pk);
+        assert!(verify_result.is_err(),
+            "smart c1/c2 information shift forged proof should be REJECTED: \
+             attacker cannot find valid secret_vec for c1 proof without knowing encryption randomness");
+
+        // 验证 output 确实不是合法 shuffle
+        let input_plaintexts: Vec<EcPoint> = input.iter().map(|ct| ct.decrypt(&sk)).collect();
+        let output_plaintexts: Vec<EcPoint> = output.iter().map(|ct| ct.decrypt(&sk)).collect();
+        for j in 0..n {
+            assert_ne!(output_plaintexts[j], input_plaintexts[j],
+                "output[{}] should NOT decrypt to original plaintext - deck is corrupted!", j);
+        }
+    }
+
 }

@@ -3,15 +3,15 @@ use std::os::raw::c_uint;
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
-use poker_protocol::z_poker::convert::ecpoint_to_hex;
+use poker_protocol::z_poker::convert::{ecpoint_to_hex, scalar_to_hex};
+
 use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Scalar};
 use poker_protocol::z_poker::key_manager::PKOwnershipProof;
 use poker_protocol::z_poker::protocol::MaskAndShuffleRound;
 use poker_protocol::zk_shuffle::remask_proof::RemaskProof;
 use poker_protocol::zk_shuffle::{ShuffleProof, ZKConsistencyProof};
-use poker_protocol::crypto::{TripleDLEqProof, ProductArgumentV2};
-use group::GroupEncoding;
-use ff::PrimeField;
+use curve25519_dalek::ristretto::CompressedRistretto;
+use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShuffleState {
@@ -230,7 +230,6 @@ pub struct ExpelPublicState {
 pub struct ElGamalCiphertextJson {
     pub c1_hex: String,
     pub c2_hex: String,
-    pub c3_hex: String,
 }
 
 impl ElGamalCiphertextJson {
@@ -238,7 +237,6 @@ impl ElGamalCiphertextJson {
         Self {
             c1_hex: ecpoint_to_hex(&ct.c1),
             c2_hex: ecpoint_to_hex(&ct.c2),
-            c3_hex: ecpoint_to_hex(&ct.c3),
         }
     }
 }
@@ -255,7 +253,7 @@ pub struct ShufflePublicState {
 
 pub fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
     let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    match EcPoint::from_bytes(bytes.as_slice().into()).into_option() {
+    match CompressedRistretto::from_slice(&bytes).ok().and_then(|c| c.decompress()) {
         Some(p) => Ok(p),
         None => Err("Invalid EC point".to_string())
     }
@@ -268,10 +266,8 @@ fn hex_to_scalar(hex_str: &str) -> Result<Scalar, String> {
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
-    match Scalar::from_repr(arr.into()).into_option() {
-        Some(s) => Ok(s),
-        None => Err("Invalid scalar value".to_string())
-    }
+    Option::from(Scalar::from_canonical_bytes(arr))
+        .ok_or_else(|| "Invalid scalar value".to_string())
 }
 
 impl ElGamalCiphertextJson {
@@ -279,7 +275,6 @@ impl ElGamalCiphertextJson {
         Ok(ElGamalCiphertext {
             c1: hex_to_ecpoint(&self.c1_hex)?,
             c2: hex_to_ecpoint(&self.c2_hex)?,
-            c3: hex_to_ecpoint(&self.c3_hex)?,
         })
     }
 }
@@ -312,11 +307,11 @@ pub struct RemaskProofJson {
 impl RemaskProofJson {
     pub fn to_remask_proof(&self) -> Result<RemaskProof, String> {
         Ok(RemaskProof {
-            A: hex_to_ecpoint(&self.a_hex)?,
-            B: hex_to_ecpoint(&self.b_hex)?,
+            commitment_a: hex_to_ecpoint(&self.a_hex)?,
+            commitment_b: hex_to_ecpoint(&self.b_hex)?,
             sum_c1: hex_to_ecpoint(&self.sum_c1_hex)?,
             sum_d2: hex_to_ecpoint(&self.sum_d2_hex)?,
-            s: hex_to_scalar(&self.s_hex)?,
+            response: hex_to_scalar(&self.s_hex)?,
             nonce: hex_to_scalar(&self.nonce_hex)?,
         })
     }
@@ -344,52 +339,8 @@ impl ZKConsistencyProofJson {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct TripleDLEqProofJson {
-    pub a_g_hex: String,
-    pub a_pk_hex: String,
-    pub a_h_hex: String,
-    pub s_hex: String,
-}
-
-impl TripleDLEqProofJson {
-    pub fn to_proof(&self) -> Result<TripleDLEqProof, String> {
-        Ok(TripleDLEqProof {
-            A_g: hex_to_ecpoint(&self.a_g_hex)?,
-            A_pk: hex_to_ecpoint(&self.a_pk_hex)?,
-            A_h: hex_to_ecpoint(&self.a_h_hex)?,
-            s: hex_to_scalar(&self.s_hex)?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProductArgumentV2Json {
-    pub a_hex: String,
-    pub b_hex: String,
-    pub c_hex: String,
-    pub d_hex: String,
-    pub t_hex: String,
-    pub s_hex: String,
-}
-
-impl ProductArgumentV2Json {
-    pub fn to_argument(&self) -> Result<ProductArgumentV2, String> {
-        Ok(ProductArgumentV2 {
-            A: hex_to_ecpoint(&self.a_hex)?,
-            B: hex_to_ecpoint(&self.b_hex)?,
-            C: hex_to_ecpoint(&self.c_hex)?,
-            D: hex_to_ecpoint(&self.d_hex)?,
-            t: hex_to_scalar(&self.t_hex)?,
-            s: hex_to_scalar(&self.s_hex)?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct ShuffleProofJson {
     pub zk_consistency: ZKConsistencyProofJson,
-    pub triple_dleq: TripleDLEqProofJson,
-    pub product_arg: ProductArgumentV2Json,
     pub global_challenge_hex: String,
     pub nonce_hex: String,
 }
@@ -398,8 +349,6 @@ impl ShuffleProofJson {
     pub fn to_proof(&self) -> Result<ShuffleProof, String> {
         Ok(ShuffleProof {
             zk_consistency: self.zk_consistency.to_proof()?,
-            triple_dleq: self.triple_dleq.to_proof()?,
-            product_arg: self.product_arg.to_argument()?,
             global_challenge: hex_to_scalar(&self.global_challenge_hex)?,
             nonce: hex_to_scalar(&self.nonce_hex)?,
         })
@@ -431,7 +380,7 @@ impl MaskAndShuffleRoundJson {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize,Serialize)]
 pub struct RevealTokenProofJson {
     pub user_public_key_hex: String,
     pub commitment_t1_hex: String,
@@ -440,13 +389,21 @@ pub struct RevealTokenProofJson {
 }
 
 impl RevealTokenProofJson {
-    pub fn to_proof(&self) -> Result<poker_protocol::card_reveal::RevealTokenProof, String> {
-        Ok(poker_protocol::card_reveal::RevealTokenProof {
+    pub fn to_proof(&self) -> Result<RevealTokenProof, String> {
+        Ok(RevealTokenProof {
             user_public_key: hex_to_ecpoint(&self.user_public_key_hex)?,
             commitment_t1: hex_to_ecpoint(&self.commitment_t1_hex)?,
             commitment_t2: hex_to_ecpoint(&self.commitment_t2_hex)?,
             response_s: hex_to_scalar(&self.response_s_hex)?,
         })
+    }
+    pub fn from_proof(proof: RevealTokenProof) -> Self {
+        Self {
+            user_public_key_hex: ecpoint_to_hex(&proof.user_public_key),
+            commitment_t1_hex: ecpoint_to_hex(&proof.commitment_t1),
+            commitment_t2_hex: ecpoint_to_hex(&proof.commitment_t2),
+            response_s_hex: scalar_to_hex(&proof.response_s),
+        }
     }
 }
 
