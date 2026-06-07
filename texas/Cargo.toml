@@ -31,3 +31,4 @@ sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e4
 allocative = "0.3.4"
 curve25519-dalek = "4.1.3"
 subtle = "2"
+merlin = "3"

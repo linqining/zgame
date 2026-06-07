@@ -1,0 +1,9 @@
+[package]
+name = "texas_poker"
+edition = "2024"
+
+[addresses]
+texas_poker = "0x0"
+
+[environments]
+testnet = "4c78adac"

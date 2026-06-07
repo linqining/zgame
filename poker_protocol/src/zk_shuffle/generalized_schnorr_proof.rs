@@ -31,26 +31,23 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
         secrets: &[C::Scalar],
         R: &C::Point,
         transcript: &mut Transcript,
-    ) -> Self
+    ) -> Result<Self, VerificationError>
     where Transcript: TranscriptExtension<C>,
     {
-        assert_eq!(
-            base_points.len(),
-            secrets.len(),
-            "Number of base points must equal number of secrets"
-        );
-        assert_ne!(*R, C::Point::identity(), "R cannot be identity (zero point) - this would compromise the proof");
+        if base_points.len() != secrets.len() {
+            return Err(VerificationError::LengthMismatch);
+        }
+        if R.is_identity() {
+            return Err(VerificationError::IdentityBasePoint);
+        }
 
         let n = base_points.len();
 
-        // SECURITY FIX: Validate that no base point is identity (zero point)
-        for (i, G_i) in base_points.iter().enumerate() {
-            assert_ne!(
-                *G_i,
-                C::Point::identity(),
-                "Base point {} cannot be identity (zero point) - this would compromise the proof",
-                i
-            );
+        // SECURITY: Validate that no base point is identity (zero point)
+        for G_i in base_points.iter() {
+            if G_i.is_identity() {
+                return Err(VerificationError::IdentityBasePoint);
+            }
         }
 
         // Append public values to transcript
@@ -81,10 +78,10 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
             .map(|(r_i, k_i)| *r_i + c * *k_i)
             .collect();
 
-        Self {
+        Ok(Self {
             commitment,
             responses,
-        }
+        })
     }
 
     /// Verify a generalized Schnorr proof.
@@ -116,8 +113,8 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
         let n = base_points.len();
 
         // SECURITY FIX: Validate that no base point is identity (zero point)
-        for (i, G_i) in base_points.iter().enumerate() {
-            if *G_i == C::Point::identity() {
+        for G_i in base_points.iter() {
+            if G_i.is_identity(){
                 return Err(VerificationError::InvalidDLEQProof);
             }
         }

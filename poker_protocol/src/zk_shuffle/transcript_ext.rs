@@ -1,5 +1,5 @@
 use merlin::Transcript;
-use crate::crypto::curve::Curve;
+use crate::crypto::curve::{Curve, CurvePoint, CurveScalar};
 
 /// Challenge scalar extracted from a transcript, generic over the curve.
 #[derive(Debug, Clone)]
@@ -19,19 +19,19 @@ pub trait TranscriptExtension<C: Curve> {
     fn challenge(&mut self, label: &'static [u8]) -> Challenge<C>;
 }
 
-impl TranscriptExtension<crate::crypto::curve::RistrettoCurve> for Transcript {
-    fn append_point(&mut self, label: &'static [u8], point: &curve25519_dalek::ristretto::RistrettoPoint) {
-        self.append_message(label, point.compress().as_bytes());
+impl<C: Curve> TranscriptExtension<C> for Transcript {
+    fn append_point(&mut self, label: &'static [u8], point: &C::Point) {
+        self.append_message(label, point.compress().as_ref());
     }
 
-    fn append_scalar(&mut self, label: &'static [u8], scalar: &curve25519_dalek::scalar::Scalar) {
-        self.append_message(label, scalar.as_bytes());
+    fn append_scalar(&mut self, label: &'static [u8], scalar: &C::Scalar) {
+        self.append_message(label, &scalar.as_bytes());
     }
 
-    fn challenge(&mut self, label: &'static [u8]) -> Challenge<crate::crypto::curve::RistrettoCurve> {
+    fn challenge(&mut self, label: &'static [u8]) -> Challenge<C> {
         let mut buf = [0u8; 64];
         self.challenge_bytes(label, &mut buf);
-        let scalar = curve25519_dalek::scalar::Scalar::from_bytes_mod_order_wide(&buf);
+        let scalar = C::Scalar::from_bytes_mod_order_wide(&buf);
         Challenge { scalar }
     }
 }

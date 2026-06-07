@@ -16,4 +16,7 @@ pub enum VerificationError {
     InvalidDLEQProof,
     IdentityBasePoint,
     InvalidOperation,
+    InvalidCiphertext,
+    InvalidCoefficient,
+    InvalidInput,
 }

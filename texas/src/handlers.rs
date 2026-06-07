@@ -16,7 +16,7 @@ use crate::pokergame::player::Player;
 use crate::pokergame::game_state::{MaskAndShuffleRoundJson, PkProofJson, SubmitRevealTokenJson};
 use crate::socket::SocketState;
 use crate::pokergame::game_state::RevealPhase;
-use crate::pokergame::table::JoinResult;
+use crate::pokergame::table::{JoinError, JoinResult};
 use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::crypto::EcPoint;
 use poker_protocol::z_poker::convert::hex_to_ecpoint;
@@ -106,12 +106,6 @@ struct JoinGameRequest {
 }
 
 #[derive(Deserialize)]
-struct ShuffleRequest {
-    pk_hex: String,
-    mask_and_shuffle_round: MaskAndShuffleRoundJson,
-}
-
-#[derive(Deserialize)]
 struct JoinAndShuffleRequest {
     pk_hex: String,
     name: String,
@@ -146,6 +140,19 @@ fn err_resp(code: StatusCode, msg: &str) -> Response {
     (code, Json(serde_json::json!({"error": msg}))).into_response()
 }
 
+fn verify_auth(headers: &HeaderMap, jwt_secret: &str) -> Result<crate::auth::Claims, Response> {
+    let token = match get_token_from_headers(headers) {
+        Some(t) => t,
+        None => {
+            return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response());
+        }
+    };
+    match auth::verify_token(&token, jwt_secret) {
+        Ok(claims) => Ok(claims),
+        Err(_) => Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response()),
+    }
+}
+
 pub async fn get_table(
     Extension(state): Extension<Arc<AppState>>,
     Path(table_id): Path<String>,
@@ -159,7 +166,7 @@ pub async fn get_table(
         }
     };
 
-    match state.socket_state.get_client_table(table_id) {
+    match state.socket_state.get_client_table(table_id).await {
         Some(client_table) => {
             tracing::debug!("[get_table] table found, table_id={}", table_id);
             (StatusCode::OK, Json(serde_json::to_value(client_table).unwrap())).into_response()
@@ -172,10 +179,14 @@ pub async fn get_table(
 }
 
 pub async fn join_game(
+    headers: HeaderMap,
     Extension(state): Extension<Arc<AppState>>,
     Path(game_id): Path<String>,
     req: Request<Body>,
 ) -> Response {
+    if let Err(resp) = verify_auth(&headers, &state.config.jwt_secret) {
+        return resp;
+    }
     tracing::debug!("[join_game] request received, game_id={}", game_id);
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
@@ -203,12 +214,12 @@ pub async fn join_game(
         }
     };
 
-    if state.socket_state.is_player_in_seat(&body.pk_hex) {
+    if state.socket_state.is_player_in_seat(&body.pk_hex).await {
         tracing::warn!("[join_game] player already in seat, pk_hex={}", body.pk_hex);
         return err_resp(StatusCode::BAD_REQUEST, "Player already in game");
     }
 
-    let player = match state.socket_state.find_player_by_pk(&body.pk_hex) {
+    let player = match state.socket_state.find_player_by_pk(&body.pk_hex).await {
         Some(p) => {
             tracing::debug!("[join_game] found existing player by pk_hex, socket_id={}", p.socket_id);
             p
@@ -226,7 +237,7 @@ pub async fn join_game(
         }
     };
 
-    if state.socket_state.add_player_to_table(table_id, player).is_err() {
+    if state.socket_state.add_player_to_table(table_id, player).await.is_err() {
         tracing::warn!("[join_game] table not found, table_id={}", table_id);
         return err_resp(StatusCode::NOT_FOUND, "Table not found");
     }
@@ -238,61 +249,16 @@ pub async fn join_game(
     }))).into_response()
 }
 
-pub async fn shuffle(
-    Extension(state): Extension<Arc<AppState>>,
-    Path(game_id): Path<String>,
-    req: Request<Body>,
-) -> Response {
-    tracing::debug!("[shuffle] request received, game_id={}", game_id);
-    let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
-        Ok(b) => b,
-        Err(_) => {
-            tracing::warn!("[shuffle] failed to read request body");
-            return err_resp(StatusCode::BAD_REQUEST, "Invalid request body");
-        }
-    };
-    let body = match serde_json::from_slice::<ShuffleRequest>(&body) {
-        Ok(v) => {
-            tracing::debug!("[shuffle] parsed body, pk_hex={}", v.pk_hex);
-            v
-        }
-        Err(e) => {
-            tracing::warn!("[shuffle] failed to parse JSON body: {}", e);
-            return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
-        }
-    };
-
-    let table_id = match parse_game_id(&game_id) {
-        Some(id) => id,
-        None => {
-            tracing::warn!("[shuffle] invalid game_id: {}", game_id);
-            return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id");
-        }
-    };
-
-    match state.socket_state.submit_verified_shuffle_with_round(table_id, &body.pk_hex, body.mask_and_shuffle_round) {
-        Ok(_) => {
-            tracing::debug!("[shuffle] shuffle submitted and verified, pk_hex={}, table_id={}", body.pk_hex, table_id);
-            (StatusCode::OK, Json(serde_json::json!({
-                "message": "Shuffle submitted and verified"
-            }))).into_response()
-        }
-        Err(e) if e.as_str() == "Table not found" => {
-            tracing::warn!("[shuffle] table not found, table_id={}", table_id);
-            err_resp(StatusCode::NOT_FOUND, &e)
-        }
-        Err(e) => {
-            tracing::warn!("[shuffle] shuffle verification failed, pk_hex={}, table_id={}, error={}", body.pk_hex, table_id, e);
-            err_resp(StatusCode::BAD_REQUEST, &e)
-        }
-    }
-}
 
 pub async fn join_game_and_shuffle(
+    headers: HeaderMap,
     Extension(state): Extension<Arc<AppState>>,
     Path(table_id): Path<String>,
     req: Request<Body>,
 ) -> Response {
+    if let Err(resp) = verify_auth(&headers, &state.config.jwt_secret) {
+        return resp;
+    }
     tracing::debug!("[join_game_and_shuffle] request received, table_id={}", table_id);
     let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
         Ok(b) => b,
@@ -348,7 +314,7 @@ pub async fn join_game_and_shuffle(
         }
     };
 
-    let player = match state.socket_state.find_player_by_pk(&body.pk_hex) {
+    let player = match state.socket_state.find_player_by_pk(&body.pk_hex).await {
         Some(p) => {
             tracing::debug!("[join_game_and_shuffle] found existing player by pk_hex, socket_id={}", p.socket_id);
             p
@@ -366,14 +332,14 @@ pub async fn join_game_and_shuffle(
         }
     };
 
-    match state.socket_state.join_player_and_shuffle(table_id, player, player_pk, body.pk_proof, body.mask_and_shuffle_round, body.seat_id, body.amount) {
+    match state.socket_state.join_player_and_shuffle(table_id, player, player_pk, body.pk_proof, body.mask_and_shuffle_round, body.seat_id, body.amount).await {
         Ok((should_start_game_loop, join_result)) => {
             match join_result {
                 JoinResult::JoinedAndShuffled => {
                     tracing::debug!("[join_game_and_shuffle] joined and shuffled successfully, pk_hex={}, table_id={}, should_start_game_loop={}", body.pk_hex, table_id, should_start_game_loop);
                     if should_start_game_loop {
                         tracing::info!("[join_game_and_shuffle] all players shuffled, starting game loop for table_id={}", table_id);
-                        state.socket_state.start_game_loop_sync(state.socket_state.clone(), table_id);
+                        state.socket_state.start_game_loop_from_ctx(state.socket_state.clone(), table_id).await;
                     }
                     (StatusCode::OK, Json(serde_json::json!({
                         "player": {"id": body.pk_hex},
@@ -391,22 +357,27 @@ pub async fn join_game_and_shuffle(
                 }
             }
         }
-        Err(e) if e.as_str() == "Table not found" => {
+        Err(JoinError::Crypto(msg)) if msg == "Table not found" => {
             tracing::warn!("[join_game_and_shuffle] table not found, table_id={}", table_id);
-            err_resp(StatusCode::NOT_FOUND, &e)
+            err_resp(StatusCode::NOT_FOUND, &msg)
         }
         Err(e) => {
             tracing::warn!("[join_game_and_shuffle] join and shuffle failed, pk_hex={}, table_id={}, error={}", body.pk_hex, table_id, e);
-            err_resp(StatusCode::BAD_REQUEST, &e)
+            err_resp(StatusCode::BAD_REQUEST, &e.to_string())
         }
     }
 }
 
 pub async fn player_action(
+    headers: HeaderMap,
     Extension(state): Extension<Arc<AppState>>,
     Path(game_id): Path<String>,
     req: Request<Body>,
 ) -> Response {
+    let claims = match verify_auth(&headers, &state.config.jwt_secret) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
     tracing::debug!("[player_action] request received, game_id={}", game_id);
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
@@ -434,7 +405,20 @@ pub async fn player_action(
         }
     };
 
-    let socket_id = match state.socket_state.find_socket_id_by_pk(&body.pk_hex) {
+    // Verify that the authenticated user owns the pk_hex
+    let user = match state.db.find_user_by_id(&claims.user.id).await {
+        Some(u) => u,
+        None => {
+            tracing::warn!("[player_action] user not found, user_id={}", claims.user.id);
+            return err_resp(StatusCode::UNAUTHORIZED, "User not found");
+        }
+    };
+    if user.pk_hex != body.pk_hex {
+        tracing::warn!("[player_action] pk_hex mismatch: user={} attempted action for pk_hex={}", user.pk_hex, body.pk_hex);
+        return err_resp(StatusCode::FORBIDDEN, "Not authorized to act for this player");
+    }
+
+    let socket_id = match state.socket_state.find_socket_id_by_pk(&body.pk_hex).await {
         Some(id) => {
             tracing::debug!("[player_action] found socket_id={} for pk_hex={}", id, body.pk_hex);
             id
@@ -477,10 +461,14 @@ pub async fn player_action(
 }
 
 pub async fn submit_reveal_token(
+    headers: HeaderMap,
     Extension(state): Extension<Arc<AppState>>,
     Path(game_id): Path<String>,
     req: Request<Body>,
 ) -> Response {
+    if let Err(resp) = verify_auth(&headers, &state.config.jwt_secret) {
+        return resp;
+    }
     tracing::debug!("[submit_reveal_token] request received, game_id={}", game_id);
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
@@ -507,11 +495,6 @@ pub async fn submit_reveal_token(
             return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id");
         }
     };
-
-    if body.pk_hex == "03b5ceedfbd1044748e8d77d9f142f4af6a5554b6d2ce4a4235367fb93ba97298e" {
-        tracing::warn!("[submit_reveal_token] reject token");
-        return err_resp(StatusCode::BAD_REQUEST, "Dumpy reject token");
-    }
 
     let player_pk = match hex_to_ecpoint(&body.pk_hex) {
         Ok(pt) => pt,
@@ -554,15 +537,15 @@ pub async fn submit_reveal_token(
         }
     };
 
-    let reveal_phase = state.socket_state.get_reveal_phase_for_table(table_id).unwrap_or_default();
+    let reveal_phase = state.socket_state.get_reveal_phase_for_table(table_id).await.unwrap_or_default();
 
-    if let Err(e) = state.socket_state.submit_reveal_tokens_for_pk(table_id, &body.pk_hex, tokens) {
+    if let Err(e) = state.socket_state.submit_reveal_tokens_for_pk(table_id, &body.pk_hex, tokens).await {
         tracing::warn!("[submit_reveal_token] submit failed, table_id={}, pk_hex={}, error={}", table_id, body.pk_hex, e);
         return err_resp(StatusCode::BAD_REQUEST, &e);
     }
 
     // todo 发送完成通知
-    let all_complete = match state.socket_state.mark_reveal_complete_for_pk(table_id, &body.pk_hex) {
+    let all_complete = match state.socket_state.mark_reveal_complete_for_pk(table_id, &body.pk_hex).await {
         Ok(result) => {
             tracing::debug!("[submit_reveal_token] reveal marked, table_id={}, pk_hex={}, all_complete={}", table_id, body.pk_hex, result);
             result
@@ -576,13 +559,16 @@ pub async fn submit_reveal_token(
     if all_complete {
         match reveal_phase {
             RevealPhase::HandReveal  => {
-                state.socket_state.broadcast_hand_reveal_result(table_id);
+                state.socket_state.broadcast_hand_reveal_result(table_id).await;
             }
             RevealPhase::ShowdownReveal => {
                 state.socket_state.broadcast_showdown_result(table_id).await;
             }
             RevealPhase::CommunityReveal => {
-                state.socket_state.broadcast_community_cards(table_id);
+                state.socket_state.broadcast_community_cards(table_id).await;
+            }
+            RevealPhase::RedealReveal => {
+                state.socket_state.broadcast_redeal_result(table_id).await;
             }
         }
     }
@@ -751,25 +737,26 @@ pub async fn wallet_login(
             id: user_id.clone(),
             name: address.clone(),
             email: format!("{}@wallet", address),
-            password: String::new(),
+            password: bcrypt::hash(&uuid::Uuid::new_v4().to_string(), 10).unwrap_or_default(),
             chips_amount: state.config.initial_chips_amount,
             user_type: 1,
             created: chrono::Utc::now().to_rfc3339(),
             // sk_hex: String::new(),
-            pk_hex: body.message.clone(),
+            pk_hex: pk_hex.clone(),
+            last_free_chips_at: None,
         };
         if state.db.save_user(&user).await.is_err() {
             tracing::error!("[wallet_login] failed to save wallet user, user_id={}", user_id);
             return err_resp(StatusCode::INTERNAL_SERVER_ERROR, "Failed to save wallet user");
         }
-        tracing::debug!("[wallet_login] wallet user saved, user_id={}, pk_hex={}", user_id, body.message.clone());
+        tracing::debug!("[wallet_login] wallet user saved, user_id={}, pk_hex={}", user_id, pk_hex.clone());
     } else {
-        if state.db.update_user_pk(&user_id, &body.message.clone()).await {
-            tracing::debug!("[wallet_login] existing wallet user found, user_id={}, pk_hex={}", user_id, body.message.clone());
+        if state.db.update_user_pk(&user_id, &pk_hex).await {
+            tracing::debug!("[wallet_login] existing wallet user found, user_id={}, pk_hex={}", user_id, pk_hex.clone());
         } else {
             tracing::warn!("[wallet_login] failed to update wallet user pk, user_id={}", user_id);
         }
-        tracing::debug!("[wallet_login] existing wallet user found, user_id={}, pk_hex={}", user_id, body.message.clone());
+        tracing::debug!("[wallet_login] existing wallet user found, user_id={}, pk_hex={}", user_id, pk_hex.clone());
     }
 
     match auth::create_token(&user_id, &state.config.jwt_secret, state.config.jwt_token_expires_in) {
@@ -778,7 +765,7 @@ pub async fn wallet_login(
             (StatusCode::OK, Json(serde_json::json!({
                 "token": token,
                 "address": address,
-                "pk_hex": body.message.clone(),
+                "pk_hex": pk_hex.clone(),
             }))).into_response()
         }
         Err(_) => {
@@ -824,7 +811,7 @@ pub async fn register(
     };
     
     let client_player = ClientPlayer::new();
-    let (sk_hex, pk_hex) = client_player.get_sk_and_pk_hex();
+    let (_sk_hex, pk_hex) = client_player.get_sk_and_pk_hex();
     tracing::debug!("[register] generated keys, pk_hex={}", pk_hex);
     let user = crate::models::User {
         id: uuid::Uuid::new_v4().to_string(),
@@ -836,6 +823,7 @@ pub async fn register(
         created: chrono::Utc::now().to_rfc3339(),
         // sk_hex,
         pk_hex,
+        last_free_chips_at: None,
     };
 
     let user_id = user.id.clone();
@@ -878,8 +866,18 @@ pub async fn free_chips(
             tracing::debug!("[free_chips] token verified, user_id={}", claims.user.id);
             match state.db.find_user_by_id(&claims.user.id).await {
                 Some(user) if user.chips_amount < 1000 => {
+                    // Check cooldown: 1 hour between free chips
+                    if let Some(last_at) = &user.last_free_chips_at {
+                        if let Ok(last_time) = last_at.parse::<chrono::DateTime<chrono::Utc>>() {
+                            let elapsed = chrono::Utc::now() - last_time;
+                            if elapsed.num_seconds() < 3600 {
+                                tracing::warn!("[free_chips] cooldown active, user_id={}, last_at={}", user.id, last_at);
+                                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Please wait before claiming free chips again"}]}))).into_response();
+                            }
+                        }
+                    }
                     tracing::debug!("[free_chips] user eligible, user_id={}, current_chips={}", user.id, user.chips_amount);
-                    state.db.set_chips(&user.id, state.config.initial_chips_amount).await;
+                    state.db.set_chips_with_cooldown(&user.id, state.config.initial_chips_amount).await;
                     match state.db.find_user_by_id(&user.id).await {
                         Some(updated) => {
                             tracing::debug!("[free_chips] chips updated, user_id={}, new_chips={}", updated.id, updated.chips_amount);

@@ -1,9 +1,8 @@
 pub mod types;
 pub mod elgamal;
-pub mod zk_primitives;
 pub mod curve;
 
-pub use types::{EcPoint, Scalar, Plaintext, ECPoint, BASE_G, BASE_H, N_CARDS, hash_to_scalar, derive_scalar_from_card_and_pk, derive_scalar_from_card_and_sk};
+pub use types::{EcPoint, Scalar, Plaintext, ECPoint, BASE_G, N_CARDS, hash_to_scalar, derive_scalar_from_card_and_pk, derive_scalar_from_card_and_sk};
 pub use elgamal::{ElGamalCiphertext, ec_encrypt_batch_v2};
 pub use curve::{
     Curve, CurveScalar, CurvePoint,

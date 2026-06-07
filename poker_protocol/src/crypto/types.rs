@@ -103,5 +103,4 @@ fn get_base_h() -> EcPoint {
 
 lazy_static::lazy_static! {
     pub static ref BASE_G: EcPoint = get_base_g();
-    pub static ref BASE_H: EcPoint = get_base_h();
 }

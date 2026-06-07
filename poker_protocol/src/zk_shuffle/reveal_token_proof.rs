@@ -3,7 +3,7 @@
 //! ## 参考 linqining/mental-poker 的 reveal_token 协议
 //!
 //! ```text
-//! ElGamal加密: ct = (c1=G·r, c2=M+pk·r, c3=H·r)
+//! ElGamal加密: ct = (c1=G·r, c2=M+pk·r)
 //!
 //! RevealToken (客户端生成):
 //!   token = c1 · sk = G · r · sk = pk · r    (即 ElGamal 的 "mask" 部分)
@@ -25,6 +25,8 @@
 //! ```
 
 use crate::crypto::curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
+use crate::zk_shuffle::transcript_ext::TranscriptExtension;
+use merlin::Transcript;
 use rand_core::{CryptoRng, RngCore};
 
 #[derive(Debug, Clone, Copy)]
@@ -56,7 +58,9 @@ pub enum RevealProofError {
 // statement: (G, c1) → (pk, token)   两组离散对数相等
 // c1 =g^r
 // witness: sk                       (log_G(pk) == log_c1(token) == sk)
-impl<C: Curve> RevealTokenProof<C> {
+impl<C: Curve> RevealTokenProof<C>
+where Transcript: TranscriptExtension<C>
+{
     pub fn prove(
         sk: &C::Scalar,
         user_pk: &C::Point,
@@ -70,7 +74,7 @@ impl<C: Curve> RevealTokenProof<C> {
 
         let challenge = Self::compute_challenge(
             user_pk,
-            &encrypted_card.c1,
+            &encrypted_card,
             reveal_token,
             &t1,
             &t2,
@@ -90,14 +94,25 @@ impl<C: Curve> RevealTokenProof<C> {
         &self,
         encrypted_card: &ElGamalCiphertextGeneric<C>,
         reveal_token: &C::Point,
+        expected_pk: &C::Point,
     ) -> Result<(), RevealProofError> {
         if !encrypted_card.is_valid() {
             return Err(RevealProofError::InvalidElGamalStructure);
         }
 
+        // 防御性检查: reveal_token 不能为 identity
+        if reveal_token.is_identity() {
+            return Err(RevealProofError::InvalidProof);
+        }
+
+        // 验证 proof 中的 user_public_key 与预期的公钥匹配
+        if self.user_public_key != *expected_pk {
+            return Err(RevealProofError::InvalidProof);
+        }
+
         let expected_c = Self::compute_challenge(
             &self.user_public_key,
-            &encrypted_card.c1,
+            &encrypted_card,
             reveal_token,
             &self.commitment_t1,
             &self.commitment_t2,
@@ -119,19 +134,19 @@ impl<C: Curve> RevealTokenProof<C> {
 
     fn compute_challenge(
         pk: &C::Point,
-        c1: &C::Point,
+        encrypted_card: &ElGamalCiphertextGeneric<C>,
         reveal_token: &C::Point,
         t1: &C::Point,
         t2: &C::Point,
     ) -> C::Scalar {
-        let mut buffer = Vec::new();
-        buffer.extend_from_slice(b"reveal_token_proof_v2");
-        buffer.extend_from_slice(pk.compress().as_ref());
-        buffer.extend_from_slice(c1.compress().as_ref());
-        buffer.extend_from_slice(reveal_token.compress().as_ref());
-        buffer.extend_from_slice(t1.compress().as_ref());
-        buffer.extend_from_slice(t2.compress().as_ref());
-        C::hash_to_scalar(&buffer)
+        let mut transcript = Transcript::new(b"reveal_token_proof_v3");
+        transcript.append_point(b"pk", pk);
+        transcript.append_point(b"c1", &encrypted_card.c1);
+        transcript.append_point(b"c2", &encrypted_card.c2);
+        transcript.append_point(b"reveal_token", reveal_token);
+        transcript.append_point(b"t1", t1);
+        transcript.append_point(b"t2", t2);
+        transcript.challenge(b"challenge").scalar
     }
 }
 
@@ -159,7 +174,7 @@ mod tests {
         assert_eq!(ct.c2 - reveal_token, pt, "token should decrypt to plaintext");
 
         let proof = RevealTokenProof::<C>::prove(&sk, &pk, &ct, &reveal_token, &mut rand_core::OsRng);
-        assert!(proof.verify(&ct, &reveal_token).is_ok(), "Valid proof should pass");
+        assert!(proof.verify(&ct, &reveal_token, &pk).is_ok(), "Valid proof should pass");
     }
 
     #[test]
@@ -175,7 +190,7 @@ mod tests {
 
         let _wrong_pt = ct.c2 - wrong_token;
         assert!(RevealTokenProof::<C>::prove(&wrong_sk, &pk, &ct, &wrong_token, &mut rand_core::OsRng)
-            .verify(&ct, &wrong_token).is_err(), "Wrong SK fails DLEq");
+            .verify(&ct, &wrong_token, &pk).is_err(), "Wrong SK fails DLEq");
     }
 
     #[test]
@@ -188,7 +203,7 @@ mod tests {
         let reveal_token = ct.gen_reveal_token(&sk);
         let proof = RevealTokenProof::<C>::prove(&sk, &pk, &ct, &reveal_token, &mut rand_core::OsRng);
 
-        assert!(proof.verify(&ct, &reveal_token).is_ok(), "DLEq proof valid regardless of plaintext");
+        assert!(proof.verify(&ct, &reveal_token, &pk).is_ok(), "DLEq proof valid regardless of plaintext");
         let computed_pt = ct.c2 - reveal_token;
         assert_eq!(computed_pt, real_pt, "Caller must verify c2 - token == expected plaintext");
     }
@@ -205,7 +220,38 @@ mod tests {
         let token1 = ct1.gen_reveal_token(&sk);
         let proof = RevealTokenProof::<C>::prove(&sk, &pk, &ct1, &token1, &mut rand_core::OsRng);
 
-        assert!(proof.verify(&ct2, &token1).is_err(), "Token for ct1 invalid on ct2");
+        assert!(proof.verify(&ct2, &token1, &pk).is_err(), "Token for ct1 invalid on ct2");
+    }
+
+    /// SECURITY VERIFICATION: is_valid() now correctly uses && (not ||)
+    ///
+    /// PREVIOUS BUG (FIXED): The old `is_valid()` in elgamal.rs used `||`:
+    ///   pub fn is_valid(&self) -> bool {
+    ///       !self.c1.is_identity() || !self.c2.is_identity()
+    ///   }
+    /// This allowed c1 = identity with c2 ≠ identity.
+    ///
+    /// CURRENT FIX: `is_valid()` in curve.rs now correctly uses `&&`:
+    ///   pub fn is_valid(&self) -> bool {
+    ///       !self.c1.is_identity() && !self.c2.is_identity()
+    ///   }
+    /// This means c1=identity ciphertexts are rejected BEFORE the DLEq check.
+    ///
+    /// NOTE: crypto/elgamal.rs STILL has the `||` bug in its legacy `is_valid()`.
+    #[test]
+    fn test_forgery_reveal_token_identity_c1_bypass() {
+        let (_sk, pk) = setup();
+
+        // Create a ciphertext with c1 = identity, c2 = some non-identity point
+        let fake_plaintext = C::base_g() * <C as Curve>::Scalar::from_u64(999u64);
+        let malicious_ct = ElGamalCiphertext {
+            c1: <C as Curve>::Point::identity(),
+            c2: fake_plaintext, // arbitrary c2, NOT an encryption of this value
+        };
+
+        // is_valid() now REJECTS c1=identity (using &&)
+        assert!(!malicious_ct.is_valid(),
+            "FIXED: is_valid() correctly rejects c1=identity with &&");
     }
 
     #[test]
@@ -222,5 +268,101 @@ mod tests {
 
         let decrypted = ct.c2 - token;
         assert_eq!(decrypted, pt, "c2 - token must equal plaintext");
+    }
+
+    // ===== FORGERY TESTS =====
+
+    /// FIXED: verify() now accepts expected_pk and validates proof.user_public_key == expected_pk.
+    /// 攻击者用自己的 sk' 生成证明，但 verify() 现在会拒绝，因为 proof.user_public_key != expected_pk。
+    #[test]
+    fn test_forgery_wrong_user_pk_now_detected() {
+        // 真实用户的密钥对
+        let (real_sk, real_pk) = setup();
+
+        // 攻击者的密钥对
+        let attacker_sk = <C as Curve>::Scalar::random(&mut rand_core::OsRng);
+        let attacker_pk = C::base_g() * attacker_sk;
+
+        // 用真实 pk 加密的牌
+        let pt = C::base_g() + C::base_h();
+        let r = <C as Curve>::Scalar::random(&mut rand_core::OsRng);
+        let ct = ElGamalCiphertext::encrypt(&pt, &real_pk, &r);
+
+        // 攻击者用 attacker_sk 计算 token = c1 * attacker_sk
+        let attacker_token = ct.gen_reveal_token(&attacker_sk);
+
+        // 攻击者用 attacker_sk 生成证明
+        let proof = RevealTokenProof::<C>::prove(
+            &attacker_sk, &attacker_pk, &ct, &attacker_token, &mut rand_core::OsRng,
+        );
+
+        // 修复后: verify() 需要传入 expected_pk，并验证 proof.user_public_key == expected_pk
+        // 用 real_pk 验证会失败，因为 proof.user_public_key = attacker_pk ≠ real_pk
+        assert!(proof.verify(&ct, &attacker_token, &real_pk).is_err(),
+            "FIXED: proof with wrong pk is now rejected when expected_pk is provided");
+
+        // 用 attacker_pk 验证会成功（但调用方应该使用 real_pk）
+        assert!(proof.verify(&ct, &attacker_token, &attacker_pk).is_ok(),
+            "proof passes when expected_pk matches attacker_pk");
+
+        // 解密结果错误: c2 - attacker_token = M + real_pk*r - attacker_pk*r
+        let wrong_decrypted = ct.c2 - attacker_token;
+        assert_ne!(wrong_decrypted, pt,
+            "Decryption with attacker's token gives wrong plaintext");
+
+        // 攻击者构造完全伪造的密文
+        let forged_ct = ElGamalCiphertext {
+            c1: ct.c1,
+            c2: pt + attacker_pk * r,
+        };
+
+        let forged_token = forged_ct.gen_reveal_token(&attacker_sk);
+        let forged_proof = RevealTokenProof::<C>::prove(
+            &attacker_sk, &attacker_pk, &forged_ct, &forged_token, &mut rand_core::OsRng,
+        );
+
+        // 修复后: 需要传入 expected_pk，伪造证明会被拒绝（如果调用方使用 real_pk）
+        assert!(forged_proof.verify(&forged_ct, &forged_token, &real_pk).is_err(),
+            "FIXED: forged proof rejected when expected_pk is real_pk");
+    }
+
+    /// FIXED: verify() now requires expected_pk. 完全伪造攻击现在被阻止，
+    /// 因为调用方必须传入 expected_pk，且 verify() 会验证 proof.user_public_key == expected_pk。
+    /// 调用方仍需验证: c2 - token == expected_plaintext
+    #[test]
+    fn test_forgery_full_fabrication_blocked() {
+        // 攻击者生成任意密钥对
+        let attacker_sk = <C as Curve>::Scalar::random(&mut rand_core::OsRng);
+        let attacker_pk = C::base_g() * attacker_sk;
+
+        // 真实用户的公钥
+        let (real_sk, real_pk) = setup();
+
+        // 攻击者构造任意密文和 token
+        let arbitrary_pt = C::base_h() * <C as Curve>::Scalar::from_u64(777u64);
+        let r = <C as Curve>::Scalar::random(&mut rand_core::OsRng);
+        let ct = ElGamalCiphertext::encrypt(&arbitrary_pt, &attacker_pk, &r);
+        let token = ct.gen_reveal_token(&attacker_sk);
+
+        // 攻击者生成证明
+        let proof = RevealTokenProof::<C>::prove(
+            &attacker_sk, &attacker_pk, &ct, &token, &mut rand_core::OsRng,
+        );
+
+        // 修复后: 如果调用方使用 real_pk 作为 expected_pk，伪造证明会被拒绝
+        assert!(proof.verify(&ct, &token, &real_pk).is_err(),
+            "FIXED: fabricated proof rejected when expected_pk doesn't match");
+
+        // 如果调用方错误地使用 attacker_pk，证明会通过（调用方责任）
+        assert!(proof.verify(&ct, &token, &attacker_pk).is_ok(),
+            "proof passes when expected_pk matches attacker_pk (caller responsibility)");
+
+        // 解密正确
+        let decrypted = ct.c2 - token;
+        assert_eq!(decrypted, arbitrary_pt,
+            "Fabricated proof decrypts to attacker's chosen plaintext");
+
+        // 调用方仍需验证: c2 - token == expected_plaintext
+        // 以及: proof.user_public_key == expected_pk（现在由 verify() 强制执行）
     }
 }

@@ -1,15 +1,14 @@
 use wasm_bindgen::prelude::*;
 use serde::{Serialize, Deserialize};
 use poker_protocol::z_poker::protocol::ClientPlayer;
-use poker_protocol::z_poker::protocol::{JoinGameAndShuffleRound,MaskAndShuffleRound};
 use poker_protocol::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext};
-use poker_protocol::card_reveal::VerificationError;
+use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::crypto::types::BASE_G;
 use rand_core::OsRng;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::traits::Identity;
 use serde_wasm_bindgen;
-use poker_protocol::card_reveal;
+use poker_protocol::crypto::RistrettoCurve;
 
 #[wasm_bindgen]
 extern "C" {
@@ -45,6 +44,14 @@ fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
 }
 
 fn ct_to_json(ct: &ElGamalCiphertext) -> String {
+    format!(
+        r#"{{"c1_hex":"{}","c2_hex":"{}"}}"#,
+        ecpoint_to_hex(&ct.c1),
+        ecpoint_to_hex(&ct.c2)
+    )
+}
+
+fn ct_generic_to_json(ct: &poker_protocol::crypto::ElGamalCiphertextGeneric<RistrettoCurve>) -> String {
     format!(
         r#"{{"c1_hex":"{}","c2_hex":"{}"}}"#,
         ecpoint_to_hex(&ct.c1),
@@ -91,7 +98,7 @@ fn json_to_ct_vec(json_str: &str) -> Result<Vec<ElGamalCiphertext>, String> {
     Ok(result)
 }
 
-fn reveal_token_proof_to_json(proof: &card_reveal::RevealTokenProof) -> String {
+fn reveal_token_proof_to_json(proof: &RevealTokenProof<RistrettoCurve>) -> String {
     format!(
         r#"{{"user_public_key_hex":"{}","commitment_t1_hex":"{}","commitment_t2_hex":"{}","response_s_hex":"{}"}}"#,
         ecpoint_to_hex(&proof.user_public_key),
@@ -101,10 +108,10 @@ fn reveal_token_proof_to_json(proof: &card_reveal::RevealTokenProof) -> String {
     )
 }
 
-fn json_to_reveal_token_proof(json_str: &str) -> Result<card_reveal::RevealTokenProof, String> {
+fn json_to_reveal_token_proof(json_str: &str) -> Result<RevealTokenProof<RistrettoCurve>, String> {
     let val: serde_json::Value = serde_json::from_str(json_str)
         .map_err(|e| format!("JSON parse error: {}", e))?;
-    Ok(card_reveal::RevealTokenProof {
+    Ok(RevealTokenProof {
         user_public_key: hex_to_ecpoint(val["user_public_key"].as_str().unwrap_or(""))?,
         commitment_t1: hex_to_ecpoint(val["commitment_t1"].as_str().unwrap_or(""))?,
         commitment_t2: hex_to_ecpoint(val["commitment_t2"].as_str().unwrap_or(""))?,
@@ -187,7 +194,7 @@ impl WasmClientPlayer {
         Ok(ecpoint_to_hex(&pt))
     }
 
-    pub fn peek_card(&self, ct_json: &str, tokens_json: &str) -> Result<String, JsValue> {
+    pub fn peek_card(&self, ct_json: &str, tokens_json: &str, plain_cards_json: &str) -> Result<String, JsValue> {
         let ct = json_to_ct(ct_json).map_err(|e| JsValue::from_str(&e))?;
         let tokens_arr: Vec<serde_json::Value> = match serde_json::from_str(tokens_json) {
             Ok(arr) => arr,
@@ -212,7 +219,14 @@ impl WasmClientPlayer {
             tokens.push(RT { user_public_key: hex_to_ecpoint(tval["user_public_key"].as_str().unwrap_or(""))?, encrypted_card, proof, reveal_token });
         }
 
-        let pt = self.inner.peek_card(&ct, &tokens).map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        let pt_arr: Vec<String> = serde_json::from_str(plain_cards_json)
+            .map_err(|e| JsValue::from_str(&format!("JSON error: {}", e)))?;
+        let plain_cards: Vec<Plaintext> = pt_arr.iter()
+            .map(|s| hex_to_ecpoint(s))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        let pt = self.inner.peek_card(&ct, &tokens, &plain_cards).map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         Ok(ecpoint_to_hex(&pt.0))
     }
 
@@ -281,38 +295,22 @@ impl WasmClientPlayer {
 
         let round = self.inner.shuffle(&deck, &agg_pk);
 
-        let zk_consistency_json = format!(
-            r#"{{"d1_hex":"{}","d2_hex":"{}","a_g_hex":"{}","a_pk_hex":"{}","s_hex":"{}"}}"#,
-            ecpoint_to_hex(&round.proof.zk_consistency.d1),
-            ecpoint_to_hex(&round.proof.zk_consistency.d2),
-            ecpoint_to_hex(&round.proof.zk_consistency.a_g),
-            ecpoint_to_hex(&round.proof.zk_consistency.a_pk),
-            scalar_to_hex(&round.proof.zk_consistency.s),
-        );
-
-        let triple_dleq_json = format!(
-            r#"{{"a_g_hex":"{}","a_pk_hex":"{}","s_hex":"{}"}}"#,
-            ecpoint_to_hex(&round.proof.triple_dleq.A_g),
-            ecpoint_to_hex(&round.proof.triple_dleq.A_pk),
-            scalar_to_hex(&round.proof.triple_dleq.s),
-        );
-
-        let product_arg_json = format!(
-            r#"{{"a_hex":"{}","b_hex":"{}","c_hex":"{}","d_hex":"{}","s_hex":"{}","t_hex":"{}"}}"#,
-            ecpoint_to_hex(&round.proof.product_arg.A),
-            ecpoint_to_hex(&round.proof.product_arg.B),
-            ecpoint_to_hex(&round.proof.product_arg.C),
-            ecpoint_to_hex(&round.proof.product_arg.D),
-            scalar_to_hex(&round.proof.product_arg.s),
-            scalar_to_hex(&round.proof.product_arg.t),
-        );
+        fn schnorr_proof_to_json(proof: &poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<RistrettoCurve>) -> String {
+            let responses_hex: Vec<String> = proof.responses.iter().map(scalar_to_hex).collect();
+            format!(
+                r#"{{"commitment_hex":"{}","responses_hex":[{}]}}"#,
+                ecpoint_to_hex(&proof.commitment),
+                responses_hex.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(",")
+            )
+        }
 
         let shuffle_proof_json = format!(
-            r#"{{"zk_consistency":{},"triple_dleq":{},"product_arg":{},"global_challenge_hex":"{}","nonce_hex":"{}"}}"#,
-            zk_consistency_json,
-            triple_dleq_json,
-            product_arg_json,
-            scalar_to_hex(&round.proof.global_challenge),
+            r#"{{"sum_c1_commit_hex":"{}","sum_c2_commit_hex":"{}","combined_schnorr_proof":{},"sum_c1_schnorr_proof":{},"sum_c2_schnorr_proof":{},"nonce_hex":"{}"}}"#,
+            ecpoint_to_hex(&round.proof.sum_c1_commit),
+            ecpoint_to_hex(&round.proof.sum_c2_commit),
+            schnorr_proof_to_json(&round.proof.combined_schnorr_proof),
+            schnorr_proof_to_json(&round.proof.sum_c1_schnorr_proof),
+            schnorr_proof_to_json(&round.proof.sum_c2_schnorr_proof),
             scalar_to_hex(&round.proof.nonce),
         );
 
@@ -335,48 +333,32 @@ impl WasmClientPlayer {
 
         let round = self.inner.join_game_and_shuffle(&deck, &agg_pk);
         let ms = &round.mask_and_shuffle_round;
+        let per_card_commitments_hex: Vec<String> = ms.remask_proof.per_card_commitments.iter()
+            .map(ecpoint_to_hex).collect();
         let remask_proof_json = format!(
-            r#"{{"a_hex":"{}","b_hex":"{}","sum_c1_hex":"{}","sum_d2_hex":"{}","s_hex":"{}","nonce_hex":"{}"}}"#,
-            ecpoint_to_hex(&ms.remask_proof.A),
-            ecpoint_to_hex(&ms.remask_proof.B),
-            ecpoint_to_hex(&ms.remask_proof.sum_c1),
-            ecpoint_to_hex(&ms.remask_proof.sum_d2),
-            scalar_to_hex(&ms.remask_proof.s),
+            r#"{{"per_card_commitments_hex":{},"commitment_pk_hex":"{}","response_hex":"{}","nonce_hex":"{}"}}"#,
+            serde_json::to_string(&per_card_commitments_hex).unwrap_or("[]".to_string()),
+            ecpoint_to_hex(&ms.remask_proof.commitment_pk),
+            scalar_to_hex(&ms.remask_proof.response),
             scalar_to_hex(&ms.remask_proof.nonce),
         );
 
-        let zk_consistency_json = format!(
-            r#"{{"d1_hex":"{}","d2_hex":"{}","a_g_hex":"{}","a_pk_hex":"{}","s_hex":"{}"}}"#,
-            ecpoint_to_hex(&ms.proof.zk_consistency.d1),
-            ecpoint_to_hex(&ms.proof.zk_consistency.d2),
-            ecpoint_to_hex(&ms.proof.zk_consistency.a_g),
-            ecpoint_to_hex(&ms.proof.zk_consistency.a_pk),
-            scalar_to_hex(&ms.proof.zk_consistency.s),
-        );
-
-        let triple_dleq_json = format!(
-            r#"{{"a_g_hex":"{}","a_pk_hex":"{}","s_hex":"{}"}}"#,
-            ecpoint_to_hex(&ms.proof.triple_dleq.A_g),
-            ecpoint_to_hex(&ms.proof.triple_dleq.A_pk),
-            scalar_to_hex(&ms.proof.triple_dleq.s),
-        );
-
-        let product_arg_json = format!(
-            r#"{{"a_hex":"{}","b_hex":"{}","c_hex":"{}","d_hex":"{}","s_hex":"{}","t_hex":"{}"}}"#,
-            ecpoint_to_hex(&ms.proof.product_arg.A),
-            ecpoint_to_hex(&ms.proof.product_arg.B),
-            ecpoint_to_hex(&ms.proof.product_arg.C),
-            ecpoint_to_hex(&ms.proof.product_arg.D),
-            scalar_to_hex(&ms.proof.product_arg.s),
-            scalar_to_hex(&ms.proof.product_arg.t),
-        );
+        fn schnorr_proof_to_json(proof: &poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<RistrettoCurve>) -> String {
+            let responses_hex: Vec<String> = proof.responses.iter().map(scalar_to_hex).collect();
+            format!(
+                r#"{{"commitment_hex":"{}","responses_hex":[{}]}}"#,
+                ecpoint_to_hex(&proof.commitment),
+                responses_hex.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(",")
+            )
+        }
 
         let shuffle_proof_json = format!(
-            r#"{{"zk_consistency":{},"triple_dleq":{},"product_arg":{},"global_challenge_hex":"{}","nonce_hex":"{}"}}"#,
-            zk_consistency_json,
-            triple_dleq_json,
-            product_arg_json,
-            scalar_to_hex(&ms.proof.global_challenge),
+            r#"{{"sum_c1_commit_hex":"{}","sum_c2_commit_hex":"{}","combined_schnorr_proof":{},"sum_c1_schnorr_proof":{},"sum_c2_schnorr_proof":{},"nonce_hex":"{}"}}"#,
+            ecpoint_to_hex(&ms.proof.sum_c1_commit),
+            ecpoint_to_hex(&ms.proof.sum_c2_commit),
+            schnorr_proof_to_json(&ms.proof.combined_schnorr_proof),
+            schnorr_proof_to_json(&ms.proof.sum_c1_schnorr_proof),
+            schnorr_proof_to_json(&ms.proof.sum_c2_schnorr_proof),
             scalar_to_hex(&ms.proof.nonce),
         );
 
@@ -400,37 +382,8 @@ impl WasmClientPlayer {
             pk_proof_json,
             round.pk_hex,
             mask_and_shuffle_json,
-        );        
+        );
         Ok(json_val_to_jsvalue(join_game_and_shuffle_json))
-    }
-
-    pub fn verify_remask_proof(
-        &self,
-        input_cards_json: &str,
-        mask_cards_json: &str,
-        remask_proof_json: &str,
-        pk_hex: &str,
-    ) -> Result<JsValue, JsValue> {
-        let input_cards = json_to_ct_vec(input_cards_json).map_err(|e| JsValue::from_str(&e))?;
-        let mask_cards = json_to_ct_vec(mask_cards_json).map_err(|e| JsValue::from_str(&e))?;
-        let pk = hex_to_ecpoint(pk_hex).map_err(|e| JsValue::from_str(&e))?;
-
-        let proof_val: serde_json::Value = match serde_json::from_str(remask_proof_json) {
-            Ok(v) => v,
-            Err(e) => return Err(JsValue::from_str(&format!("JSON parse error: {}", e))),
-        };
-
-        let proof = poker_protocol::zk_shuffle::remask_proof::RemaskProof {
-            A: hex_to_ecpoint(proof_val["a_hex"].as_str().unwrap_or(""))?,
-            B: hex_to_ecpoint(proof_val["b_hex"].as_str().unwrap_or(""))?,
-            sum_c1: hex_to_ecpoint(proof_val["sum_c1_hex"].as_str().unwrap_or(""))?,
-            sum_d2: hex_to_ecpoint(proof_val["sum_d2_hex"].as_str().unwrap_or(""))?,
-            s: hex_to_scalar(proof_val["s_hex"].as_str().unwrap_or(""))?,
-            nonce: hex_to_scalar(proof_val["nonce_hex"].as_str().unwrap_or(""))?,
-        };
-
-        let valid = proof.verify(&input_cards, &mask_cards, &pk);
-        Ok(json_val_to_jsvalue(if valid { "true" } else { "false" }.to_string()))
     }
 
     pub fn reveal_own_card(
@@ -480,56 +433,11 @@ impl WasmClientPlayer {
 
     pub fn generate_expel_proof(
         &self,
-        hand_encrypted_json: &str,
-        agg_pk_hex: &str,
-        per_card_tokens_json: &str,
+        _hand_encrypted_json: &str,
+        _agg_pk_hex: &str,
+        _per_card_tokens_json: &str,
     ) -> Result<JsValue, JsValue> {
-        let hand = json_to_ct_vec(hand_encrypted_json).map_err(|e| JsValue::from_str(&e))?;
-
-        let agg_pk = hex_to_ecpoint(agg_pk_hex).map_err(|e| JsValue::from_str(&e))?;
-
-        let tokens_outer: Vec<Vec<serde_json::Value>> = if per_card_tokens_json.is_empty() || per_card_tokens_json == "[]" {
-            vec![]
-        } else {
-            match serde_json::from_str(per_card_tokens_json) {
-                Ok(arr) => arr,
-                Err(e) => return Err(JsValue::from_str(&format!("Tokens JSON error: {}", e))),
-            }
-        };
-
-        use poker_protocol::card_reveal::reveal_token_proof::{ExpelHandState, RevealTokenAndProof};
-        let mut expel_hand_states: Vec<ExpelHandState> = vec![];
-        for (card_idx, card_tokens) in tokens_outer.iter().enumerate() {
-            let hand_encrypted = hand.get(card_idx).cloned().unwrap_or_else(|| ElGamalCiphertext::new_placeholder_card());
-            let mut reveal_tokens = vec![];
-            for tval in card_tokens {
-                let reveal_token = match hex_to_ecpoint(tval["reveal_token"].as_str().unwrap_or("")) {
-                    Ok(p) => p,
-                    Err(e) => return Err(JsValue::from_str(&e)),
-                };
-                let proof = match json_to_reveal_token_proof(&tval["proof"].to_string()) {
-                    Ok(p) => p,
-                    Err(e) => return Err(JsValue::from_str(&e)),
-                };
-                reveal_tokens.push(RevealTokenAndProof { reveal_token, proof });
-            }
-            expel_hand_states.push(ExpelHandState { hand_encrypted, reveal_tokens });
-        }
-
-        let record = self.inner.generate_expel_proof(&agg_pk, expel_hand_states)
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-
-        let pos_str: Vec<String> = record.expelled_card_positions.iter().map(|x| x.to_string()).collect();
-        let s = format!(
-            r#"{{"expelled_player_pk":"{}","output_cards":{},"expelled_card_positions":[{}],"user_cards":{},"agg_pk_at_proof_time":"{}","departed_player_pk":"{}"}}"#,
-            record.expelled_player_pk,
-            ct_vec_to_json(&record.output_cards),
-            pos_str.join(","),
-            ct_vec_to_json(&record.user_cards),
-            ecpoint_to_hex(&record.agg_pk_at_proof_time),
-            ecpoint_to_hex(&record.departed_player_pk)
-        );
-        Ok(json_val_to_jsvalue(s))
+        Err(JsValue::from_str("generate_expel_proof is no longer supported"))
     }
 
     pub fn remask_card(&self, ct_json: &str, pk_hex: &str) -> Result<JsValue, JsValue> {
@@ -586,7 +494,7 @@ impl WasmClientPlayer {
         Ok(json_val_to_jsvalue(ct_to_json(&encrypted)))
     }
 
-    pub fn decrypt_playing_card(&self, ct_json: &str, other_tokens_json: &str) -> Result<String, JsValue> {
+    pub fn decrypt_playing_card(&self, ct_json: &str, other_tokens_json: &str, deck_plaintext_json: &str) -> Result<String, JsValue> {
         let ct = json_to_ct(ct_json).map_err(|e| JsValue::from_str(&e))?;
         let tokens_arr: Vec<serde_json::Value> = serde_json::from_str(other_tokens_json)
             .map_err(|e| JsValue::from_str(&format!("JSON error: {}", e)))?;
@@ -596,16 +504,116 @@ impl WasmClientPlayer {
             other_tokens.push(hex_to_ecpoint(token_hex).map_err(|e| JsValue::from_str(&e))?);
         }
 
-        self.inner.decrypt_playing_card(&ct, other_tokens)
+        let pt_arr: Vec<String> = serde_json::from_str(deck_plaintext_json)
+            .map_err(|e| JsValue::from_str(&format!("JSON error: {}", e)))?;
+        let deck_plaintext: Vec<Plaintext> = pt_arr.iter()
+            .map(|s| hex_to_ecpoint(s))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        self.inner.decrypt_playing_card(&ct, other_tokens, deck_plaintext)
             .map(|card| card.to_string())
             .ok_or_else(|| JsValue::from_str("Failed to decrypt playing card"))
     }
 
-    pub fn decrypt_readable_card(&self, ct_json: &str) -> Result<String, JsValue>  {
+    pub fn decrypt_readable_card(&self, ct_json: &str, deck_plaintext_json: &str) -> Result<String, JsValue>  {
         let ct = json_to_ct(ct_json).map_err(|e| JsValue::from_str(&e))?;
-        self.inner.decrypt_readable_card(&ct)
+
+        let pt_arr: Vec<String> = serde_json::from_str(deck_plaintext_json)
+            .map_err(|e| JsValue::from_str(&format!("JSON error: {}", e)))?;
+        let deck_plaintext: Vec<Plaintext> = pt_arr.iter()
+            .map(|s| hex_to_ecpoint(s))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        self.inner.decrypt_readable_card(&ct, deck_plaintext)
         .map(|card| card.to_string())
         .ok_or_else(|| JsValue::from_str("Failed to decrypt readable card"))
+    }
+
+    pub fn reconstruct(
+        &self,
+        origin_cards_json: &str,
+        user_readable_cards_json: &str,
+        coefficient_hex: &str,
+    ) -> Result<JsValue, JsValue> {
+        let origin_pt_arr: Vec<String> = serde_json::from_str(origin_cards_json)
+            .map_err(|e| JsValue::from_str(&format!("JSON error: {}", e)))?;
+        let origin_cards: Vec<EcPoint> = origin_pt_arr.iter()
+            .map(|s| hex_to_ecpoint(s))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        let user_readable_cards = json_to_ct_vec(user_readable_cards_json)
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        let coefficient = hex_to_scalar(coefficient_hex)
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        let result = self.inner.reconstruct(&origin_cards, &user_readable_cards, &coefficient)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        fn schnorr_proof_to_json(proof: &poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<RistrettoCurve>) -> String {
+            let responses_hex: Vec<String> = proof.responses.iter().map(scalar_to_hex).collect();
+            format!(
+                r#"{{"commitment_hex":"{}","responses_hex":[{}]}}"#,
+                ecpoint_to_hex(&proof.commitment),
+                responses_hex.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(",")
+            )
+        }
+
+        fn chaum_pedersen_proof_to_json(proof: &poker_protocol::zk_shuffle::reconstruction::ChaumPedersenDLEQProof<RistrettoCurve>) -> String {
+            format!(
+                r#"{{"commitment_a_hex":"{}","commitment_b_hex":"{}","response_hex":"{}"}}"#,
+                ecpoint_to_hex(&proof.commitment_a),
+                ecpoint_to_hex(&proof.commitment_b),
+                scalar_to_hex(&proof.response)
+            )
+        }
+
+        fn reconstruction_dleq_proof_to_json(proof: &poker_protocol::zk_shuffle::reconstruction::ReconstructionDLEQProof<RistrettoCurve>) -> String {
+            format!(
+                r#"{{"commitment_hex":"{}","response_hex":"{}","nonce_hex":"{}"}}"#,
+                ecpoint_to_hex(&proof.commitment),
+                scalar_to_hex(&proof.response),
+                scalar_to_hex(&proof.nonce)
+            )
+        }
+
+        fn swap_out_card_proof_to_json(proof: &poker_protocol::zk_shuffle::reconstruction::SwapOutCardProof<RistrettoCurve>) -> String {
+            format!(
+                r#"{{"user_readable_card":{},"swap_out_card":{},"chaum_pedersen_proof":{}}}"#,
+                ct_generic_to_json(&proof.user_readable_card),
+                ct_generic_to_json(&proof.swap_out_card),
+                chaum_pedersen_proof_to_json(&proof.chaum_pedersen_proof)
+            )
+        }
+
+        let swap_out_proofs_json: Vec<String> = result.proof.swap_out_cards_proofs.iter()
+            .map(swap_out_card_proof_to_json).collect();
+
+        let proof_json = format!(
+            r#"{{"swap_out_cards_proofs":[{}],"sum_c1_r_commit_hex":"{}","sum_c2_r_commit_hex":"{}","swap_sum_c1_commit_hex":"{}","swap_sum_c2_commit_hex":"{}","nonce_hex":"{}","blind_dleq_proof":{},"total_dleq_proof":{},"swap_combined_schnorr_proof":{},"sum_swap_out_c1_schnorr_proof":{},"sum_swap_out_c2_schnorr_proof":{}}}"#,
+            swap_out_proofs_json.join(","),
+            ecpoint_to_hex(&result.proof.sum_c1_r_commit),
+            ecpoint_to_hex(&result.proof.sum_c2_r_commit),
+            ecpoint_to_hex(&result.proof.swap_sum_c1_commit),
+            ecpoint_to_hex(&result.proof.swap_sum_c2_commit),
+            scalar_to_hex(&result.proof.nonce),
+            reconstruction_dleq_proof_to_json(&result.proof.blind_dleq_proof),
+            chaum_pedersen_proof_to_json(&result.proof.total_dleq_proof),
+            schnorr_proof_to_json(&result.proof.swap_combined_schnorr_proof),
+            schnorr_proof_to_json(&result.proof.sum_swap_out_c1_schnorr_proof),
+            schnorr_proof_to_json(&result.proof.sum_swap_out_c2_schnorr_proof)
+        );
+
+        let s = format!(
+            r#"{{"output_cards":{},"swap_cards":{},"proof":{}}}"#,
+            ct_vec_to_json(&result.output_cards),
+            ct_vec_to_json(&result.swap_cards),
+            proof_json
+        );
+        Ok(json_val_to_jsvalue(s))
     }
 }
 

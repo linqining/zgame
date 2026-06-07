@@ -18,20 +18,39 @@ import {
   TABLE_UPDATED,
   SHUFFLE_NOTICE,
   SHUFFLE_SUBMIT,
+  RECONSTRUCT_INITIATE,
+  RECONSTRUCT_NOTICE,
+  RECONSTRUCT_SUBMIT,
+  RECONSTRUCT_RESULT,
   REVEAL_NOTICE,
   HAND_REVEAL_RESULT,
   COMMUNITY_REVEAL_RESULT,
-  EXPEL_INITIATE,
-  EXPEL_VOTE,
-  EXPEL_FORCE,
-  EXPEL_RESULT,
-  EXPEL_NOTICE,
+  REDEAL_NOTICE,
+  REDEAL_RESULT,
+  REDEAL_REQUEST,
 } from '../../pokergame/actions';
 import authContext from '../auth/authContext';
 import socketContext from '../websocket/socketContext';
 import { PlayerContext } from '../player/PlayerContext';
 import { gameApi } from '../../helpers/api';
 import GameContext from './gameContext';
+
+const RoundState = {
+  Waiting: 'waiting',
+  Shuffling: 'shuffling',
+  ShuffleComplete: 'shuffleComplete',
+  PreFlopReveal: 'preFlopReveal',
+  PreFlop: 'preFlop',
+  FlopReveal: 'flopReveal',
+  Flop: 'flop',
+  TurnReveal: 'turnReveal',
+  Turn: 'turn',
+  RiverReveal: 'riverReveal',
+  River: 'river',
+  ShowdownReveal: 'showdownReveal',
+  Showdown: 'showdown',
+  HandComplete: 'handComplete',
+};
 
 function wrapCryptoOp(op, name) {
   try {
@@ -127,7 +146,7 @@ const GameState = ({ history, children }) => {
       console.warn('[Shuffle] No player keys available');
       return null;
     }
-    console.log('[SHUFFLE_NOTICE] Current player:', pkHex,keys.pk_hex);
+    console.log('[SHUFFLE_NOTICE] Current player:', pkHex,keys);
     if (shuffleState.current_player_pk !== pkHex) {
       console.log('[Shuffle] Not my turn, waiting...');
       return null;
@@ -204,6 +223,13 @@ const GameState = ({ history, children }) => {
       return;
     }
 
+    const round_state = currentTableRef.current?.roundState;
+    console.log('[Reveal] Current round state:', round_state);
+    if (round_state === RoundState.TurnReveal || round_state === RoundState.RiverReveal ) {
+      console.warn('[Reveal] Not in turn state');
+      return;
+    }
+
     const assignments = player_assignments || currentTableRef.current?.revealTokenState?.player_assignments;
     if (!assignments) {
       console.warn('[Reveal] No player assignments available');
@@ -258,6 +284,7 @@ const GameState = ({ history, children }) => {
         pk_hex: pkHex,
         reveal_tokens: tokens,
       });
+      console.log('[Reveal] Submitted tokens:', { gameId, pkHex, tokens });
 
       addMessage(`Reveal ${phase}: ${tokens.length} tokens submitted`);
     } catch (e) {
@@ -271,7 +298,7 @@ const GameState = ({ history, children }) => {
 
   const handleHandRevealResult = useCallback(async (data) => {
     console.log(HAND_REVEAL_RESULT, data);
-    const { tableId, playerPk, readableCards } = data;
+    const { tableId, playerPk, readableCards,deckPlaintext } = data;
 
     if (!readableCards || !Array.isArray(readableCards) || readableCards.length === 0) {
       console.warn('[HandReveal] No readable cards in payload');
@@ -289,26 +316,36 @@ const GameState = ({ history, children }) => {
       console.warn('[HandReveal] playerPk mismatch, ignoring:', { playerPk, currentPkHex });
       return;
     }
-
-    try {
-      const decrypted = [];
-      for (const card of readableCards) {
-        const ctJson = JSON.stringify(card);
+    const decFailedCards = [];
+    const decrypted = [];
+    for (let i = 0; i < readableCards.length; i++) {
+      const card = readableCards[i];
+      const ctJson = JSON.stringify(card);
+      const deckPlaintextJson = JSON.stringify(deckPlaintext);
+      try{
         const result = wrapCryptoOp(() => {
           console.log('[HandReveal] Decrypting card:', ctJson);
-          const decryptedStr = keys.decrypt_readable_card(ctJson);
+          const decryptedStr = keys.decrypt_readable_card(ctJson,deckPlaintextJson);
           if (!decryptedStr) throw new Error('decrypt_readable_card returned null');
           return decryptedStr;
         }, 'decrypt_readable_card');
         console.log('[HandReveal] Decrypted card:', result);
         decrypted.push(result);
+      } catch (e) {
+        decFailedCards.push(card);
+        console.error('[HandReveal] Decryption failed:', e);
+        addMessage(`Hand reveal decryption failed: ${e.message || e}`);
+        continue;
       }
-
+    }
+    if (decFailedCards.length > 0) {
+      // 返回失败信息，由 socket handler 发送 REDEAL_REQUEST
+      addMessage(`Hand reveal decryption failed for ${decFailedCards.length} cards`);
+      return { failedCards: decFailedCards, playerPk: currentPkHex };
+    }else{
       setDecryptedHandCards(decrypted);
       addMessage(`Hand revealed: ${decrypted.length} cards decrypted`);
-    } catch (e) {
-      console.error('[HandReveal] Decryption failed:', e);
-      addMessage(`Hand reveal decryption failed: ${e.message || e}`);
+      return null;
     }
   }, [playerKeys, getPlayerKeys, pkHex, addMessage]);
 
@@ -324,18 +361,57 @@ const GameState = ({ history, children }) => {
     setCommunityCards(cards);
     addMessage(`Community cards revealed: ${cards.length} cards`);
   }, [addMessage]);
-
-  const handleExpelNotice = useCallback((data) => {
-    console.log(EXPEL_NOTICE, data);
-    console.log(HAND_REVEAL_RESULT, data);
-    const { table_id, phase, completed_players, pending_players, expel_deck } = data;
+  
+  const handleReconstructNotice = useCallback(async (data) => {
+    console.log(RECONSTRUCT_NOTICE, data);
+    const { table_id, completed_players, pending_players, cards, coefficient_hex, player_readable_cards } = data;
     const keys = playerKeys || getPlayerKeys();
     if (!keys) {
-      console.warn('[HandReveal] No player keys available for decryption');
+      console.warn('[Reconstruct] No player keys available for decryption');
       return;
     }
-    keys.decrypt_expel_deck(expel_deck);
-    
+
+    if (!pending_players || !pending_players.includes(pkHex)) {
+      console.log('[Reconstruct] Not my turn for reconstruct');
+      return;
+    }
+
+    const myReadableCards = player_readable_cards?.[pkHex];
+    if (!myReadableCards || !myReadableCards.readable_cards || myReadableCards.readable_cards.length === 0) {
+      console.warn('[Reconstruct] No readable cards assigned for my pk');
+      return;
+    }
+
+    try {
+      const originCardsJson = JSON.stringify(cards);
+      const userReadableCardsJson = JSON.stringify(myReadableCards.readable_cards);
+
+      const result = wrapCryptoOp(() => {
+        const resultRaw = keys.reconstruct(originCardsJson, userReadableCardsJson, coefficient_hex);
+        if (!resultRaw) throw new Error('reconstruct returned null');
+        let parsed;
+        if (typeof resultRaw === 'string') {
+          parsed = JSON.parse(resultRaw);
+        } else {
+          parsed = resultRaw;
+        }
+        return parsed;
+      }, 'reconstruct');
+
+      console.log('RECONSTRUCT_NOTICE shuffle proof', result);
+      console.log('[Reconstruct] Result:', result);
+      addMessage(`Reconstruct submitted`);
+      return {
+        table_id,
+        pk_hex: pkHex,
+        output_cards: result.output_cards,
+        swap_cards: result.swap_cards,
+        proof: result.proof,
+      };
+    } catch (e) {
+      console.error('[Reconstruct] Failed:', e);
+      addMessage(`Reconstruct failed: ${e.message || e}`);
+    }
   }, [playerKeys, pkHex, getPlayerKeys, addMessage]);
 
   useEffect(() => {
@@ -382,29 +458,56 @@ const GameState = ({ history, children }) => {
         handleRevealNotice(data);
       });
 
-      socket.on(EXPEL_NOTICE, (data) => {
-        handleExpelNotice(data);
+      socket.on(RECONSTRUCT_NOTICE, async (data) => {
+        const result = await handleReconstructNotice(data);
+        if (result) {
+          socket.emit(RECONSTRUCT_SUBMIT, result);
+        }
       });
 
-      socket.on(EXPEL_RESULT, (data) => {
-        console.log(EXPEL_RESULT, data);
+      socket.on(RECONSTRUCT_RESULT, (data) => {
+        console.log(RECONSTRUCT_RESULT, data);
         if (data?.expelled) {
           addMessage('Player expelled by vote');
         } else {
-          addMessage('Expel vote timed out');
+          addMessage('construct vote timed out');
         }
       });
 
       socket.on(HAND_REVEAL_RESULT, (data) => {
-        handleHandRevealResult(data);
+        const redealInfo = handleHandRevealResult(data);
+        if (redealInfo) {
+          socket.emit(REDEAL_REQUEST, {
+            tableId: currentTableRef.current?.id,
+            playerPk: redealInfo.playerPk,
+            failedCardIndices: redealInfo.failedCardIndices,
+          });
+          addMessage(`Requesting redeal for ${redealInfo.failedCardIndices.length} failed cards...`);
+        }
       });
 
       socket.on(COMMUNITY_REVEAL_RESULT, (data) => {
         handleCommunityRevealResult(data);
       });
+
+      socket.on(REDEAL_NOTICE, (data) => {
+        console.log(REDEAL_NOTICE, data);
+        // redeal notice 使用与 reveal notice 相同的格式，复用处理逻辑
+        handleRevealNotice(data);
+      });
+
+      socket.on(REDEAL_RESULT, (data) => {
+        // redeal result 使用与 hand reveal result 相同的格式，复用解密逻辑
+        const redealInfo = handleHandRevealResult(data);
+        if (redealInfo) {
+          addMessage(`Redeal decryption still failed for ${redealInfo.failedCardIndices.length} cards`);
+        } else {
+          addMessage('Redeal successful, new cards decrypted');
+        }
+      });
     }
     return () => leaveTable();
-  }, [socket, handleShuffleNotice, handleRevealNotice, handleHandRevealResult, handleCommunityRevealResult]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [socket, handleShuffleNotice, handleRevealNotice, handleReconstructNotice, handleHandRevealResult, handleCommunityRevealResult]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const joinTable = (tableId) => {
     console.log(JOIN_TABLE, tableId);
@@ -457,7 +560,7 @@ const GameState = ({ history, children }) => {
       const aggPkHex = window.wasm_bindgen.compute_aggregate_key(pkHexesJson);
 
       const deckEncryptedJson = JSON.stringify(deckEncrypted);
-
+      console.log('SIT_DOWN_V2', tableId, seatId, amount,pkHex,aggPkHex,deckEncryptedJson);
       const joinResult = wrapCryptoOp(() => {
         const result = keys.join_game_and_shuffle(deckEncryptedJson, aggPkHex);
         if (!result) throw new Error('join_game_and_shuffle returned null');
@@ -471,7 +574,7 @@ const GameState = ({ history, children }) => {
         shuffle_proof: joinResult.mask_and_shuffle_round.shuffle_proof,
       };
       const pkProof = joinResult.pk_ownership_proof;
-      // const gameId = String(tableId);
+      console.log('SIT_DOWN_V2', tableId, seatId, amount,pkHex,pkProof,maskAndShuffleRound,keys.get_pk_hex());
       socket.emit(SIT_DOWN_V2, { tableId, seatId, amount,pkHex,pkProof,maskAndShuffleRound });
       addMessage('Joined table and shuffled successfully');
     } catch (e) {
@@ -527,16 +630,9 @@ const GameState = ({ history, children }) => {
   };
 
   const expelInitiate = (tableId, targetPlayerPk) => {
-    socket.emit(EXPEL_INITIATE, { tableId, targetPlayerPk });
+    socket.emit(RECONSTRUCT_INITIATE, { tableId, targetPlayerPk });
   };
 
-  const expelVote = (tableId, vote) => {
-    socket.emit(EXPEL_VOTE, { tableId, vote });
-  };
-
-  const expelForce = (tableId, targetPlayerPk) => {
-    socket.emit(EXPEL_FORCE, { tableId, targetPlayerPk });
-  };
 
   return (
     <GameContext.Provider
@@ -562,8 +658,6 @@ const GameState = ({ history, children }) => {
         sittingOut,
         sittingIn,
         expelInitiate,
-        expelVote,
-        expelForce,
       }}
     >
       {children}

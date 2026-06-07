@@ -119,7 +119,7 @@ const PlayerProvider = ({ children }) => {
     }
 
     try {
-      console.log('[PlayerContext] Reconstructing player keys from SK...');
+      console.log('[PlayerContext] Reconstructing player keys from SK...',storedSk);
       const reconstructedKeys = wasmClientPlayer.from_sk(storedSk);
       const restoredProof = parsePkProof(reconstructedKeys.generate_pk_proof());
       const pk = reconstructedKeys.get_pk_hex();

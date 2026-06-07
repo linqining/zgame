@@ -170,6 +170,7 @@ dependencies = [
 name = "client-wasm"
 version = "0.1.0"
 dependencies = [
+ "clear_on_drop",
  "curve25519-dalek",
  "getrandom",
  "hex",

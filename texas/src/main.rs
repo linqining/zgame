@@ -50,6 +50,9 @@ async fn main() -> std::io::Result<()> {
     initial_tables.insert(1, Table::new(1, "Table 1".to_string(), 10000, 5));
     initial_tables.insert(2, Table::new(2, "Table 2".to_string(), 20000, 5));
     initial_tables.insert(3, Table::new(3, "Table 3".to_string(), 50000, 5));
+    for table in initial_tables.values_mut() {
+        table.start_shuffle();
+    }
 
     let config_for_socket = config.clone();
 
@@ -76,7 +79,6 @@ async fn main() -> std::io::Result<()> {
         .route("/tables/:table_id", routing::get(handlers::get_table))
         .route("/tables/:table_id/join-and-shuffle", routing::post(handlers::join_game_and_shuffle))
         .route("/games/:game_id/join", routing::post(handlers::join_game))
-        .route("/games/:game_id/shuffle", routing::post(handlers::shuffle))
         .route("/games/:game_id/join-and-shuffle", routing::post(handlers::join_game_and_shuffle))
         .route("/games/:game_id/join-game-and-shuffle", routing::post(handlers::join_game_and_shuffle))
         .route("/games/:game_id/action", routing::post(handlers::player_action))
@@ -95,7 +97,12 @@ async fn main() -> std::io::Result<()> {
                 .into_inner(),
         )
         .layer(layer)
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
+                .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::HeaderName::from_static("x-auth-token")])
+        )
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;

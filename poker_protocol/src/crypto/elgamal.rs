@@ -1,4 +1,4 @@
-use super::types::{EcPoint, Scalar, BASE_G, BASE_H};
+use super::types::{EcPoint, Scalar, BASE_G};
 use curve25519_dalek::traits::{Identity, IsIdentity};
 use rand_core::{RngCore, CryptoRng};
 
@@ -20,7 +20,7 @@ impl ElGamalCiphertext {
 
     pub fn decrypt(&self, sk: &Scalar) -> EcPoint { self.c2 - self.c1 * sk }
 
-    pub fn is_valid(&self) -> bool { !self.c1.is_identity() || !self.c2.is_identity() }
+    pub fn is_valid(&self) -> bool { !self.c1.is_identity() && !self.c2.is_identity() }
 
     pub fn new_placeholder_card() -> Self { ElGamalCiphertext { c1: EcPoint::identity(), c2: EcPoint::identity() } }
 

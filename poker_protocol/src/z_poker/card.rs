@@ -1,6 +1,4 @@
 use std::fmt;
-use crate::crypto::{BASE_G, EcPoint, Scalar};
-use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Suit {
@@ -169,10 +167,9 @@ impl PlayingCard {
         Some(Self { rank, suit })
     }
 
-    pub fn from_plaintext(pt: &EcPoint) -> Option<Self> {
-        standard_deck().iter().find(|card| {
-            *pt == *BASE_G * Scalar::from(card.id() as u64 + 1)
-        }).copied()
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        standard_deck().get(index).copied()
     }
 }
 
@@ -264,19 +261,5 @@ mod tests {
         assert_eq!(format!("{}", card), "A\u{2660}");
         let card = PlayingCard::new(Rank::Ten, Suit::Heart);
         assert_eq!(format!("{}", card), "10\u{2665}");
-    }
-
-    #[test]
-    fn test_from_plaintext_roundtrip() {
-        for card in standard_deck() {
-            let pt = *BASE_G * Scalar::from(card.id() as u64 + 1);
-            assert_eq!(PlayingCard::from_plaintext(&pt), Some(card), "Roundtrip failed for {}", card);
-        }
-    }
-
-    #[test]
-    fn test_from_plaintext_invalid() {
-        let invalid = *BASE_G * Scalar::from(999u64);
-        assert!(PlayingCard::from_plaintext(&invalid).is_none());
     }
 }

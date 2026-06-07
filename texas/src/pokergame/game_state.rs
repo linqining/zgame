@@ -1,17 +1,18 @@
 use std::collections::HashMap;
-use std::os::raw::c_uint;
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
-use poker_protocol::z_poker::convert::{ecpoint_to_hex, scalar_to_hex};
+use poker_protocol::z_poker::convert::{ecpoint_to_hex, hex_to_ecpoint, hex_to_scalar, scalar_to_hex};
 
-use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Scalar};
+use poker_protocol::crypto::{CurveScalar, EcPoint, ElGamalCiphertext, Plaintext, Scalar};
 use poker_protocol::z_poker::key_manager::PKOwnershipProof;
 use poker_protocol::z_poker::protocol::MaskAndShuffleRound;
 use poker_protocol::zk_shuffle::remask_proof::RemaskProof;
-use poker_protocol::zk_shuffle::{ShuffleProof, ZKConsistencyProof};
+use poker_protocol::zk_shuffle::ShuffleProof;
+use poker_protocol::crypto::RistrettoCurve;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use poker_protocol::zk_shuffle::reconstruction::{ReconstructProof, SwapOutCardProof, ReconstructionDLEQProof, ChaumPedersenDLEQProof};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShuffleState {
@@ -27,7 +28,7 @@ pub struct ShuffleState {
 impl ShuffleState {
     pub fn new() -> Self {
         Self {
-            is_active: true,
+            is_active: false,
             current_player_pk: None,
             timeout_start: None,
             timeout_seconds: 10,
@@ -52,6 +53,7 @@ pub enum RevealPhase {
     HandReveal,
     CommunityReveal,
     ShowdownReveal,
+    RedealReveal,
 }
 
 impl std::fmt::Display for RevealPhase {
@@ -60,6 +62,7 @@ impl std::fmt::Display for RevealPhase {
             RevealPhase::HandReveal => write!(f, "hand_reveal"),
             RevealPhase::CommunityReveal => write!(f, "community_reveal"),
             RevealPhase::ShowdownReveal => write!(f, "show_down_reveal"),
+            RevealPhase::RedealReveal => write!(f, "redeal_reveal"),
         }
     }
 }
@@ -111,6 +114,16 @@ pub struct PlayerRevealAssignment {
     pub community_card: Vec<ElGamalCiphertext>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PlayerReadableCard {
+    pub readable_cards: Vec<ElGamalCiphertext>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlayerReadableCardJson {
+    pub readable_cards: Vec<ElGamalCiphertextJson>,
+}
+
 impl Serialize for PlayerRevealAssignment {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -154,7 +167,7 @@ impl<'de> Deserialize<'de> for PlayerRevealAssignment {
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
-pub enum ExpelPhase {
+pub enum ReconstructPhase {
     #[default]
     Initiated,
     Voting,
@@ -162,50 +175,55 @@ pub enum ExpelPhase {
     Forced,
 }
 
-impl std::fmt::Display for ExpelPhase {
+impl std::fmt::Display for ReconstructPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExpelPhase::Initiated => write!(f, "initiated"),
-            ExpelPhase::Voting => write!(f, "voting"),
-            ExpelPhase::Completed => write!(f, "completed"),
-            ExpelPhase::Forced => write!(f, "forced"),
+            ReconstructPhase::Initiated => write!(f, "initiated"),
+            ReconstructPhase::Voting => write!(f, "voting"),
+            ReconstructPhase::Completed => write!(f, "completed"),
+            ReconstructPhase::Forced => write!(f, "forced"),
         }
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ExpelState {
+#[derive(Debug, Clone, Default)]
+pub struct ReconstructState {
     pub is_active: bool,
-    pub phase: ExpelPhase,
-    #[serde(skip)]
+    // pub phase: ReconstructPhase,
     pub timeout_start: Option<std::time::Instant>,
     pub timeout_seconds: u64,
     pub completed_players: Vec<String>,
     pub pending_players: Vec<String>,// 发起时的玩家列表
-    pub expel_records_count: usize,
-    pub expel_deck: Vec<ElGamalCiphertextJson>,
+    pub cards: Vec<Plaintext>,
+    pub coefficient: Scalar, //公共变量
+    pub player_readable_cards: HashMap<String, PlayerReadableCard>,
+    pub player_deck: HashMap<String, Vec<ElGamalCiphertext>>,
 }
 
-impl ExpelState {
+impl ReconstructState {
     pub fn new() -> Self {
         Self {
             is_active: false,
-            phase: ExpelPhase::Initiated,
             timeout_start: None,
             timeout_seconds: 60,
             completed_players: Vec::new(),
             pending_players: Vec::new(),
-            expel_records_count: 0,
-            expel_deck: Vec::new(),
+            cards: Vec::new(),
+            coefficient: Scalar::zero(),
+            player_readable_cards: HashMap::new(),
+            player_deck: HashMap::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.is_active = false;
-        self.phase = ExpelPhase::Initiated;
         self.timeout_start = None;
         self.completed_players.clear();
         self.pending_players.clear();
+        self.cards.clear();
+        self.coefficient = Scalar::zero();
+        self.player_readable_cards.clear();
+        self.player_deck.clear();
     }
 }
 
@@ -219,11 +237,13 @@ pub struct RevealTokenPublicState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExpelPublicState {
+pub struct ReconstructPublicState {
     pub is_active: bool,
-    pub phase: String,
-    pub voted_players: Vec<String>,
-    pub expel_records_count: usize,
+    pub completed_players: Vec<String>,
+    pub pending_players: Vec<String>,
+    pub cards: Vec<String>,
+    pub coefficient_hex: String, //公共变量
+    pub player_readable_cards: HashMap<String, PlayerReadableCardJson>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,24 +271,7 @@ pub struct ShufflePublicState {
     pub aggregate_pk: String,
 }
 
-pub fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
-    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    match CompressedRistretto::from_slice(&bytes).ok().and_then(|c| c.decompress()) {
-        Some(p) => Ok(p),
-        None => Err("Invalid EC point".to_string())
-    }
-}
 
-fn hex_to_scalar(hex_str: &str) -> Result<Scalar, String> {
-    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    if bytes.len() != 32 {
-        return Err("Scalar must be 32 bytes".to_string());
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Option::from(Scalar::from_canonical_bytes(arr))
-        .ok_or_else(|| "Invalid scalar value".to_string())
-}
 
 impl ElGamalCiphertextJson {
     pub fn to_ciphertext(&self) -> Result<ElGamalCiphertext, String> {
@@ -296,60 +299,147 @@ impl PkProofJson {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RemaskProofJson {
-    pub a_hex: String,
-    pub b_hex: String,
-    pub sum_c1_hex: String,
-    pub sum_d2_hex: String,
-    pub s_hex: String,
+    pub per_card_commitments_hex: Vec<String>,
+    pub commitment_pk_hex: String,
+    pub response_hex: String,
     pub nonce_hex: String,
 }
 
 impl RemaskProofJson {
-    pub fn to_remask_proof(&self) -> Result<RemaskProof, String> {
+    pub fn to_remask_proof(&self) -> Result<RemaskProof<RistrettoCurve>, String> {
         Ok(RemaskProof {
-            commitment_a: hex_to_ecpoint(&self.a_hex)?,
-            commitment_b: hex_to_ecpoint(&self.b_hex)?,
-            sum_c1: hex_to_ecpoint(&self.sum_c1_hex)?,
-            sum_d2: hex_to_ecpoint(&self.sum_d2_hex)?,
-            response: hex_to_scalar(&self.s_hex)?,
+            per_card_commitments: self.per_card_commitments_hex.iter()
+                .map(|h| hex_to_ecpoint(h))
+                .collect::<Result<Vec<_>, _>>()?,
+            commitment_pk: hex_to_ecpoint(&self.commitment_pk_hex)?,
+            response: hex_to_scalar(&self.response_hex)?,   
             nonce: hex_to_scalar(&self.nonce_hex)?,
         })
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ZKConsistencyProofJson {
-    pub d1_hex: String,
-    pub d2_hex: String,
-    pub a_g_hex: String,
-    pub a_pk_hex: String,
-    pub s_hex: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneralizedSchnorrProofJson {
+    pub commitment_hex: String,
+    pub responses_hex: Vec<String>,
 }
 
-impl ZKConsistencyProofJson {
-    pub fn to_proof(&self) -> Result<ZKConsistencyProof, String> {
-        Ok(ZKConsistencyProof {
-            d1: hex_to_ecpoint(&self.d1_hex)?,
-            d2: hex_to_ecpoint(&self.d2_hex)?,
-            a_g: hex_to_ecpoint(&self.a_g_hex)?,
-            a_pk: hex_to_ecpoint(&self.a_pk_hex)?,
-            s: hex_to_scalar(&self.s_hex)?,
+impl GeneralizedSchnorrProofJson {
+    pub fn to_proof(&self) -> Result<poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<RistrettoCurve>, String> {
+        let responses = self.responses_hex.iter()
+            .map(|h| hex_to_scalar(h))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof {
+            commitment: hex_to_ecpoint(&self.commitment_hex)?,
+            responses,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwapOutCardProofJson {
+    pub user_readable_card: ElGamalCiphertextJson,
+    pub swap_out_card: ElGamalCiphertextJson,
+    pub chaum_pedersen_proof: ChaumPedersenDLEQProofJson,
+}
+
+impl SwapOutCardProofJson {
+    pub fn to_proof(&self) -> Result<SwapOutCardProof<RistrettoCurve>, String> {
+        Ok(SwapOutCardProof {
+            user_readable_card: self.user_readable_card.to_ciphertext()?.into(),
+            swap_out_card: self.swap_out_card.to_ciphertext()?.into(),
+            chaum_pedersen_proof: self.chaum_pedersen_proof.to_proof()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChaumPedersenDLEQProofJson {
+    pub commitment_a_hex: String,
+    pub commitment_b_hex: String,
+    pub response_hex: String,
+}
+
+impl ChaumPedersenDLEQProofJson {
+    pub fn to_proof(&self) -> Result<ChaumPedersenDLEQProof<RistrettoCurve>, String> {
+        Ok(ChaumPedersenDLEQProof {
+            commitment_a: hex_to_ecpoint(&self.commitment_a_hex)?,
+            commitment_b: hex_to_ecpoint(&self.commitment_b_hex)?,
+            response: hex_to_scalar(&self.response_hex)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconstructionDLEQProofJson {
+    pub commitment_hex: String,
+    pub response_hex: String,
+    pub nonce_hex: String,
+}
+
+impl ReconstructionDLEQProofJson {
+    pub fn to_proof(&self) -> Result<ReconstructionDLEQProof<RistrettoCurve>, String> {
+        Ok(ReconstructionDLEQProof {
+            commitment: hex_to_ecpoint(&self.commitment_hex)?,
+            response: hex_to_scalar(&self.response_hex)?,
+            nonce: hex_to_scalar(&self.nonce_hex)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconstructProofJson {
+    pub swap_out_cards_proofs: Vec<SwapOutCardProofJson>,
+    pub sum_c1_r_commit_hex: String,
+    pub sum_c2_r_commit_hex: String,
+    pub swap_sum_c1_commit_hex: String,
+    pub swap_sum_c2_commit_hex: String,
+    pub nonce_hex: String,
+    pub blind_dleq_proof: ReconstructionDLEQProofJson,
+    pub total_dleq_proof: ChaumPedersenDLEQProofJson,
+    pub swap_combined_schnorr_proof: GeneralizedSchnorrProofJson,
+    pub sum_swap_out_c1_schnorr_proof: GeneralizedSchnorrProofJson,
+    pub sum_swap_out_c2_schnorr_proof: GeneralizedSchnorrProofJson,
+}
+
+impl ReconstructProofJson {
+    pub fn to_proof(&self) -> Result<ReconstructProof<RistrettoCurve>, String> {
+        Ok(ReconstructProof {
+            swap_out_cards_proofs: self.swap_out_cards_proofs.iter()
+                .map(|p| p.to_proof())
+                .collect::<Result<Vec<_>, _>>()?,
+            sum_c1_r_commit: hex_to_ecpoint(&self.sum_c1_r_commit_hex)?,
+            sum_c2_r_commit: hex_to_ecpoint(&self.sum_c2_r_commit_hex)?,
+            swap_sum_c1_commit: hex_to_ecpoint(&self.swap_sum_c1_commit_hex)?,
+            swap_sum_c2_commit: hex_to_ecpoint(&self.swap_sum_c2_commit_hex)?,
+            nonce: hex_to_scalar(&self.nonce_hex)?,
+            blind_dleq_proof: self.blind_dleq_proof.to_proof()?,
+            total_dleq_proof: self.total_dleq_proof.to_proof()?,
+            swap_combined_schnorr_proof: self.swap_combined_schnorr_proof.to_proof()?,
+            sum_swap_out_c1_schnorr_proof: self.sum_swap_out_c1_schnorr_proof.to_proof()?,
+            sum_swap_out_c2_schnorr_proof: self.sum_swap_out_c2_schnorr_proof.to_proof()?,
         })
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ShuffleProofJson {
-    pub zk_consistency: ZKConsistencyProofJson,
-    pub global_challenge_hex: String,
+    pub sum_c1_commit_hex: String,
+    pub sum_c2_commit_hex: String,
+    pub combined_schnorr_proof: GeneralizedSchnorrProofJson,
+    pub sum_c1_schnorr_proof: GeneralizedSchnorrProofJson,
+    pub sum_c2_schnorr_proof: GeneralizedSchnorrProofJson,
     pub nonce_hex: String,
 }
 
 impl ShuffleProofJson {
     pub fn to_proof(&self) -> Result<ShuffleProof, String> {
         Ok(ShuffleProof {
-            zk_consistency: self.zk_consistency.to_proof()?,
-            global_challenge: hex_to_scalar(&self.global_challenge_hex)?,
+            sum_c1_commit: hex_to_ecpoint(&self.sum_c1_commit_hex)?,
+            sum_c2_commit: hex_to_ecpoint(&self.sum_c2_commit_hex)?,
+            combined_schnorr_proof: self.combined_schnorr_proof.to_proof()?,
+            sum_c1_schnorr_proof: self.sum_c1_schnorr_proof.to_proof()?,
+            sum_c2_schnorr_proof: self.sum_c2_schnorr_proof.to_proof()?,
             nonce: hex_to_scalar(&self.nonce_hex)?,
         })
     }
@@ -389,7 +479,7 @@ pub struct RevealTokenProofJson {
 }
 
 impl RevealTokenProofJson {
-    pub fn to_proof(&self) -> Result<RevealTokenProof, String> {
+    pub fn to_proof(&self) -> Result<RevealTokenProof<RistrettoCurve>, String> {
         Ok(RevealTokenProof {
             user_public_key: hex_to_ecpoint(&self.user_public_key_hex)?,
             commitment_t1: hex_to_ecpoint(&self.commitment_t1_hex)?,
@@ -397,7 +487,7 @@ impl RevealTokenProofJson {
             response_s: hex_to_scalar(&self.response_s_hex)?,
         })
     }
-    pub fn from_proof(proof: RevealTokenProof) -> Self {
+    pub fn from_proof(proof: RevealTokenProof<RistrettoCurve>) -> Self {
         Self {
             user_public_key_hex: ecpoint_to_hex(&proof.user_public_key),
             commitment_t1_hex: ecpoint_to_hex(&proof.commitment_t1),

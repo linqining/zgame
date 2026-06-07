@@ -287,7 +287,7 @@ impl<C: Curve> ElGamalCiphertextGeneric<C> {
 
     /// Check if this is a valid (non-identity) ciphertext.
     pub fn is_valid(&self) -> bool {
-        !self.c1.is_identity() || !self.c2.is_identity()
+        !self.c1.is_identity() && !self.c2.is_identity()
     }
 
     /// Create a placeholder card (identity points).

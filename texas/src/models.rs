@@ -14,6 +14,8 @@ pub struct User {
     pub user_type: i32,
     pub created: String,
     pub pk_hex:String,
+    #[serde(default)]
+    pub last_free_chips_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,6 +116,23 @@ impl Database {
             .update_one(
                 mongodb::bson::doc! {"_id": id},
                 mongodb::bson::doc! {"$set": {"chips_amount": amount}},
+            )
+            .await;
+        match result {
+            Ok(_) => self.find_user_by_id(id).await,
+            Err(e) => {
+                tracing::error!("Failed to set chips for {}: {}", id, e);
+                None
+            }
+        }
+    }
+
+    pub async fn set_chips_with_cooldown(&self, id: &str, amount: i64) -> Option<User> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = self.users
+            .update_one(
+                mongodb::bson::doc! {"_id": id},
+                mongodb::bson::doc! {"$set": {"chips_amount": amount, "last_free_chips_at": &now}},
             )
             .await;
         match result {

@@ -61,17 +61,47 @@ let wasm_bindgen = (function(exports) {
         /**
          * @param {string} ct_json
          * @param {string} other_tokens_json
+         * @param {string} deck_plaintext_json
          * @returns {string}
          */
-        decrypt_playing_card(ct_json, other_tokens_json) {
-            let deferred4_0;
-            let deferred4_1;
+        decrypt_playing_card(ct_json, other_tokens_json, deck_plaintext_json) {
+            let deferred5_0;
+            let deferred5_1;
             try {
                 const ptr0 = passStringToWasm0(ct_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
                 const len0 = WASM_VECTOR_LEN;
                 const ptr1 = passStringToWasm0(other_tokens_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
                 const len1 = WASM_VECTOR_LEN;
-                const ret = wasm.wasmclientplayer_decrypt_playing_card(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+                const ptr2 = passStringToWasm0(deck_plaintext_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+                const len2 = WASM_VECTOR_LEN;
+                const ret = wasm.wasmclientplayer_decrypt_playing_card(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+                var ptr4 = ret[0];
+                var len4 = ret[1];
+                if (ret[3]) {
+                    ptr4 = 0; len4 = 0;
+                    throw takeFromExternrefTable0(ret[2]);
+                }
+                deferred5_0 = ptr4;
+                deferred5_1 = len4;
+                return getStringFromWasm0(ptr4, len4);
+            } finally {
+                wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+            }
+        }
+        /**
+         * @param {string} ct_json
+         * @param {string} deck_plaintext_json
+         * @returns {string}
+         */
+        decrypt_readable_card(ct_json, deck_plaintext_json) {
+            let deferred4_0;
+            let deferred4_1;
+            try {
+                const ptr0 = passStringToWasm0(ct_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+                const len0 = WASM_VECTOR_LEN;
+                const ptr1 = passStringToWasm0(deck_plaintext_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+                const len1 = WASM_VECTOR_LEN;
+                const ret = wasm.wasmclientplayer_decrypt_readable_card(this.__wbg_ptr, ptr0, len0, ptr1, len1);
                 var ptr3 = ret[0];
                 var len3 = ret[1];
                 if (ret[3]) {
@@ -83,30 +113,6 @@ let wasm_bindgen = (function(exports) {
                 return getStringFromWasm0(ptr3, len3);
             } finally {
                 wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
-            }
-        }
-        /**
-         * @param {string} ct_json
-         * @returns {string}
-         */
-        decrypt_readable_card(ct_json) {
-            let deferred3_0;
-            let deferred3_1;
-            try {
-                const ptr0 = passStringToWasm0(ct_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-                const len0 = WASM_VECTOR_LEN;
-                const ret = wasm.wasmclientplayer_decrypt_readable_card(this.__wbg_ptr, ptr0, len0);
-                var ptr2 = ret[0];
-                var len2 = ret[1];
-                if (ret[3]) {
-                    ptr2 = 0; len2 = 0;
-                    throw takeFromExternrefTable0(ret[2]);
-                }
-                deferred3_0 = ptr2;
-                deferred3_1 = len2;
-                return getStringFromWasm0(ptr2, len2);
-            } finally {
-                wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
             }
         }
         /**
@@ -177,22 +183,19 @@ let wasm_bindgen = (function(exports) {
             return WasmClientPlayer.__wrap(ret[0]);
         }
         /**
-         * @param {string} hand_encrypted_json
-         * @param {string} deck_plaintext_json
-         * @param {string} agg_pk_hex
-         * @param {string} per_card_tokens_json
+         * @param {string} _hand_encrypted_json
+         * @param {string} _agg_pk_hex
+         * @param {string} _per_card_tokens_json
          * @returns {any}
          */
-        generate_expel_proof(hand_encrypted_json, deck_plaintext_json, agg_pk_hex, per_card_tokens_json) {
-            const ptr0 = passStringToWasm0(hand_encrypted_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        generate_expel_proof(_hand_encrypted_json, _agg_pk_hex, _per_card_tokens_json) {
+            const ptr0 = passStringToWasm0(_hand_encrypted_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(deck_plaintext_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr1 = passStringToWasm0(_agg_pk_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len1 = WASM_VECTOR_LEN;
-            const ptr2 = passStringToWasm0(agg_pk_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr2 = passStringToWasm0(_per_card_tokens_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len2 = WASM_VECTOR_LEN;
-            const ptr3 = passStringToWasm0(per_card_tokens_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len3 = WASM_VECTOR_LEN;
-            const ret = wasm.wasmclientplayer_generate_expel_proof(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+            const ret = wasm.wasmclientplayer_generate_expel_proof(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
             if (ret[2]) {
                 throw takeFromExternrefTable0(ret[1]);
             }
@@ -289,28 +292,31 @@ let wasm_bindgen = (function(exports) {
         /**
          * @param {string} ct_json
          * @param {string} tokens_json
+         * @param {string} plain_cards_json
          * @returns {string}
          */
-        peek_card(ct_json, tokens_json) {
-            let deferred4_0;
-            let deferred4_1;
+        peek_card(ct_json, tokens_json, plain_cards_json) {
+            let deferred5_0;
+            let deferred5_1;
             try {
                 const ptr0 = passStringToWasm0(ct_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
                 const len0 = WASM_VECTOR_LEN;
                 const ptr1 = passStringToWasm0(tokens_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
                 const len1 = WASM_VECTOR_LEN;
-                const ret = wasm.wasmclientplayer_peek_card(this.__wbg_ptr, ptr0, len0, ptr1, len1);
-                var ptr3 = ret[0];
-                var len3 = ret[1];
+                const ptr2 = passStringToWasm0(plain_cards_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+                const len2 = WASM_VECTOR_LEN;
+                const ret = wasm.wasmclientplayer_peek_card(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+                var ptr4 = ret[0];
+                var len4 = ret[1];
                 if (ret[3]) {
-                    ptr3 = 0; len3 = 0;
+                    ptr4 = 0; len4 = 0;
                     throw takeFromExternrefTable0(ret[2]);
                 }
-                deferred4_0 = ptr3;
-                deferred4_1 = len3;
-                return getStringFromWasm0(ptr3, len3);
+                deferred5_0 = ptr4;
+                deferred5_1 = len4;
+                return getStringFromWasm0(ptr4, len4);
             } finally {
-                wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+                wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
             }
         }
         /**
@@ -336,6 +342,25 @@ let wasm_bindgen = (function(exports) {
             } finally {
                 wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
             }
+        }
+        /**
+         * @param {string} origin_cards_json
+         * @param {string} user_readable_cards_json
+         * @param {string} coefficient_hex
+         * @returns {any}
+         */
+        reconstruct(origin_cards_json, user_readable_cards_json, coefficient_hex) {
+            const ptr0 = passStringToWasm0(origin_cards_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(user_readable_cards_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(coefficient_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len2 = WASM_VECTOR_LEN;
+            const ret = wasm.wasmclientplayer_reconstruct(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            if (ret[2]) {
+                throw takeFromExternrefTable0(ret[1]);
+            }
+            return takeFromExternrefTable0(ret[0]);
         }
         /**
          * @param {string} ct_json
@@ -432,28 +457,6 @@ let wasm_bindgen = (function(exports) {
             } finally {
                 wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
             }
-        }
-        /**
-         * @param {string} input_cards_json
-         * @param {string} mask_cards_json
-         * @param {string} remask_proof_json
-         * @param {string} pk_hex
-         * @returns {any}
-         */
-        verify_remask_proof(input_cards_json, mask_cards_json, remask_proof_json, pk_hex) {
-            const ptr0 = passStringToWasm0(input_cards_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(mask_cards_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len1 = WASM_VECTOR_LEN;
-            const ptr2 = passStringToWasm0(remask_proof_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len2 = WASM_VECTOR_LEN;
-            const ptr3 = passStringToWasm0(pk_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len3 = WASM_VECTOR_LEN;
-            const ret = wasm.wasmclientplayer_verify_remask_proof(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
-            if (ret[2]) {
-                throw takeFromExternrefTable0(ret[1]);
-            }
-            return takeFromExternrefTable0(ret[0]);
         }
     }
     if (Symbol.dispose) WasmClientPlayer.prototype[Symbol.dispose] = WasmClientPlayer.prototype.free;

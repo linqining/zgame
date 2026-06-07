@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "texas",           # 所有crate放在crates目录下
-    "poker_protocol"
+    "poker_protocol",
+    "vin_game_simulator"
 ]
 
 # 可选：指定默认target目录

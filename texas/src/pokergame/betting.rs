@@ -40,6 +40,10 @@ impl BettingRound {
         self.min_raise
     }
 
+    pub fn get_actions_taken(&self) -> usize {
+        self.actions_taken
+    }
+
     pub fn validate_fold(&self, _seat: &Seat) -> Result<(), String> {
         Ok(())
     }

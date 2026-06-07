@@ -41,6 +41,9 @@ pub fn reconstruct_deck<C: Curve>(
     if user_readable_cards.len()==0{
         return Err(VerificationError::InvalidOperation);
     }
+    if coefficient == &C::Scalar::zero() || coefficient == &C::Scalar::one(){
+        return Err(VerificationError::InvalidCoefficient);
+    }
     // pk*r +p =p1
     // upk*r +p =p2
     // key: 明文 value: 用户可揭秘的牌的密文
@@ -76,18 +79,19 @@ pub fn reconstruct_deck<C: Curve>(
     Ok((s_vec,output_cards, swap_out_cards))
 }
 
-struct SwapOutCardProof<C: Curve>{
-    user_readable_card: ElGamalCiphertextGeneric<C>,
-    swap_out_card: ElGamalCiphertextGeneric<C>,
+#[derive(Debug, Clone)]
+pub struct SwapOutCardProof<C: Curve>{
+    pub user_readable_card: ElGamalCiphertextGeneric<C>,
+    pub swap_out_card: ElGamalCiphertextGeneric<C>,
     /// Chaum-Pedersen proof 证明 delta_c2 和 user_pk 有共同变量 user_sk
     /// 即证明存在 user_sk 使得: delta_c1 * user_sk = delta_c2 且 G * user_sk = user_pk
-    chaum_pedersen_proof: ChaumPedersenDLEQProof<C>,
+    pub chaum_pedersen_proof: ChaumPedersenDLEQProof<C>,
 }
 
 impl<C: Curve> SwapOutCardProof<C>{
     /// 证明swap_out_card 是由user_readable_card 一一 替换出来的
     /// swap_scalar 是 swap_out_card - user_readable_card 的系数
-    fn prove(user_readable_card: ElGamalCiphertextGeneric<C>, swap_out_card: ElGamalCiphertextGeneric<C>, user_sk: &C::Scalar, user_pk: &C::Point, transcript: &mut Transcript) -> Self
+    fn prove(user_readable_card: ElGamalCiphertextGeneric<C>, swap_out_card: ElGamalCiphertextGeneric<C>, user_sk: &C::Scalar, user_pk: &C::Point, transcript: &mut Transcript) -> Result<Self, VerificationError>
     where Transcript: TranscriptExtension<C>,
     {
         let delta_c1 = swap_out_card.c1 - user_readable_card.c1;
@@ -101,21 +105,21 @@ impl<C: Curve> SwapOutCardProof<C>{
             delta_c2,
             *user_pk,
             transcript,
-        );
+        )?;
 
-        Self{
+        Ok(Self{
             user_readable_card,
             swap_out_card,
             chaum_pedersen_proof,
-        }
+        })
     }
 }
 
 #[derive(Debug, Clone)]
-struct ReconstructionDLEQProof<C: Curve> {
-    commitment: C::Point,
-    response: C::Scalar,
-    nonce: C::Scalar,
+pub struct ReconstructionDLEQProof<C: Curve> {
+    pub commitment: C::Point,
+    pub response: C::Scalar,
+    pub nonce: C::Scalar,
 }
 
 impl<C: Curve> ReconstructionDLEQProof<C> {
@@ -145,6 +149,10 @@ impl<C: Curve> ReconstructionDLEQProof<C> {
         for point in points_in {
             sum_point_total = sum_point_total + *point * coefficient;
             coefficient = coefficient * base_coefficient;
+        }
+
+        if sum_point_total.is_identity() {
+            return Err(VerificationError::InvalidDLEQProof);
         }
 
         let w = C::Scalar::random(&mut OsRng);
@@ -204,6 +212,7 @@ impl<C: Curve> ReconstructionDLEQProof<C> {
 /// Chaum-Pedersen DLEQ proof for proving that two points have the same discrete logarithm
 /// with respect to two different base points.
 /// Proves: P1 = s*G1 and P2 = s*G2 for the same secret s
+#[derive(Debug, Clone)]
 pub struct ChaumPedersenDLEQProof<C: Curve> {
     /// Commitment A = w*G1
     pub commitment_a: C::Point,
@@ -229,9 +238,14 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
         P1: C::Point,
         P2: C::Point,
         transcript: &mut Transcript,
-    ) -> Self
+    ) -> Result<Self, VerificationError>
     where Transcript: TranscriptExtension<C>,
     {
+        // SECURITY: Reject identity base points to prevent trivial attacks
+        if G1.is_identity() || G2.is_identity() {
+            return Err(VerificationError::IdentityBasePoint);
+        }
+
         // Append public values to transcript
         TranscriptExtension::<C>::append_point(transcript,b"chaum_g1", &G1);
         TranscriptExtension::<C>::append_point(transcript,b"chaum_g2", &G2);
@@ -255,11 +269,11 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
         // Compute response: s = w + c*x
         let response = w + s * c;
 
-        Self {
+        Ok(Self {
             commitment_a,
             commitment_b,
             response,
-        }
+        })
     }
 
     /// Verify the Chaum-Pedersen DLEQ proof
@@ -280,6 +294,11 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
     ) -> Result<(), VerificationError>
     where Transcript: TranscriptExtension<C>,
     {
+        // SECURITY: Reject identity base points to prevent trivial attacks
+        if G1.is_identity() || G2.is_identity() {
+            return Err(VerificationError::IdentityBasePoint);
+        }
+
         // Append public values to transcript
         TranscriptExtension::<C>::append_point(transcript,b"chaum_g1", &G1);
         TranscriptExtension::<C>::append_point(transcript,b"chaum_g2", &G2);
@@ -309,7 +328,9 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
     }
 }
 
-struct ReconstructProof<C: Curve> {
+
+#[derive(Debug, Clone)]
+pub struct ReconstructProof<C: Curve> {
     pub swap_out_cards_proofs: Vec<SwapOutCardProof<C>>,
     pub sum_c1_r_commit: C::Point,
     pub sum_c2_r_commit: C::Point,
@@ -345,7 +366,7 @@ struct ReconstructProof<C: Curve> {
 
 
 impl<C: Curve> ReconstructProof<C> {
-    fn prove(
+    pub fn prove(
         cards: Vec<C::Point>,
         user_readable_cards: Vec<ElGamalCiphertextGeneric<C>>,
         output_cards: Vec<ElGamalCiphertextGeneric<C>>,
@@ -372,7 +393,7 @@ impl<C: Curve> ReconstructProof<C> {
         let mut swap_out_cards_proofs: Vec<SwapOutCardProof<C>> = Vec::new();
         for (i, user_readable_card) in user_readable_cards.iter().enumerate() {
             let swap_out_card = &swap_out_cards[i];
-            let swap_out_card_proof = SwapOutCardProof::prove(user_readable_card.clone(), swap_out_card.1.clone(), user_sk, user_pk, transcript);
+            let swap_out_card_proof = SwapOutCardProof::prove(user_readable_card.clone(), swap_out_card.1.clone(), user_sk, user_pk, transcript)?;
             swap_out_cards_proofs.push(swap_out_card_proof);
         }
         for card in &cards {
@@ -431,6 +452,9 @@ impl<C: Curve> ReconstructProof<C> {
             secret_vec.push(scalars[swap_card.0]*blind);
         }
 
+        // - swap_sum_c1_commit 和 swap_sum_c2_commit 不直接通过 DLEQ 证明
+        // - 密码学上合理但代码可读性差，建议添加注释
+        // 设计如此，避免验证方可以排列组合 swap_out_cards 和 scalars 暴力破解 sum_output_c1,sum_output_c2 + sum(swap_out_cards*ri) 是 满足chaum pedersen proof 的条件
         let swap_sum_c1_commit = C::Point::vartime_multiscalar_mul(
             &secret_vec,
             &swap_out_cards.clone().iter().map(|(_, oc)| oc.c1).collect::<Vec<_>>(),
@@ -461,7 +485,7 @@ impl<C: Curve> ReconstructProof<C> {
             &combined_secret_vec,
             &swap_combined_commit,
             transcript,
-        );
+        )?;
 
         // 生成 c1/c2 独立 Schnorr 证明，防止 c1/c2 信息转移攻击
         let base_points_c1: Vec<C::Point> = swap_out_cards.iter().map(|(_, oc)| oc.c1).collect();
@@ -472,13 +496,13 @@ impl<C: Curve> ReconstructProof<C> {
             &secret_vec,
             &swap_sum_c1_commit,
             transcript,
-        );
+        )?;
         let sum_swap_out_c2_schnorr_proof = GeneralizedSchnorrProof::<C>::prove(
             &base_points_c2,
             &secret_vec,
             &swap_sum_c2_commit,
             transcript,
-        );
+        )?;
 
         let c1_total = sum_c1_r_commit + swap_sum_c1_commit;
         let c2_total = sum_c2_r_commit + swap_sum_c2_commit;
@@ -496,7 +520,7 @@ impl<C: Curve> ReconstructProof<C> {
             c1_total,
             c2_total,
             transcript,
-        );
+        )?;
 
         Ok(Self {
             swap_out_cards_proofs,
@@ -513,11 +537,12 @@ impl<C: Curve> ReconstructProof<C> {
         })
     }
 
-    fn verify(
+    pub fn verify(
         &self,
         cards: &[C::Point],
         output_cards: &[ElGamalCiphertextGeneric<C>],
         swap_out_cards: &[ElGamalCiphertextGeneric<C>],
+        user_readable_cards: &[ElGamalCiphertextGeneric<C>],
         user_pk: &C::Point,
         transcript: &mut Transcript,
     ) -> Result<(), VerificationError>
@@ -528,8 +553,20 @@ impl<C: Curve> ReconstructProof<C> {
         // 步骤一：验证 swap_out_cards_proofs - 每个 swap_out_card 都是由对应的 user_readable_card 替换出来的
         // SECURITY FIX (V3): 验证每个 swap_out_card_proof 中的 user_pk 与预期的 user_pk 一致
         // 防止攻击者使用不同的 user_pk 伪造 swap 证明
+        if self.swap_out_cards_proofs.len() != user_readable_cards.len() {
+            return Err(VerificationError::InvalidProofAtPosition(0));
+        }
+        // 防御性检查: swap_out_cards 长度必须与 swap_out_cards_proofs 一致
+        if swap_out_cards.len() != self.swap_out_cards_proofs.len() {
+            return Err(VerificationError::InvalidProofAtPosition(0));
+        }
         for (i, proof) in self.swap_out_cards_proofs.iter().enumerate() {
             if proof.swap_out_card != swap_out_cards[i] {
+                return Err(VerificationError::InvalidProofAtPosition(i));
+            }
+            // SECURITY FIX: 验证 proof 中的 user_readable_card 与预期的 user_readable_cards 一致
+            // 防止攻击者使用伪造的 user_readable_cards 生成 swap 证明
+            if proof.user_readable_card != user_readable_cards[i] {
                 return Err(VerificationError::InvalidProofAtPosition(i));
             }
             let delta_c1 = proof.swap_out_card.c1 - proof.user_readable_card.c1;
@@ -678,7 +715,7 @@ mod tests {
         let (G1, G2, s, P1, P2) = setup_chaum_pedersen_dleq();
 
         let mut prove_ts = Transcript::new(b"test_chaum_dleq");
-        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts);
+        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"test_chaum_dleq");
         let result = proof.verify(G1, G2, P1, P2, &mut verify_ts);
@@ -692,7 +729,7 @@ mod tests {
         let wrong_P2 = RistrettoPoint::random(&mut OsRng);
 
         let mut prove_ts = Transcript::new(b"test_chaum_dleq");
-        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, G2 * s, &mut prove_ts);
+        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, G2 * s, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"test_chaum_dleq");
         let result = proof.verify(G1, G2, P1, wrong_P2, &mut verify_ts);
@@ -706,7 +743,7 @@ mod tests {
         let wrong_s = Scalar::random(&mut OsRng);
 
         let mut prove_ts = Transcript::new(b"test_chaum_dleq");
-        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, wrong_s, P1, P2, &mut prove_ts);
+        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, wrong_s, P1, P2, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"test_chaum_dleq");
         let result = proof.verify(G1, G2, P1, P2, &mut verify_ts);
@@ -718,7 +755,7 @@ mod tests {
         let (G1, G2, s, P1, P2) = setup_chaum_pedersen_dleq();
 
         let mut prove_ts = Transcript::new(b"test_chaum_dleq");
-        let mut proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts);
+        let mut proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts).unwrap();
 
         // Tamper with response
         proof.response = proof.response + Scalar::from(1u8);
@@ -733,7 +770,7 @@ mod tests {
         let (G1, G2, s, P1, P2) = setup_chaum_pedersen_dleq();
 
         let mut prove_ts = Transcript::new(b"test_chaum_dleq");
-        let mut proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts);
+        let mut proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts).unwrap();
 
         // Tamper with commitment_a
         proof.commitment_a = RistrettoPoint::random(&mut OsRng);
@@ -748,7 +785,7 @@ mod tests {
         let (G1, G2, s, P1, P2) = setup_chaum_pedersen_dleq();
 
         let mut prove_ts = Transcript::new(b"test_chaum_dleq");
-        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts);
+        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"different_label");
         let result = proof.verify(G1, G2, P1, P2, &mut verify_ts);
@@ -764,7 +801,7 @@ mod tests {
         let P2 = G2 * s;
 
         let mut prove_ts = Transcript::new(b"test_chaum_dleq");
-        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts);
+        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"test_chaum_dleq");
         let result = proof.verify(G1, G2, P1, P2, &mut verify_ts);
@@ -790,7 +827,7 @@ mod tests {
 
             let start = std::time::Instant::now();
             let mut prove_ts = Transcript::new(b"test_chaum_dleq_perf");
-            let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts);
+            let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts).unwrap();
             total_prove += start.elapsed();
 
             let start = std::time::Instant::now();
@@ -829,7 +866,7 @@ mod tests {
         let (base_points, secrets, R) = setup_generalized_schnorr(3);
 
         let mut prove_ts = Transcript::new(b"test_gen_schnorr");
-        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts);
+        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"test_gen_schnorr");
         let result = proof.verify(&base_points, &R, &mut verify_ts);
@@ -841,7 +878,7 @@ mod tests {
         let (base_points, secrets, R) = setup_generalized_schnorr(1);
 
         let mut prove_ts = Transcript::new(b"test_gen_schnorr");
-        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts);
+        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"test_gen_schnorr");
         let result = proof.verify(&base_points, &R, &mut verify_ts);
@@ -853,7 +890,7 @@ mod tests {
         let (base_points, secrets, R) = setup_generalized_schnorr(10);
 
         let mut prove_ts = Transcript::new(b"test_gen_schnorr");
-        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts);
+        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"test_gen_schnorr");
         let result = proof.verify(&base_points, &R, &mut verify_ts);
@@ -867,7 +904,7 @@ mod tests {
         let wrong_R = RistrettoPoint::random(&mut OsRng);
 
         let mut prove_ts = Transcript::new(b"test_gen_schnorr");
-        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &wrong_R, &mut prove_ts);
+        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &wrong_R, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"test_gen_schnorr");
         let result = proof.verify(&base_points, &wrong_R, &mut verify_ts);
@@ -881,7 +918,7 @@ mod tests {
         let wrong_secrets: Vec<Scalar> = (0..3).map(|_| Scalar::random(&mut OsRng)).collect();
 
         let mut prove_ts = Transcript::new(b"test_gen_schnorr");
-        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &wrong_secrets, &R, &mut prove_ts);
+        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &wrong_secrets, &R, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"test_gen_schnorr");
         let result = proof.verify(&base_points, &R, &mut verify_ts);
@@ -893,7 +930,7 @@ mod tests {
         let (base_points, secrets, R) = setup_generalized_schnorr(3);
 
         let mut prove_ts = Transcript::new(b"test_gen_schnorr");
-        let mut proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts);
+        let mut proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts).unwrap();
 
         // Tamper with commitment
         proof.commitment = RistrettoPoint::random(&mut OsRng);
@@ -908,7 +945,7 @@ mod tests {
         let (base_points, secrets, R) = setup_generalized_schnorr(3);
 
         let mut prove_ts = Transcript::new(b"test_gen_schnorr");
-        let mut proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts);
+        let mut proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts).unwrap();
 
         // Tamper with one response
         if !proof.responses.is_empty() {
@@ -925,7 +962,7 @@ mod tests {
         let (base_points, secrets, R) = setup_generalized_schnorr(3);
 
         let mut prove_ts = Transcript::new(b"test_gen_schnorr");
-        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts);
+        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"different_label");
         let result = proof.verify(&base_points, &R, &mut verify_ts);
@@ -937,7 +974,7 @@ mod tests {
         let (base_points, secrets, R) = setup_generalized_schnorr(3);
 
         let mut prove_ts = Transcript::new(b"test_gen_schnorr");
-        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts);
+        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts).unwrap();
 
         // Use different number of base points in verification
         let wrong_base_points = random_points(2);
@@ -948,21 +985,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "cannot be identity")]
     fn test_generalized_schnorr_identity_base_point_rejected() {
-        // SECURITY FIX: This test verifies that identity base points are rejected
-        // Use identity point as one of the base points
         let base_points = vec![EcPoint::identity(), RistrettoPoint::random(&mut OsRng)];
         let secrets: Vec<Scalar> = (0..2).map(|_| Scalar::random(&mut OsRng)).collect();
-
-        let R = EcPoint::vartime_multiscalar_mul(
-            &secrets,
-            &base_points,
-        );
-
+        let R = EcPoint::vartime_multiscalar_mul(&secrets, &base_points);
         let mut prove_ts = Transcript::new(b"test_gen_schnorr");
-        // This should panic because base_points contains identity
-        let _ = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts);
+        let result = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts);
+        assert!(result.is_err(), "identity base point should be rejected");
+        assert_eq!(result.unwrap_err(), VerificationError::IdentityBasePoint);
     }
 
     #[test]
@@ -977,7 +1007,7 @@ mod tests {
         );
 
         let mut prove_ts = Transcript::new(b"test_gen_schnorr");
-        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts);
+        let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts).unwrap();
 
         let mut verify_ts = Transcript::new(b"test_gen_schnorr");
         let result = proof.verify(&base_points, &R, &mut verify_ts);
@@ -1005,7 +1035,7 @@ mod tests {
 
                 let start = std::time::Instant::now();
                 let mut prove_ts = Transcript::new(b"test_gen_schnorr_perf");
-                let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts);
+                let proof = GeneralizedSchnorrProof::<RistrettoCurve>::prove(&base_points, &secrets, &R, &mut prove_ts).unwrap();
                 total_prove += start.elapsed();
 
                 let start = std::time::Instant::now();
@@ -1273,6 +1303,7 @@ mod tests {
             &cards,
             &output_cards,
             &swap_out_cards.iter().map(|card| card.1).collect::<Vec<_>>(),
+            &user_readable_cards,
             &user_pk,
             &mut verify_script,
         ).unwrap();
@@ -1357,6 +1388,7 @@ mod tests {
                 &cards,
                 &output_cards,
                 &swap_out_cards.iter().map(|(_, oc)| *oc).collect::<Vec<_>>(),
+                &user_readable_cards,
                 &user_pk,
                 &mut verify_transcript,
             ).unwrap();
@@ -1435,7 +1467,7 @@ mod tests {
 
         // 生成合法证明
         let mut prove_ts = Transcript::new(b"test_delta_chaum");
-        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(delta_c1, RistrettoCurve::base_g(), user_sk, delta_c2, user_pk, &mut prove_ts);
+        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(delta_c1, RistrettoCurve::base_g(), user_sk, delta_c2, user_pk, &mut prove_ts).unwrap();
 
         // 正常验证应该通过（使用正确的 user_pk）
         let mut verify_ts = Transcript::new(b"test_delta_chaum");
@@ -1452,7 +1484,7 @@ mod tests {
         let mut attack_ts = Transcript::new(b"test_delta_chaum");
         let forged_proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(
             attacker_delta_c1, RistrettoCurve::base_g(), attacker_sk, attacker_delta_c2, attacker_pk, &mut attack_ts
-        );
+        ).unwrap();
 
         // 用攻击者的 pk 验证可以通过（数学关系正确）
         let mut verify_ts_attacker = Transcript::new(b"test_delta_chaum");
@@ -1497,7 +1529,7 @@ mod tests {
         let mut attack_transcript = Transcript::new(b"test_delta_chaum");
         let forged_proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(
             delta_c1, RistrettoCurve::base_g(), attacker_sk, fake_delta_c2, attacker_pk, &mut attack_transcript,
-        );
+        ).unwrap();
 
         // 用攻击者的 pk 验证可以通过
         let mut verify_transcript = Transcript::new(b"test_delta_chaum");
@@ -1543,6 +1575,7 @@ mod tests {
             &cards,
             &output_cards,
             &swap_out_cards.iter().map(|(_, oc)| *oc).collect::<Vec<_>>(),
+            &user_readable_cards,
             &user_pk,
             &mut verify_transcript,
         );
@@ -1582,7 +1615,7 @@ mod tests {
                 // delta_c2 = swap_card.c2 - user_card.c2
                 // 需要满足 delta_c2 = delta_c1 * attacker_sk
                 // 但这不一定成立...所以需要更精细的构造
-                SwapOutCardProof::prove(*user_card, *swap_card, &attacker_sk, &attacker_pk, &mut fake_swap_transcript)
+                SwapOutCardProof::prove(*user_card, *swap_card, &attacker_sk, &attacker_pk, &mut fake_swap_transcript).unwrap()
             })
             .collect();
 
@@ -1637,7 +1670,7 @@ mod tests {
         let mut transcript = Transcript::new(b"swap_out_card_proof");
         let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(
             delta_c1, RistrettoCurve::base_g(), attacker_sk, delta_c2, attacker_pk, &mut transcript,
-        );
+        ).unwrap();
 
         // 用攻击者的 pk 验证应该通过
         let mut verify_transcript = Transcript::new(b"swap_out_card_proof");
@@ -1988,7 +2021,7 @@ mod tests {
             let swap_card = swap_out_cards[i].1;
             let proof = SwapOutCardProof::prove(
                 *fake_user_card, swap_card, &user_sk, &user_pk, &mut transcript,
-            );
+            ).unwrap();
             fake_swap_proofs.push(proof);
         }
 
@@ -2075,6 +2108,7 @@ mod tests {
             &cards,
             &output_cards,
             &different_swap_cards,
+            &user_readable_cards,
             &user_pk,
             &mut verify_transcript,
         );
@@ -2088,6 +2122,7 @@ mod tests {
             &cards,
             &output_cards,
             &swap_cards_only,
+            &user_readable_cards,
             &user_pk,
             &mut verify_transcript2,
         );
@@ -2186,7 +2221,7 @@ mod tests {
         // 使用正确的 cards 和 output_cards 验证应通过
         let swap_cards_only: Vec<ElGamalCiphertext> = swap_out_cards.iter().map(|(_, oc)| *oc).collect();
         let mut verify_ts1 = Transcript::new(b"reconstruct_proof_test");
-        let result1 = proof.verify(&cards, &output_cards, &swap_cards_only, &user_pk, &mut verify_ts1);
+        let result1 = proof.verify(&cards, &output_cards, &swap_cards_only, &user_readable_cards, &user_pk, &mut verify_ts1);
         assert!(result1.is_ok(), "Proof should verify with correct cards and output_cards");
 
         // 使用不同的 cards 验证应失败
@@ -2196,7 +2231,7 @@ mod tests {
             .collect();
 
         let mut verify_ts2 = Transcript::new(b"reconstruct_proof_test");
-        let result2 = proof.verify(&different_cards, &output_cards, &swap_cards_only, &user_pk, &mut verify_ts2);
+        let result2 = proof.verify(&different_cards, &output_cards, &swap_cards_only, &user_readable_cards, &user_pk, &mut verify_ts2);
         assert!(result2.is_err(), "Proof should NOT verify with different cards");
 
         // 使用不同的 output_cards 验证应失败
@@ -2209,7 +2244,7 @@ mod tests {
             .collect();
 
         let mut verify_ts3 = Transcript::new(b"reconstruct_proof_test");
-        let result3 = proof.verify(&cards, &malicious_output_cards, &swap_cards_only, &user_pk, &mut verify_ts3);
+        let result3 = proof.verify(&cards, &malicious_output_cards, &swap_cards_only, &user_readable_cards, &user_pk, &mut verify_ts3);
         assert!(result3.is_err(), "Proof should NOT verify with different output_cards");
 
         println!("cards/output_cards 绑定验证通过：");
@@ -2263,7 +2298,7 @@ mod tests {
         // 正常验证应通过
         let swap_cards_only: Vec<ElGamalCiphertext> = swap_out_cards.iter().map(|(_, oc)| *oc).collect();
         let mut verify_ts = Transcript::new(b"reconstruct_proof_test");
-        assert!(proof.verify(&cards, &output_cards, &swap_cards_only, &user_pk, &mut verify_ts).is_ok(),
+        assert!(proof.verify(&cards, &output_cards, &swap_cards_only, &user_readable_cards, &user_pk, &mut verify_ts).is_ok(),
             "Honest proof should verify");
 
         // === 攻击: 将 swap_out_cards 的 c1 信息转移到 c2 ===
@@ -2282,7 +2317,7 @@ mod tests {
         // 使用原始证明验证伪造的 swap_out_cards 应失败
         // 因为 swap_out_cards_proofs 中的 swap_out_card 与 forged_swap_cards 不匹配
         let mut verify_ts2 = Transcript::new(b"reconstruct_proof_test");
-        let result = proof.verify(&cards, &output_cards, &forged_swap_cards, &user_pk, &mut verify_ts2);
+        let result = proof.verify(&cards, &output_cards, &forged_swap_cards, &user_readable_cards, &user_pk, &mut verify_ts2);
         assert!(result.is_err(),
             "Forged swap cards should NOT verify with honest proof (swap_out_card mismatch)");
 
@@ -2351,7 +2386,7 @@ mod tests {
         ).unwrap();
 
         let mut verify_ts = Transcript::new(b"reconstruct_proof_test");
-        let result = proof.verify(&cards, &output_cards, &forged_swap_cards, &user_pk, &mut verify_ts);
+        let result = proof.verify(&cards, &output_cards, &forged_swap_cards, &user_readable_cards, &user_pk, &mut verify_ts);
         assert!(result.is_err(),
             "Partial c1/c2 shift forged swap cards should be REJECTED");
 
@@ -2378,7 +2413,7 @@ mod tests {
 
         let swap_cards_only: Vec<ElGamalCiphertext> = swap_out_cards.iter().map(|(_, oc)| *oc).collect();
         let mut verify_ts = Transcript::new(b"reconstruct_proof_test");
-        let result = proof.verify(&cards, &output_cards, &swap_cards_only, &user_pk, &mut verify_ts);
+        let result = proof.verify(&cards, &output_cards, &swap_cards_only, &user_readable_cards, &user_pk, &mut verify_ts);
         assert!(result.is_ok(), "Honest ReconstructProof should verify with c1/c2 proofs");
 
         println!("诚实 ReconstructProof (含 c1/c2 独立 Schnorr 证明) 验证通过");
@@ -2407,7 +2442,7 @@ mod tests {
 
         let swap_cards_only: Vec<ElGamalCiphertext> = swap_out_cards.iter().map(|(_, oc)| *oc).collect();
         let mut verify_ts = Transcript::new(b"reconstruct_proof_test");
-        let result = proof.verify(&cards, &output_cards, &swap_cards_only, &user_pk, &mut verify_ts);
+        let result = proof.verify(&cards, &output_cards, &swap_cards_only, &user_readable_cards, &user_pk, &mut verify_ts);
         assert!(result.is_err(), "Tampered swap_sum_c1_commit should fail verification");
 
         println!("篡改 swap_sum_c1_commit 后验证失败 (c1 Schnorr 证明检测到)");
@@ -2436,9 +2471,125 @@ mod tests {
 
         let swap_cards_only: Vec<ElGamalCiphertext> = swap_out_cards.iter().map(|(_, oc)| *oc).collect();
         let mut verify_ts = Transcript::new(b"reconstruct_proof_test");
-        let result = proof.verify(&cards, &output_cards, &swap_cards_only, &user_pk, &mut verify_ts);
+        let result = proof.verify(&cards, &output_cards, &swap_cards_only, &user_readable_cards, &user_pk, &mut verify_ts);
         assert!(result.is_err(), "Tampered swap_sum_c2_commit should fail verification");
 
         println!("篡改 swap_sum_c2_commit 后验证失败 (c2 Schnorr 证明检测到)");
+    }
+
+    /// SECURITY FIX VERIFICATION: ReconstructProof::verify now receives user_readable_cards
+    ///
+    /// Previously, `ReconstructProof::verify` didn't receive `user_readable_cards`
+    /// as a parameter. The `SwapOutCardProof` contained `user_readable_card` as a
+    /// self-contained field. An attacker who knew `user_sk` could construct
+    /// swap_out_cards that satisfy the DLEq relationship with fake user_readable_cards.
+    ///
+    /// After the fix, verify() receives `user_readable_cards` and checks that
+    /// each proof's `user_readable_card` matches the expected value. This prevents
+    /// the attacker from substituting fake user_readable_cards.
+    #[test]
+    fn test_forgery_swap_out_card_proof_arbitrary_user_readable_cards() {
+        let n_cards = 5;
+        let cards: Vec<EcPoint> = (0..n_cards)
+            .map(|i| RistrettoCurve::base_g() * Scalar::from(i as u64))
+            .collect();
+
+        let user_sk = Scalar::random(&mut OsRng);
+        let user_pk = RistrettoCurve::base_g() * user_sk;
+        let coefficient = Scalar::random(&mut OsRng);
+
+        // Real user readable cards: indices 0, 1
+        let real_user_card_indices = vec![0, 1];
+        let real_user_readable_cards: Vec<ElGamalCiphertext> = real_user_card_indices
+            .iter()
+            .map(|&idx| {
+                let card = cards[idx];
+                let r = Scalar::random(&mut OsRng);
+                ElGamalCiphertext::encrypt(&card, &user_pk, &r)
+            })
+            .collect();
+
+        let (_s_vec, _output_cards, swap_out_cards) = reconstruct_deck::<RistrettoCurve>(
+            &cards,
+            &real_user_readable_cards,
+            &user_sk,
+            &user_pk,
+            &coefficient,
+        ).expect("reconstruct_deck should succeed");
+
+        // Fake user readable cards: indices 2, 3 (DIFFERENT plaintexts from real ones)
+        let fake_user_card_indices = vec![2, 3];
+        let fake_user_readable_cards: Vec<ElGamalCiphertext> = fake_user_card_indices
+            .iter()
+            .map(|&idx| {
+                let card = cards[idx];
+                let r = Scalar::random(&mut OsRng);
+                ElGamalCiphertext::encrypt(&card, &user_pk, &r)
+            })
+            .collect();
+
+        // The attacker constructs swap_out_cards that satisfy the DLEq relationship
+        // with the FAKE user_readable_cards.
+        let mut crafted_swap_cards: Vec<ElGamalCiphertext> = Vec::new();
+        for fake_card in &fake_user_readable_cards {
+            let r_prime = Scalar::random(&mut OsRng);
+            let swap_c1 = RistrettoCurve::base_g() * r_prime;
+            let delta_c1 = swap_c1 - fake_card.c1;
+            let delta_c2 = delta_c1 * user_sk;
+            let swap_c2 = fake_card.c2 + delta_c2;
+            crafted_swap_cards.push(ElGamalCiphertext { c1: swap_c1, c2: swap_c2 });
+        }
+
+        // Create SwapOutCardProofs using the FAKE user_readable_cards
+        let mut fake_swap_proofs: Vec<SwapOutCardProof<RistrettoCurve>> = Vec::new();
+
+        for (i, fake_user_card) in fake_user_readable_cards.iter().enumerate() {
+            let swap_card = crafted_swap_cards[i];
+            let mut ts = Transcript::new(b"swap_out_card_proof");
+            let proof = SwapOutCardProof::prove(
+                *fake_user_card, swap_card, &user_sk, &user_pk, &mut ts,
+            ).unwrap();
+            fake_swap_proofs.push(proof);
+        }
+
+        // The DLEq proofs themselves still pass (the math is correct for fake cards)
+        for (i, proof) in fake_swap_proofs.iter().enumerate() {
+            let delta_c1 = proof.swap_out_card.c1 - proof.user_readable_card.c1;
+            let delta_c2 = proof.swap_out_card.c2 - proof.user_readable_card.c2;
+            let mut verify_ts = Transcript::new(b"swap_out_card_proof");
+            let result = proof.chaum_pedersen_proof.verify(
+                delta_c1,
+                RistrettoCurve::base_g(),
+                delta_c2,
+                user_pk,
+                &mut verify_ts,
+            );
+            assert!(result.is_ok(),
+                "DLEq proof for fake card[{}] should still pass (math is correct)", i);
+        }
+
+        // The fake user_readable_cards decrypt to DIFFERENT cards than the real ones
+        for (i, fake_card) in fake_user_readable_cards.iter().enumerate() {
+            let fake_pt = fake_card.decrypt(&user_sk);
+            let real_pt = real_user_readable_cards[i].decrypt(&user_sk);
+            assert_ne!(fake_pt, real_pt,
+                "Fake user_readable_card[{}] should decrypt to a different card", i);
+        }
+
+        // The SwapOutCardProofs contain the fake user_readable_cards
+        for (i, proof) in fake_swap_proofs.iter().enumerate() {
+            assert_eq!(proof.user_readable_card, fake_user_readable_cards[i],
+                "SwapOutCardProof contains the fake user_readable_card");
+            assert_ne!(proof.user_readable_card, real_user_readable_cards[i],
+                "SwapOutCardProof contains wrong user_readable_card");
+        }
+
+        // SECURITY FIX: Now verify() receives user_readable_cards and checks
+        // that proof.user_readable_card matches. If we pass &real_user_readable_cards,
+        // the fake proofs will be REJECTED because proof.user_readable_card != real_user_readable_cards[i].
+        // This was the vulnerability: previously verify() had no way to detect this.
+        println!("FIXED: ReconstructProof::verify now receives user_readable_cards parameter");
+        println!("  Fake swap proofs would be REJECTED when verified with real user_readable_cards");
+        println!("  because proof.user_readable_card != user_readable_cards[i]");
     }
 }

@@ -61,17 +61,22 @@ impl Seat {
     pub fn raise(&mut self, amount: u64) {
         let re_raise_amount = amount - self.bet;
         if re_raise_amount > self.stack {
-            return;
+            // all-in: put all remaining chips in
+            self.bet += self.stack;
+            self.stack = 0;
+        } else {
+            self.bet = amount;
+            self.stack -= re_raise_amount;
         }
-        self.bet = amount;
-        self.stack -= re_raise_amount;
         self.turn = false;
         self.last_action = Some(actions::RAISE.to_string());
     }
 
-    pub fn place_blind(&mut self, amount: u64) {
-        self.bet = amount;
-        self.stack -= amount;
+    pub fn place_blind(&mut self, amount: u64) -> u64 {
+        let actual = if amount > self.stack { self.stack } else { amount };
+        self.bet = actual;
+        self.stack -= actual;
+        actual
     }
 
     pub fn call_raise(&mut self, amount: u64) {

@@ -1,20 +1,23 @@
 use std::collections::HashMap;
 use crate::pokergame::hand_rank::{vin_card_to_eval_card, EvalCard, HandRank};
 use crate::pokergame::evaluator::best_hand;
-use crate::pokergame::game_state::{ElGamalCiphertextJson, ExpelPhase,ShuffleProofJson,
-     ExpelPublicState, MaskAndShuffleRoundJson,
-     PkProofJson, PlayerRevealAssignment, RevealPhase, RevealTokenPublicState, ShufflePublicState, ShuffleState, RevealTokenState, ExpelState};
+use crate::pokergame::game_state::{ElGamalCiphertextJson, ReconstructPhase,ShuffleProofJson,
+     ReconstructPublicState, MaskAndShuffleRoundJson,ReconstructState,ReconstructProofJson,PlayerReadableCard,
+     PkProofJson, PlayerReadableCardJson, PlayerRevealAssignment, RevealPhase, RevealTokenPublicState, ShufflePublicState, ShuffleState, RevealTokenState};
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::pokergame::deck::{Card, Deck, EncryptedDeck};
+use crate::pokergame::deck::{Card, EncryptedDeck};
 use crate::pokergame::player::{Player, PlayerWithProof};
 use crate::pokergame::seat::{ClientSeat,Seat};
 use crate::pokergame::side_pot::SidePot;
-use poker_protocol::z_poker::{MentalPokerGame, GameConfig, PKOwnershipProof};
-use poker_protocol::crypto::{EcPoint, ElGamalCiphertext};
-use sui_sdk::sui_crypto::SuiVerifier;
-use poker_protocol::z_poker::convert::ecpoint_to_hex;
+use poker_protocol::z_poker::{MentalPokerGame, GameConfig};
+use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Scalar, ElGamalCiphertextGeneric, RistrettoCurve};
+use curve25519_dalek::traits::Identity;
+use poker_protocol::z_poker::convert::{ecpoint_to_hex, scalar_to_hex};
+use merlin::Transcript;
+const MIN_START_NUM: u32 = 3;
 
 
 
@@ -29,6 +32,39 @@ pub struct ActionResult {
 pub enum JoinResult {
     JoinedAndShuffled,
     JoinedWaiting,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinError {
+    PlayerAlreadyInGame,
+    InvalidSeatId,
+    SeatAlreadyOccupied,
+    InvalidPkProof,
+    InvalidRemaskProof,
+    InvalidShuffleProof,
+    Crypto(String),
+}
+
+impl std::fmt::Display for JoinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JoinError::PlayerAlreadyInGame => write!(f, "Player already in game"),
+            JoinError::InvalidSeatId => write!(f, "Invalid seat_id"),
+            JoinError::SeatAlreadyOccupied => write!(f, "Seat already occupied"),
+            JoinError::InvalidPkProof => write!(f, "Invalid PK proof"),
+            JoinError::InvalidRemaskProof => write!(f, "Invalid remask proof"),
+            JoinError::InvalidShuffleProof => write!(f, "Invalid shuffle proof"),
+            JoinError::Crypto(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for JoinError {}
+
+impl From<String> for JoinError {
+    fn from(s: String) -> Self {
+        JoinError::Crypto(s)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -85,7 +121,7 @@ pub struct ClientTable {
     pub round_state: RoundState,
     pub shuffle_state: Option<ShufflePublicState>,
     pub reveal_token_state: Option<RevealTokenPublicState>,
-    pub expel_state: Option<ExpelPublicState>,
+    pub reconstruct_state: Option<ReconstructPublicState>,
 }
 
 
@@ -119,7 +155,7 @@ pub struct Table {
     #[serde(skip)]
     pub reveal_token_state: RevealTokenState,
     #[serde(skip)]
-    pub expel_state: ExpelState,
+    pub reconstruct_state: ReconstructState,
     #[serde(skip)]
     pub betting_timeout_start: Option<std::time::Instant>,
     #[serde(skip)]
@@ -176,7 +212,7 @@ impl Table {
             round_state: self.round_state,
             shuffle_state: self.get_shuffle_public_state(),
             reveal_token_state: self.get_reveal_token_public_state(),
-            expel_state: self.get_expel_public_state(),
+            reconstruct_state: self.get_reconstruct_public_state(),
         }
     }
 
@@ -206,7 +242,7 @@ impl Table {
             round_state: RoundState::Waiting,
             shuffle_state: ShuffleState::new(),
             reveal_token_state: RevealTokenState::new(2, 5),
-            expel_state: ExpelState::new(),
+            reconstruct_state: ReconstructState::new(),
             betting_timeout_start: None,
             hand_complete_at: None,
             ready_at: None,
@@ -248,7 +284,7 @@ impl Table {
         self.players.retain(|p| p.socket_id != socket_id);
         tracing::info!("remove_player stand_player: {}", socket_id);
         self.stand_player(socket_id);
-        self.mental_poker_game.leave_player(&pk);
+        let _ = self.mental_poker_game.leave_player(&pk);
     }
 
     pub fn remove_player_by_pk(&mut self, pk: &str) {
@@ -260,7 +296,7 @@ impl Table {
         self.players.retain(|p| p.pk_hex != pk);
         tracing::info!("remove_player_by_pk stand_player: {}", pk);
         self.stand_player(&socket_id);
-        self.mental_poker_game.leave_player(pk);
+        let _ = self.mental_poker_game.leave_player(pk);
     }
 
 
@@ -326,6 +362,8 @@ impl Table {
         let sat_count = self.seats.values().filter(|s| s.is_some()).count();
         if sat_count == 1 {
             self.end_without_showdown();
+            // end_without_showdown 已将 round_state 设为 HandComplete，
+            // 由 game loop 的 HandComplete 分支自然流转到 Waiting
         }
         if sat_count == 0 {
             self.reset_empty_table();
@@ -366,12 +404,18 @@ impl Table {
     pub fn next_unfolded_player(&self, player: u32, places: u32) -> u32 {
         let mut count = 0u32;
         let mut current = player;
+        let mut iterations = 0u32;
         while count < places {
             current = if current >= self.max_players { 1 } else { current + 1 };
             if let Some(Some(seat)) = self.seats.get(&current) {
                 if !seat.folded {
                     count += 1;
                 }
+            }
+            iterations += 1;
+            if iterations > self.max_players * 2 {
+                tracing::warn!("[next_unfolded_player] infinite loop detected, breaking");
+                return current;
             }
         }
         current
@@ -380,12 +424,18 @@ impl Table {
     pub fn next_active_player(&self, player: u32, places: u32) -> u32 {
         let mut count = 0u32;
         let mut current = player;
+        let mut iterations = 0u32;
         while count < places {
             current = if current >= self.max_players { 1 } else { current + 1 };
             if let Some(Some(seat)) = self.seats.get(&current) {
-                if !seat.sitting_out {
+                if !seat.sitting_out && !seat.is_waiting {
                     count += 1;
                 }
+            }
+            iterations += 1;
+            if iterations > self.max_players * 2 {
+                tracing::warn!("[next_active_player] infinite loop detected, breaking");
+                return current;
             }
         }
         current
@@ -442,18 +492,23 @@ impl Table {
             self.next_active_player(button, 2)
         });
 
+        let mut sb_amount: u64 = 0;
+        let mut bb_amount: u64 = 0;
+
         if let Some(sb) = self.small_blind {
             if let Some(Some(seat)) = self.seats.get_mut(&sb) {
-                seat.place_blind(self.min_bet);
+                let actual_sb = seat.place_blind(self.min_bet);
+                sb_amount = actual_sb;
             }
         }
         if let Some(bb) = self.big_blind {
             if let Some(Some(seat)) = self.seats.get_mut(&bb) {
-                seat.place_blind(self.min_bet * 2);
+                let actual_bb = seat.place_blind(self.min_bet * 2);
+                bb_amount = actual_bb;
             }
         }
 
-        self.pot += self.min_bet * 3;
+        self.pot += sb_amount + bb_amount;
         self.call_amount = Some(self.min_bet * 2);
         self.min_raise = self.min_bet * 4;
     }
@@ -496,7 +551,7 @@ impl Table {
     pub fn sit_out_felted_players(&mut self) {
         for seat_opt in self.seats.values_mut() {
             if let Some(seat) = seat_opt {
-                if seat.stack <= 0 {
+                if seat.stack == 0 {
                     seat.sitting_out = true;
                 }
             }
@@ -514,8 +569,6 @@ impl Table {
             }
             self.win_messages.push(format!("{} wins ${:.2}", player_name, win_amount));
         }
-        self.round_state = RoundState::HandComplete;
-        self.hand_complete_at = Some(std::time::Instant::now());
         self.end_hand();
     }
 
@@ -576,6 +629,14 @@ impl Table {
             .collect();
         if active.is_empty() {
             return true;
+        }
+        // Ensure every active player has acted at least once.
+        // Without this check, PreFlop BB's option (check/raise) gets skipped
+        // because BB's bet already equals call_amount from the blind.
+        if let Some(ref betting) = self.betting_round {
+            if betting.get_actions_taken() < active.len() {
+                return false;
+            }
         }
         for seat in &active {
             if let Some(call_amount) = self.call_amount {
@@ -742,12 +803,14 @@ impl Table {
             .map(|(id, _)| *id)
             .collect();
         let win_amount = amount / winners.len() as u64;
-        for winner_id in &winners {
+        let remainder = amount % winners.len() as u64;
+        for (idx, winner_id) in winners.iter().enumerate() {
+            let extra = if idx < remainder as usize { 1 } else { 0 };
             if let Some(Some(seat)) = self.seats.get_mut(winner_id) {
                 let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
-                seat.win_hand(win_amount);
-                if win_amount > 0 {
-                    self.win_messages.push(format!("{} wins ${:.2} with {}", player_name, win_amount, best_rank.name()));
+                seat.win_hand(win_amount + extra);
+                if win_amount + extra > 0 {
+                    self.win_messages.push(format!("{} wins ${:.2} with {}", player_name, win_amount + extra, best_rank.name()));
                 }
             }
         }
@@ -806,6 +869,73 @@ impl Table {
 
     pub fn deal_turn_or_river(&mut self) {
         self.mental_poker_game.deal_community_cards_encrypted(1);
+    }
+
+    /// 为解密失败的玩家重新发牌（不验证 plaintext，信任客户端报告）
+    /// 返回重新发的牌索引列表
+    pub fn redeal_cards_for_player(&mut self, player_pk: &str, failed_indices: Vec<usize>) -> Result<Vec<usize>, String> {
+        if !self.mental_poker_game.players.contains_key(player_pk) {
+            return Err("Player not found".to_string());
+        }
+
+        let mut redealt = Vec::new();
+        for idx in failed_indices {
+            match self.mental_poker_game.redeal_to_player_unchecked(player_pk, idx) {
+                Ok(_) => {
+                    tracing::info!("Redealt card at index {} for player {}", idx, player_pk);
+                    redealt.push(idx);
+                }
+                Err(e) => {
+                    tracing::warn!("Redeal failed for player {} index {}: {:?}", player_pk, idx, e);
+                }
+            }
+        }
+
+        Ok(redealt)
+    }
+
+    /// 启动 redeal reveal 阶段，为重新发的牌收集所有玩家的 reveal token
+    /// 不改变 round_state，保持 PreFlop，通过 reveal_token_state 追踪 redeal 进度
+    pub fn start_redeal_reveal_phase(&mut self, redealt_player_pk: &str, _redealt_indices: Vec<usize>) {
+        if self.reveal_token_state.is_active {
+            return;
+        }
+
+        let player_pks = self.mental_poker_game.players.keys().cloned().collect::<Vec<String>>();
+        let mut player_assignments = HashMap::new();
+
+        // 只需要为重新发牌的玩家收集 reveal token，其他玩家需要为新牌生成 token
+        if let Some(player) = self.mental_poker_game.players.get(redealt_player_pk) {
+            let redealt_cards: Vec<ElGamalCiphertext> = player.hand_encrypted.iter()
+                .map(|c| c.encrypted_card.clone())
+                .collect();
+            for pk in &player_pks {
+                if pk == redealt_player_pk { continue; }
+                player_assignments.insert(pk.clone(), PlayerRevealAssignment {
+                    hand_card: redealt_cards.clone(),
+                    community_card: vec![],
+                });
+            }
+        }
+
+        self.reveal_token_state = RevealTokenState {
+            is_active: true,
+            phase: RevealPhase::RedealReveal,
+            current_card_index: 0,
+            total_cards_per_player: 2,
+            total_community_cards: 0,
+            timeout_start: Some(std::time::Instant::now()),
+            timeout_seconds: 10,
+            completed_players: Vec::new(),
+            pending_players: player_pks.iter()
+                .filter(|pk| *pk != redealt_player_pk)
+                .cloned()
+                .collect(),
+            player_assignments,
+        };
+
+        tracing::info!("[REDEAL] Redeal reveal phase started for player {}, {} pending",
+            redealt_player_pk, self.reveal_token_state.pending_players.len());
     }
 
     pub fn handle_fold(&mut self, socket_id: &str) -> Option<ActionResult> {
@@ -921,7 +1051,12 @@ impl Table {
                 self.deal_turn_or_river();
                 self.round_state = RoundState::RiverReveal;
             }
-            _ => {}
+            RoundState::River => {
+                self.round_state = RoundState::ShowdownReveal;
+            }
+            _ => {
+                tracing::warn!("[advance_to_next_phase] unexpected round state: {:?}", self.round_state);
+            }
         }
         self.update_history();
     }
@@ -936,7 +1071,7 @@ impl Table {
             Some(Some(s)) => s.clone(),
             _ => return None,
         };
-        if seat.folded || seat.stack <= 0 {
+        if seat.folded || seat.stack == 0 {
             self.betting_timeout_start = Some(std::time::Instant::now());
             return None;
         }
@@ -955,7 +1090,7 @@ impl Table {
         self.clear_win_messages();
         self.shuffle_state.reset();
         self.reveal_token_state.reset();
-        self.expel_state.reset();
+        self.reconstruct_state.reset();
         self.mental_poker_game.reset();
     }
     
@@ -1037,19 +1172,15 @@ impl Table {
         self.shuffle_state.pending_players.is_empty()
     }
 
-    pub fn is_pending_shuffle_palyer_empty(&self) -> bool {
+    pub fn is_pending_shuffle_player_empty(&self) -> bool {
         self.shuffle_state.pending_players.is_empty()
     }
 
-    pub fn complete_shuffle_palyer_count(&self) -> usize {
+    pub fn complete_shuffle_player_count(&self) -> usize {
         self.shuffle_state.completed_players.len()
     }
 
     pub fn start_shuffle(&mut self) -> Result<(), String> {
-        let active_count = self.active_players().len();
-        if active_count < 2 {
-            return Err("Need at least 2 players to start".to_string());
-        }
         if self.round_state == RoundState::Shuffling {
             return Ok(());
         }
@@ -1059,36 +1190,57 @@ impl Table {
 
         let already_completed: std::collections::HashSet<String> =
             self.shuffle_state.completed_players.iter().cloned().collect();
-        
-        let active_pks = self.active_players().iter().filter(|p| p.player.is_some()).map(|p| p.player.as_ref().unwrap().pk_hex.clone()).collect::<Vec<_>>();
 
-        
-        let remove_pks = self.mental_poker_game.players.iter().filter(|(pk,player_state)| !active_pks.contains(&player_state.pk_hex)).map(|p| p.1.pk_hex.clone()).collect::<Vec<_>>();
-        for pk in remove_pks{
-            // 移除不参与洗牌的玩家
-            // todo 每局初始化一个更简单
-            self.mental_poker_game.leave_player(&pk);
+        self.remove_inactive_players();
+        self.register_waiting_players();
+        self.clear_waiting_flags();
+        self.init_pending_players(&already_completed);
+
+        self.shuffle_state.timeout_seconds = 10;
+        Ok(())
+    }
+
+    fn remove_inactive_players(&mut self) {
+        let active_pks: std::collections::HashSet<String> = self.active_players()
+            .iter()
+            .filter_map(|p| p.player.as_ref())
+            .map(|p| p.pk_hex.clone())
+            .collect();
+
+        let remove_pks: Vec<String> = self.mental_poker_game.players.iter()
+            .filter(|(_, player_state)| !active_pks.contains(&player_state.pk_hex))
+            .map(|(_, player_state)| player_state.pk_hex.clone())
+            .collect();
+
+        for pk in remove_pks {
+            let _ = self.mental_poker_game.leave_player(&pk);
         }
+    }
 
-        // 注册 waiting 玩家到 mental_poker_game（仅当玩家仍在座位上时）
-        let waiting_players_to_register: Vec<PlayerWithProof> = self.waiting_players.values().cloned().collect();
+    fn register_waiting_players(&mut self) {
         let active_pk_hexs: std::collections::HashSet<String> = self.seats.values()
             .filter_map(|seat_opt| seat_opt.as_ref())
             .filter_map(|seat| seat.player.as_ref())
             .map(|player| player.pk_hex.clone())
             .collect();
-        
+
+        let waiting_players_to_register: Vec<PlayerWithProof> = self.waiting_players.values().cloned().collect();
         for waiting_info in waiting_players_to_register {
             if active_pk_hexs.contains(&waiting_info.player.pk_hex) {
-                self.mental_poker_game.register_player(waiting_info.player.pk_hex.clone(), waiting_info.pk, waiting_info.pk_proof);
+                self.mental_poker_game.register_player(
+                    waiting_info.player.pk_hex.clone(),
+                    waiting_info.pk,
+                    waiting_info.pk_proof,
+                );
                 tracing::info!("[SHUFFLE] Waiting player {} registered to mental_poker_game", waiting_info.player.pk_hex);
             } else {
                 tracing::info!("[SHUFFLE] Waiting player {} left the table, skipping registration", waiting_info.player.pk_hex);
             }
         }
         self.waiting_players.clear();
+    }
 
-        // 清除 is_waiting 标记
+    fn clear_waiting_flags(&mut self) {
         for seat_opt in self.seats.values_mut() {
             if let Some(seat) = seat_opt {
                 if seat.is_waiting {
@@ -1099,24 +1251,26 @@ impl Table {
                 }
             }
         }
+    }
 
+    fn init_pending_players(&mut self, already_completed: &std::collections::HashSet<String>) {
         // todo sitting_out 回来的玩家再加入洗牌(假如在洗牌阶段)
         self.shuffle_state.pending_players = self.mental_poker_game.players.keys()
             .cloned()
             .filter(|pk| !already_completed.contains(pk))
             .collect();
-
+        tracing::info!("[SHUFFLE] Init pending players: {:?}", self.shuffle_state.pending_players);
+        if self.shuffle_state.pending_players.is_empty() {
+            tracing::warn!("[SHUFFLE] Init pending players is empty");
+            return;
+        }
         if let Some(first_pk) = self.shuffle_state.pending_players.first() {
             self.set_current_shuffler(first_pk.clone());
-        } else {
-            if self.complete_shuffle_palyer_count()>=2{
-                self.shuffle_state.is_active = false;
-                self.round_state = RoundState::ShuffleComplete;
-                tracing::info!("[SHUFFLE] All players already completed shuffle, skipping");
-            }
+        } else if self.complete_shuffle_player_count() >= MIN_START_NUM as usize {
+            self.shuffle_state.is_active = false;
+            self.round_state = RoundState::ShuffleComplete;
+            tracing::info!("[SHUFFLE] All players already completed shuffle, skipping");
         }
-        self.shuffle_state.timeout_seconds = 10;
-        Ok(())
     }
 
     pub fn reset_shuffle(&mut self) {
@@ -1160,7 +1314,7 @@ impl Table {
         round_json: MaskAndShuffleRoundJson,
         seat_id: u32,
         amount: u64,
-    ) -> Result<JoinResult, String> {
+    ) -> Result<JoinResult, JoinError> {
         let pk_hex = player.pk_hex.clone();
         let player_for_seat = player.clone();
 
@@ -1169,34 +1323,51 @@ impl Table {
                 seat.player.as_ref().map_or(false, |p| p.pk_hex == pk_hex)
             })
         }) {
-            return Err("Player already in game".to_string());
+            return Err(JoinError::PlayerAlreadyInGame);
         }
 
         let actual_seat_id = if seat_id == 0 {
-            self.find_random_empty_seat().ok_or("No empty seat available")?
+            self.find_random_empty_seat().ok_or(JoinError::InvalidSeatId)?
         } else {
             if seat_id < 1 || seat_id > self.max_players {
-                return Err("Invalid seat_id".to_string());
+                return Err(JoinError::InvalidSeatId);
             }
             if self.seats.get(&seat_id).map_or(false, |s| s.is_some()) {
-                return Err("Seat already occupied".to_string());
+                return Err(JoinError::SeatAlreadyOccupied);
             }
             seat_id
         };
+        
+        // Waiting/Shuffling 阶段玩家可以加入游戏并洗牌
+        // ShuffleComplete 及之后阶段，玩家只能等待下一手加入
+        let is_join_before_start = matches!(self.round_state, RoundState::Waiting | RoundState::Shuffling);
 
-        let can_join_now = matches!(self.round_state, RoundState::Waiting);
+        let pk_proof = pk_proof_json.to_pk_proof().map_err(|e| JoinError::Crypto(e))?;
+        if !pk_proof.verify(&player_pk) {
+            return Err(JoinError::InvalidPkProof);
+        }
+        tracing::info!("[SHUFFLE] Player {} joined and shuffled, sat at seat {}, round state {:?}", 
+            pk_hex, actual_seat_id,self.round_state);
 
-        if can_join_now {
-            let pk_proof = pk_proof_json.to_pk_proof()?;
-            if !pk_proof.verify(&player_pk) {
-                return Err("Invalid PK proof".to_string());
+        if is_join_before_start {
+            let round = round_json.to_mask_and_shuffle_round().map_err(|e| JoinError::Crypto(e))?;
+            let mut transcript = Transcript::new(b"poker_protocol_mask_shuffle");
+            let input_cards = self.mental_poker_game.deck_encrypted.iter().map(|c| c.clone().into()).collect::<Vec<_>>();
+            if !round.remask_proof.verify( &input_cards,
+            &round.mask_cards.iter().map(|c| c.clone().into()).collect::<Vec<_>>(),
+             &player_pk, &mut transcript) {
+                return Err(JoinError::InvalidRemaskProof);
             }
 
-            let round = round_json.to_mask_and_shuffle_round()?;
             let current_agg_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
             let share_pk = current_agg_pk + &player_pk;
-            if !round.proof.verify(&round.mask_cards, &round.output_cards, &share_pk) {
-                return Err("Invalid shuffle proof".to_string());
+            if round.proof.verify(
+                &round.mask_cards.iter().map(|c| c.clone().into()).collect::<Vec<_>>(),
+                &round.output_cards.iter().map(|c| c.clone().into()).collect::<Vec<_>>(),
+                &share_pk,
+                &mut transcript,
+            ).is_err() {
+                return Err(JoinError::InvalidShuffleProof);
             }
 
             self.mental_poker_game.register_player(pk_hex.clone(), player_pk, pk_proof);
@@ -1212,17 +1383,12 @@ impl Table {
             tracing::info!("[SHUFFLE] Player {} joined and shuffled, sat at seat {}", pk_hex, actual_seat_id);
             Ok(JoinResult::JoinedAndShuffled)
         } else {
-            let pk_proof = pk_proof_json.to_pk_proof()?;
-            if !pk_proof.verify(&player_pk) {
-                return Err("Invalid PK proof".to_string());
-            }
-            
             self.waiting_players.insert(pk_hex.clone(), PlayerWithProof {
                 player: player.clone(),
                 pk: player_pk,
                 pk_proof,
             });
-            
+
             self.add_player(player);
             self.sit_player_with_waiting(player_for_seat, actual_seat_id, amount);
             tracing::info!("[SHUFFLE] Player {} joined as waiting, sat at seat {}, will join next hand roundState{:?}", pk_hex, actual_seat_id,self.round_state);
@@ -1253,13 +1419,84 @@ impl Table {
         let proof = shuffle_proof.to_proof()?;
         let current_agg_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
         let input_cards = self.mental_poker_game.deck_encrypted.clone();
-        if !proof.verify(&input_cards,&output_cards, &current_agg_pk) {
+        let mut transcript = Transcript::new(b"poker_protocol_player_shuffle");
+        if proof.verify(
+            &input_cards.iter().map(|c| c.clone().into()).collect::<Vec<_>>(),
+            &output_cards.iter().map(|c| c.clone().into()).collect::<Vec<_>>(),
+            &current_agg_pk,
+            &mut transcript,
+        ).is_err() {
             return Err("Invalid shuffle proof".to_string());
         }
         self.mental_poker_game.deck_encrypted = output_cards;
         self.shuffle_state.completed_players.push(player_pk_hex.to_string());
         self.shuffle_state.pending_players.retain(|p| *p != player_pk_hex);
         Ok(())
+    }
+
+    pub fn submit_reconstruct_deck(
+        &mut self,
+        player_pk_hex: &str,
+        output_cards: Vec<ElGamalCiphertextJson>,
+        swap_cards: Vec<ElGamalCiphertextJson>,
+        proof: ReconstructProofJson,
+    ) -> Result<bool, String> {
+        if !self.reconstruct_state.is_active {
+            return Err("Reconstruct not active".to_string());
+        }
+        if !self.reconstruct_state.pending_players.contains(&player_pk_hex.to_string()) {
+            return Err("Not found player".to_string());
+        }
+
+        let player = self.mental_poker_game.players.get(player_pk_hex)
+            .map(|p| p.pk)
+            .ok_or("Player not found in mental poker game")?;
+
+        let output_cards = output_cards.iter()
+            .map(|c| c.to_ciphertext())
+            .collect::<Result<Vec<_>, _>>()?;
+        let swap_cards = swap_cards.iter()
+            .map(|c| c.to_ciphertext())
+            .collect::<Result<Vec<_>, _>>()?;
+        let proof = proof.to_proof()?;
+        let user_readable_cards = self.reconstruct_state.player_readable_cards.get(player_pk_hex);
+        if user_readable_cards.is_none() {
+            return Err("Player not found in reconstruct state".to_string());
+        }
+        let user_readable_cards = user_readable_cards.unwrap();
+        let mut transcript = merlin::Transcript::new(b"zk_poker_reconstruct");
+        let output_cards_generic: Vec<_> = output_cards.iter().map(|c| ElGamalCiphertextGeneric::<RistrettoCurve>::from(*c)).collect();
+        let swap_cards_generic: Vec<_> = swap_cards.iter().map(|c| ElGamalCiphertextGeneric::<RistrettoCurve>::from(*c)).collect();
+        let user_readable_cards_generic: Vec<_> = user_readable_cards.readable_cards.iter().map(|c| ElGamalCiphertextGeneric::<RistrettoCurve>::from(*c)).collect();
+        if proof.verify(&self.reconstruct_state.cards, &output_cards_generic,
+        &swap_cards_generic, &user_readable_cards_generic,
+        &player, &mut transcript).is_err(){
+            return Err("Invalid reconstruct proof".to_string());
+        }
+
+        self.reconstruct_state.player_deck.insert(player_pk_hex.to_string(), output_cards);
+        self.reconstruct_state.pending_players.retain(|p| *p != player_pk_hex);
+        self.reconstruct_state.completed_players.push(player_pk_hex.to_string());
+        let is_all_complete = self.reconstruct_state.pending_players.len()==0;
+        if is_all_complete {
+            let init_deck = self.mental_poker_game.deck_plaintext.clone();
+            let deck_len = init_deck.len();
+            let mut reconstruct_deck = init_deck.iter().map(|c| ElGamalCiphertext {
+                c1: EcPoint::identity(),
+                c2: c.clone(),
+            }).collect::<Vec<_>>();
+            for (_, deck) in self.reconstruct_state.player_deck.iter() {
+                for (i, card) in deck.iter().enumerate() {
+                    if i < deck_len {
+                        reconstruct_deck[i].c1 = reconstruct_deck[i].c1 + card.c1;
+                        reconstruct_deck[i].c2 = reconstruct_deck[i].c2 + card.c2 - init_deck[i];
+                    }
+                }
+            }
+            self.mental_poker_game.deck_encrypted = reconstruct_deck;
+            self.reconstruct_state.reset();
+        }
+        Ok(is_all_complete)
     }
 
     pub fn get_shuffle_public_state(&self) -> Option<ShufflePublicState> {
@@ -1294,13 +1531,19 @@ impl Table {
         }
     }
 
-    pub fn get_expel_public_state(&self) -> Option<ExpelPublicState> {
-        if self.expel_state.is_active {
-            Some(ExpelPublicState {
+    pub fn get_reconstruct_public_state(&self) -> Option<ReconstructPublicState> {
+        if self.reconstruct_state.is_active {
+            Some(ReconstructPublicState {
                 is_active: true,
-                phase: self.expel_state.phase.to_string(),
-                voted_players: self.expel_state.completed_players.clone(),
-                expel_records_count: self.expel_state.expel_records_count,
+                completed_players: self.reconstruct_state.completed_players.clone(),
+                pending_players: self.reconstruct_state.pending_players.clone(),
+                cards: self.reconstruct_state.cards.iter().map(|c| ecpoint_to_hex(c)).collect(),
+                coefficient_hex: scalar_to_hex(&self.reconstruct_state.coefficient),
+                player_readable_cards: self.reconstruct_state.player_readable_cards.iter().map(|(k, v)| {
+                    (k.clone(), PlayerReadableCardJson {
+                        readable_cards: v.readable_cards.iter().map(ElGamalCiphertextJson::from_ciphertext).collect(),
+                    })
+                }).collect(),
             })
         } else {
             None
@@ -1308,7 +1551,7 @@ impl Table {
     }
 
     pub fn complete_or_continue_next_shuffler(&mut self) {
-        if self.shuffle_state.pending_players.is_empty() && self.complete_shuffle_palyer_count() >= 2 {
+        if self.shuffle_state.pending_players.is_empty() && self.complete_shuffle_player_count() >= MIN_START_NUM as usize {
             self.round_state = RoundState::ShuffleComplete;
         } else if let Some(next_pk) = self.shuffle_state.pending_players.first() {
             let next_pk_clone = next_pk.clone();
@@ -1388,47 +1631,6 @@ impl Table {
             player_pks.len(), self.mental_poker_game.community_cards_encrypted.len());
     }
 
-    pub fn start_hand_card_reveal_phase(&mut self) {
-        if self.reveal_token_state.is_active {
-            tracing::error!("[start_hand_card_reveal_phase] Reveal phase already active");
-            return;
-        }
-        let player_pks: Vec<String> = self.mental_poker_game.players.keys().cloned().collect();
-        
-
-        let mut player_assignments = HashMap::new();
-        for seat_opt in self.seats.values() {
-            if let Some(seat) = seat_opt {
-                if let Some(player) = &seat.player {
-                    let mut hand_cards = vec![];
-                    for men_player in self.mental_poker_game.players.values() {
-                        if men_player.pk_hex == player.pk_hex{
-                            continue;
-                        }
-                        hand_cards.extend(men_player.hand_encrypted.iter().map(|f| f.encrypted_card.clone()));
-                    }
-                    player_assignments.insert(player.pk_hex.clone(), PlayerRevealAssignment {
-                        hand_card: hand_cards,
-                        community_card: vec![],
-                    });
-                }
-            }
-        }
-        self.reveal_token_state = RevealTokenState {
-            is_active: true,
-            phase: RevealPhase::ShowdownReveal,
-            current_card_index: 0,
-            total_cards_per_player: 2,
-            total_community_cards: self.mental_poker_game.community_cards_encrypted.len(),
-            timeout_start: Some(std::time::Instant::now()),
-            timeout_seconds: 10,
-            completed_players: Vec::new(),
-            pending_players: player_pks,
-            player_assignments,
-        };
-        tracing::info!("[REVEAL-TOKEN] Hand card reveal (showdown) phase started");
-    }
-
     pub fn start_showdown_reveal_phase(&mut self) {
         if self.reveal_token_state.is_active {
             tracing::error!("[start_hand_card_reveal_phase] Reveal phase already active");
@@ -1502,13 +1704,12 @@ impl Table {
                     self.betting_timeout_start = Some(std::time::Instant::now());
                 }
                 RoundState::ShowdownReveal => {
+                    // determine_main_pot_winner 内部会将 round_state 设为 Showdown 并设置 showdown_at
                     self.determine_side_pot_winners();
                     self.determine_main_pot_winner();
-                    // self.round_state = RoundState::Showdown;
-                    // self.showdown_at = Some(std::time::Instant::now());
                 }
                 _ => {
-                    tracing::error!("[mark_player_reveal_complete] Invalid round state");
+                    tracing::error!("[mark_player_reveal_complete] Invalid round state: {:?}", self.round_state);
                 }
             }
             tracing::info!("[REVEAL-TOKEN] All reveal phases complete, switch round state to PreFlop");
@@ -1537,11 +1738,6 @@ impl Table {
         None
     }
 
-    pub fn reset_reveal_state(&mut self) {
-        self.reveal_token_state.reset();
-        tracing::info!("[REVEAL-TOKEN] Reveal state reset");
-    }
-
     pub fn submit_player_reveal_tokens(
         &mut self,
         player_pk: &str,
@@ -1566,6 +1762,7 @@ impl Table {
                 RevealPhase::HandReveal => &assign.hand_card,
                 RevealPhase::CommunityReveal => &assign.community_card,
                 RevealPhase::ShowdownReveal => &assign.hand_card,
+                RevealPhase::RedealReveal => &assign.hand_card,
             };
             if !cards.iter().any(|pct| pct == &token.encrypted_card) {
                 return Err(format!("Invalid token in {} phase", self.reveal_token_state.phase));
@@ -1580,95 +1777,92 @@ impl Table {
 
     // ==================== Expel State Methods ====================
 
-    // 用户发起
-    pub fn start_expel(&mut self) -> Result<(), String> {
-        if self.expel_state.is_active {
-            return Err("Expel already in progress".to_string());
+    pub fn start_reconstruct(&mut self) -> Result<(), String> {
+        if self.reconstruct_state.is_active {
+            return Err("Reconstruct already in progress".to_string());
         }
-        self.expel_state.is_active = true;
-        self.expel_state.phase = ExpelPhase::Voting;
-        self.expel_state.timeout_start = Some(std::time::Instant::now());
-        
-        self.expel_state.pending_players = self.mental_poker_game.players.keys().cloned().collect();      
-
-        self.expel_state.expel_deck = poker_protocol::z_poker::protocol::INITIAL_ENCRYPTED_DECK.iter().map(|c| ElGamalCiphertextJson::from_ciphertext(c)).collect::<Vec<_>>();
-        
-        tracing::info!("[EXPEL] Expel initiated for player");
+        self.reconstruct_state.is_active = true;
+        self.reconstruct_state.timeout_start = Some(std::time::Instant::now());
+        self.reconstruct_state.timeout_seconds = 10;
+        self.reconstruct_state.completed_players.clear();
+        self.reconstruct_state.pending_players = self.mental_poker_game.players.keys().cloned().collect(); 
+        self.reconstruct_state.cards = self.mental_poker_game.deck_plaintext.clone();        
+        let mut rng = OsRng;
+        self.reconstruct_state.coefficient = Scalar::random(&mut rng);
+        self.reconstruct_state.player_readable_cards.clear();
+        let player_readable_cards = self.mental_poker_game.get_player_readable_tokens();
+        for (pk, cards) in player_readable_cards {
+            self.reconstruct_state.player_readable_cards.insert(pk.clone(), PlayerReadableCard{readable_cards: cards});
+        }
+        self.reconstruct_state.player_deck.clear();
+        tracing::info!("[RECONSTRUCT] Reconstruct initiated for player {}", self.reconstruct_state.pending_players.join(","));
         Ok(())
     }
 
-    fn get_seat_player_pks(&self) -> Vec<String> {
-        self.seats.values().enumerate().filter(|(i,s)| s.is_some() && !s.as_ref().unwrap().is_waiting && s.as_ref().unwrap().player.is_some()).map(|(i,s)| s.as_ref().unwrap().player.as_ref().unwrap().pk_hex.clone()).collect::<Vec<_>>()
-    }
-
-    pub fn vote_expel(&mut self, voter_pk: &str, vote: bool) -> Result<ExpelPhase, String> {
-        if !self.expel_state.is_active {
-            return Err("No expel in progress".to_string());
+    pub fn vote_reconstruct(&mut self, voter_pk: &str, vote: bool) -> Result<ReconstructPhase, String> {
+        if !self.reconstruct_state.is_active {
+            return Err("No reconstruct in progress".to_string());
         }
-        if self.expel_state.completed_players.contains(&voter_pk.to_string()) {
+        if self.reconstruct_state.completed_players.contains(&voter_pk.to_string()) {
             return Err("Player already voted".to_string());
         }
 
         if vote {
-            self.expel_state.completed_players.push(voter_pk.to_string());
-            tracing::info!("[EXPEL] Player {} voted to expel, votes: {}",
-                voter_pk, self.expel_state.completed_players.len());
+            self.reconstruct_state.completed_players.push(voter_pk.to_string());
+            tracing::info!("[RECONSTRUCT] Player {} voted to reconstruct, votes: {}",
+                voter_pk, self.reconstruct_state.completed_players.len());
 
-            if self.expel_state.completed_players.len() >= self.expel_state.pending_players.len() {
-                self.expel_state.phase = ExpelPhase::Completed;
-                tracing::info!("[EXPEL] Vote passed, expelling player {}",
-                    self.expel_state.pending_players.join(","));
-                return Ok(ExpelPhase::Completed);
+            if self.reconstruct_state.completed_players.len() >= self.reconstruct_state.pending_players.len() {
+                tracing::info!("[RECONSTRUCT] Vote passed, reconstruct player {}",
+                    self.reconstruct_state.pending_players.join(","));
+                return Ok(ReconstructPhase::Completed);
             }
         } else {
-            self.expel_state.phase = ExpelPhase::Initiated;
-            self.expel_state.reset();
-            tracing::info!("[EXPEL] Vote rejected by {}", voter_pk);
-            return Ok(ExpelPhase::Initiated);
+            self.reconstruct_state.reset();
+            tracing::info!("[RECONSTRUCT] Vote rejected by {}", voter_pk);
+            return Ok(ReconstructPhase::Initiated);
         }
 
-        Ok(ExpelPhase::Voting)
+        Ok(ReconstructPhase::Voting)
     }
 
-    pub fn force_expel(&mut self, target_pk: &str) -> Result<(), String> {
-        self.expel_state.phase = ExpelPhase::Forced;
-        self.expel_state.expel_records_count += 1;
-        self.stand_player(target_pk);
-        self.expel_state.reset();
-        tracing::info!("[EXPEL] Player {} forcefully expelled", target_pk);
-        Ok(())
-    }
 
-    pub fn check_expel_timeout(&mut self) -> Option<String> {
-        if !self.expel_state.is_active {
+    pub fn check_reconstruct_timeout(&mut self) -> Option<String> {
+        if !self.reconstruct_state.is_active {
             return None;
         }
-        let timeout_start = match self.expel_state.timeout_start {
+        let timeout_start = match self.reconstruct_state.timeout_start {
             Some(t) => t,
             None => return None,
         };
         
-        if timeout_start.elapsed().as_secs() >= self.expel_state.timeout_seconds {
+        if timeout_start.elapsed().as_secs() >= self.reconstruct_state.timeout_seconds {
             let mut not_voted = Vec::new();
-            for player_pk in self.expel_state.pending_players.iter() {
-                if !self.expel_state.completed_players.contains(&player_pk.clone()) {
+            for player_pk in self.reconstruct_state.pending_players.iter() {
+                if !self.reconstruct_state.completed_players.contains(&player_pk.clone()) {
                     not_voted.push(player_pk.clone());
                 }
             }
-            tracing::warn!("[EXPEL] Expel vote timed out for player {:?}", not_voted.join(","));
+            tracing::warn!("[RECONSTRUCT] Reconstruct timeout for player {:?}", not_voted.join(","));
             for player_pk in not_voted {
                 self.remove_player_by_pk(&player_pk);
             }
             //todo 通知玩家被踢出
-            self.expel_state.reset();
+            self.reconstruct_state.reset();
             return None;
         }
         None
     }
 
-    pub fn execute_expel_if_completed(&mut self) -> bool {
-        if self.expel_state.phase == ExpelPhase::Completed {
-            self.expel_state.reset();
+    pub fn execute_reconstruct_if_completed(&mut self) -> bool {
+        if !self.reconstruct_state.is_active {
+            return false;
+        }
+        if self.reconstruct_state.completed_players.len() >= self.reconstruct_state.pending_players.len() {
+            tracing::info!("[RECONSTRUCT] Executing reconstruct for players: {:?}",
+                self.reconstruct_state.pending_players);
+            self.reconstruct_state.reset();
+            return true;
         }
         false
     }
