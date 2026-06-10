@@ -1,24 +1,38 @@
-use curve25519_dalek::{
-    constants::RISTRETTO_BASEPOINT_TABLE,
-    ristretto::{CompressedRistretto, RistrettoPoint},
-    scalar::Scalar as Sc,
-    traits::{Identity, IsIdentity},
-};
+//! Default curve type aliases and shared crypto utilities.
+//!
+//! Change `DefaultCurve` to switch the entire project to a different curve.
+//! All downstream modules reference types through these aliases.
+
 use sha2::{Sha256, Digest};
 use std::hash::{Hash, Hasher};
 
+use crate::crypto::curve::{Curve, CurvePoint, Bls12381Curve, ElGamalCiphertextGeneric};
+
+/// The default curve used by the project.
+/// Change this single line to switch the entire project to a different curve.
+pub type DefaultCurve = Bls12381Curve;
+
 pub const N_CARDS: usize = 52;
+
+// ============================================================
+// Type aliases derived from DefaultCurve
+// ============================================================
+
+pub type EcPoint = <DefaultCurve as Curve>::Point;
+pub type Scalar = <DefaultCurve as Curve>::Scalar;
+pub type Plaintext = EcPoint;
+pub type ElGamalCiphertext = ElGamalCiphertextGeneric<DefaultCurve>;
+
+// ============================================================
+// ECPoint wrapper for HashMap keys
+// ============================================================
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ECPoint(pub EcPoint);
 
-pub type EcPoint = RistrettoPoint;
-pub type Scalar = Sc;
-pub type Plaintext = EcPoint;
-
 impl Hash for ECPoint {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.compress().as_bytes().hash(state);
+        self.0.compress().as_ref().hash(state);
     }
 }
 
@@ -43,64 +57,38 @@ impl From<ECPoint> for EcPoint {
 }
 
 impl ECPoint {
-    pub fn to_affine(&self) -> CompressedRistretto {
+    pub fn to_affine(&self) -> <EcPoint as CurvePoint>::Compressed {
         self.0.compress()
     }
 }
 
+// ============================================================
+// Utility functions
+// ============================================================
+
 pub fn hash_to_scalar(digest: &[u8]) -> Scalar {
-    let mut bytes = [0u8; 64];
-    let len = 64.min(digest.len());
-    bytes[..len].copy_from_slice(&digest[..len]);
-    let s = Scalar::from_bytes_mod_order_wide(&bytes);
-    if s == Scalar::ZERO {
-        let mut h = Sha256::new();
-        h.update(b"hts_retry:");
-        h.update(&bytes[..32]);
-        let retry = h.finalize();
-        let mut rb = [0u8; 64];
-        rb[..32].copy_from_slice(&retry);
-        let s2 = Scalar::from_bytes_mod_order_wide(&rb);
-        if s2 == Scalar::ZERO { Scalar::ONE } else { s2 }
-    } else {
-        s
-    }
+    DefaultCurve::hash_to_scalar(digest)
 }
 
-pub fn derive_scalar_from_card_and_sk(user_card: &crate::crypto::ElGamalCiphertext, user_sk: &Scalar) -> Scalar {
+pub fn derive_scalar_from_card_and_sk(user_card: &ElGamalCiphertext, user_sk: &Scalar) -> Scalar {
     let mut h = Sha256::new();
     h.update(b"derive_scalar_from_card_and_sk_v1:");
-    h.update((user_card.c1 * user_sk).compress().as_bytes());
-    h.update((user_card.c2 * user_sk).compress().as_bytes());
+    h.update((user_card.c1 * user_sk).compress().as_ref());
+    h.update((user_card.c2 * user_sk).compress().as_ref());
     let digest = h.finalize();
     hash_to_scalar(&digest)
 }
 
-pub fn derive_scalar_from_card_and_pk(user_card: &crate::crypto::ElGamalCiphertext, user_pk: &EcPoint) -> Scalar {
+pub fn derive_scalar_from_card_and_pk(user_card: &ElGamalCiphertext, user_pk: &EcPoint) -> Scalar {
     let mut h = Sha256::new();
     h.update(b"derive_scalar_from_card_and_pk_v1:");
-    h.update(user_card.c1.compress().as_bytes());
-    h.update(user_card.c2.compress().as_bytes());
-    h.update(user_pk.compress().as_bytes());
+    h.update(user_card.c1.compress().as_ref());
+    h.update(user_card.c2.compress().as_ref());
+    h.update(user_pk.compress().as_ref());
     let digest = h.finalize();
     hash_to_scalar(&digest)
-}
-
-fn get_base_g() -> EcPoint { RISTRETTO_BASEPOINT_TABLE.basepoint() }
-
-fn get_base_h() -> EcPoint {
-    let mut h = Sha256::new();
-    h.update(b"crypto_independent_base_H_2024");
-    let digest = h.finalize();
-    let hash_bytes: [u8; 32] = digest.into();
-    // Use from_bytes_mod_order_wide with 64 bytes to ensure valid point
-    let mut wide = [0u8; 64];
-    wide[..32].copy_from_slice(&hash_bytes);
-    wide[32..].copy_from_slice(&hash_bytes);
-    let s = Scalar::from_bytes_mod_order_wide(&wide);
-    RISTRETTO_BASEPOINT_TABLE.basepoint() * s
 }
 
 lazy_static::lazy_static! {
-    pub static ref BASE_G: EcPoint = get_base_g();
+    pub static ref BASE_G: EcPoint = DefaultCurve::base_g();
 }

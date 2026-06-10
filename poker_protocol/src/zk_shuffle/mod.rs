@@ -7,5 +7,7 @@ pub mod error;
 pub mod transcript_ext;
 
 pub use shuffle_proof::*;
-use crate::crypto::curve::RistrettoCurve;
-pub type ShuffleProof = ZKShuffleProof<RistrettoCurve>;
+use crate::crypto::DefaultCurve;
+
+/// Type alias for BLS12-381 shuffle proof (DefaultCurve).
+pub type ShuffleProof = ZKShuffleProof<DefaultCurve>;

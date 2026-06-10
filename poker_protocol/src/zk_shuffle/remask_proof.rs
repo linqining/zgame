@@ -234,8 +234,7 @@ mod tests {
     #[test]
     fn test_gen_keys(){
         let mut rng = OsRng;
-        let origin = "0000000000000000000000000000000000000000000000000000000000000000";
-        let c1 = hex_to_ecpoint(origin).unwrap();
+        let c1 = <RistrettoCurve as Curve>::Point::identity();
         let ct = RistrettoElGamalCiphertext {
             c1: c1,
             c2: <RistrettoCurve as Curve>::Point::random(&mut rng),
@@ -464,6 +463,107 @@ mod tests {
         assert!(avg_verify.as_millis() < 100, "verify() should complete within 100ms");
 
         println!("\n  ✅ Benchmark completed: all performance within acceptable bounds");
+    }
+
+    #[test]
+    fn test_benchmark_remask_proof_52_cards_bls12381() {
+        use std::time::{Duration, Instant};
+        use crate::crypto::curve::Bls12381Curve;
+
+        type BlsElGamalCiphertext = ElGamalCiphertextGeneric<Bls12381Curve>;
+
+        println!("\n{}", "=".repeat(72));
+        println!("  RemaskProof Benchmark: prove() & verify() (52 cards, BLS12-381)");
+        println!("{}", "=".repeat(72));
+
+        const N: usize = 52;
+        const WARMUP: usize = 3;
+        const ITERATIONS: usize = 20;
+
+        let mut rng = OsRng;
+        let (sk, pk) = gen_keypair::<Bls12381Curve>(&mut rng);
+        let plaintexts: Vec<_> = (0..N).map(|i| Bls12381Curve::base_h() * <Bls12381Curve as Curve>::Scalar::from_u64(i as u64)).collect();
+        let r_values: Vec<_> = (0..N).map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut rng)).collect();
+
+        let input_cts: Vec<BlsElGamalCiphertext> = (0..N)
+            .map(|i| BlsElGamalCiphertext::encrypt(&plaintexts[i], &pk, &r_values[i])).collect();
+        let output_cts: Vec<BlsElGamalCiphertext> = (0..N)
+            .map(|i| remask_ciphertext(&input_cts[i], &sk, &pk, &mut rng).unwrap()).collect();
+
+        let mut prove_times: Vec<Duration> = Vec::with_capacity(ITERATIONS);
+        let mut verify_times: Vec<Duration> = Vec::with_capacity(ITERATIONS);
+        let mut proof_size_bytes = 0usize;
+
+        for i in 0..(WARMUP + ITERATIONS) {
+            let start = Instant::now();
+            let mut transcript = Transcript::new(b"test_benchmark_remask_proof_52_cards_bls12381");
+            let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk, &mut transcript);
+            let prove_dur = start.elapsed();
+
+            if i < WARMUP {
+                println!("\n  [Warmup {}/{}] prove: {:?}", i + 1, WARMUP, prove_dur);
+                continue;
+            }
+
+            if proof_size_bytes == 0 {
+                proof_size_bytes = std::mem::size_of_val(&proof);
+            }
+
+            let start = Instant::now();
+            let mut transcript = Transcript::new(b"test_benchmark_remask_proof_52_cards_bls12381");
+            let valid = proof.verify(&input_cts, &output_cts, &pk, &mut transcript);
+            let verify_dur = start.elapsed();
+
+            assert!(valid, "Benchmark iteration {} must verify", i);
+
+            prove_times.push(prove_dur);
+            verify_times.push(verify_dur);
+        }
+
+        prove_times.sort();
+        verify_times.sort();
+
+        let avg_prove: Duration = prove_times.iter().sum::<Duration>() / ITERATIONS as u32;
+        let avg_verify: Duration = verify_times.iter().sum::<Duration>() / ITERATIONS as u32;
+        let p50_prove = prove_times[ITERATIONS / 2];
+        let p50_verify = verify_times[ITERATIONS / 2];
+        let p99_prove = prove_times[(ITERATIONS * 99 / 100).min(ITERATIONS - 1)];
+        let p99_verify = verify_times[(ITERATIONS * 99 / 100).min(ITERATIONS - 1)];
+        let min_prove = prove_times[0];
+        let min_verify = verify_times[0];
+        let max_prove = prove_times[ITERATIONS - 1];
+        let max_verify = verify_times[ITERATIONS - 1];
+
+        let prove_per_sec = 1.0f64 / avg_prove.as_secs_f64();
+        let verify_per_sec = 1.0f64 / avg_verify.as_secs_f64();
+
+        println!("\n  ┌─────────────────────────────────────────────────────────────┐");
+        println!("  │  RemaskProof BLS12-381 Performance (N={}, {} iters)      │", N, ITERATIONS);
+        println!("  ├──────────────┬──────────┬──────────┬──────────┬──────────┤");
+        println!("  │ Operation    │   Avg    │   P50    │   Min    │   Max    │");
+        println!("  ├──────────────┼──────────┼──────────┼──────────┼──────────┤");
+        println!("  │ prove()      │ {:>8.2?}ms│ {:>8.2?}ms│ {:>8.2?}ms│ {:>8.2?}ms│",
+            avg_prove.as_millis(), p50_prove.as_millis(),
+            min_prove.as_millis(), max_prove.as_millis());
+        println!("  │ verify()     │ {:>8.2?}ms│ {:>8.2?}ms│ {:>8.2?}ms│ {:>8.2?}ms│",
+            avg_verify.as_millis(), p50_verify.as_millis(),
+            min_verify.as_millis(), max_verify.as_millis());
+        println!("  ├──────────────┼──────────┼──────────┼──────────┼──────────┤");
+        println!("  │ Throughput   │ {:>8.1}/s│          │ P99={:>6.2?}ms│ P99={:>6.2?}ms│",
+            prove_per_sec, p99_prove.as_millis(), p99_verify.as_millis());
+        println!("  │ Verify rate  │ {:>8.1}/s│          │          │          │",
+            verify_per_sec);
+        println!("  ├──────────────┴──────────┴──────────┴──────────┴──────────┤");
+        println!("  │ Proof size: ~{} bytes (per_card_commitments[{}]+commitment_pk+response+nonce) │",
+            proof_size_bytes, N);
+        println!("  │ Total (prove+verify): {:>8.2?}ms                           │",
+            (avg_prove + avg_verify).as_millis());
+        println!("  └─────────────────────────────────────────────────────────────┘");
+
+        assert!(avg_prove.as_millis() < 2000, "prove() should complete within 2000ms");
+        assert!(avg_verify.as_millis() < 500, "verify() should complete within 500ms");
+
+        println!("\n  ✅ BLS12-381 benchmark completed: all performance within acceptable bounds");
     }
 
     /// Multi-scale performance comparison for RemaskProof (per-card DLEq v2)

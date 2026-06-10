@@ -7288,8 +7288,11 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 name = "poker_protocol"
 version = "0.1.0"
 dependencies = [
+ "blstrs",
  "bulletproofs",
  "curve25519-dalek",
+ "ff 0.13.1",
+ "group 0.13.0",
  "halo2_proofs",
  "halo2curves",
  "hex",

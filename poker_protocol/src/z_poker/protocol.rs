@@ -1,6 +1,6 @@
 use crate::crypto::{
     ElGamalCiphertext, Plaintext, Scalar, EcPoint, PublicKey,
-    BASE_G, N_CARDS, encrypt_batch,
+    BASE_G, N_CARDS, encrypt_batch, DefaultCurve,
 };
 use crate::z_poker::convert::{hex_to_scalar,scalar_to_hex, ecpoint_to_hex, hex_to_ecpoint};
 use crate::zk_shuffle::reconstruction::{reconstruct_deck, ReconstructProof};
@@ -8,26 +8,13 @@ use crate::zk_shuffle::{ShuffleProof};
 
 use crate::zk_shuffle::error::VerificationError;
 use crate::zk_shuffle::remask_proof::{RemaskProof, remask_ciphertext};
-use crate::crypto::curve::{RistrettoCurve, ElGamalCiphertextGeneric};
+use crate::crypto::curve::{Curve, CurveScalar, CurvePoint};
 use super::card::{PlayingCard, standard_deck};
 use super::key_manager::{KeyManager, PKOwnershipProof};
-use curve25519_dalek::traits::Identity;
-use curve25519_dalek::ristretto::RistrettoPoint;
-use sha3::Sha3_512;
 use rand_core::{OsRng, RngCore, CryptoRng};
 use std::collections::HashMap;
 use hex;
 use crate::zk_shuffle::reveal_token_proof::{RevealTokenAndProof, ExpelHandState,RevealTokenProof};
-
-/// Helper to convert old ElGamalCiphertext to generic version
-fn to_generic(ct: &ElGamalCiphertext) -> ElGamalCiphertextGeneric<RistrettoCurve> {
-    ElGamalCiphertextGeneric { c1: ct.c1, c2: ct.c2 }
-}
-
-/// Helper to convert a slice of old ElGamalCiphertext to generic version
-fn to_generic_vec(cts: &[ElGamalCiphertext]) -> Vec<ElGamalCiphertextGeneric<RistrettoCurve>> {
-    cts.iter().map(|ct| to_generic(ct)).collect()
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GamePhase {
@@ -113,9 +100,8 @@ impl ClientPlayer {
     }
 
     pub fn peek_card(&self, ct: &ElGamalCiphertext,tokens: &[RevealToken],plain_cards: &[Plaintext]) -> Result<(Plaintext,ElGamalCiphertext), VerificationError> {
-        let ct_generic: ElGamalCiphertextGeneric<RistrettoCurve> = ct.clone().into();
         for token in tokens {
-            token.proof.verify(&ct_generic, &token.reveal_token, &token.user_public_key).map_err(|_| VerificationError::InvalidRevealToken)?;
+            token.proof.verify(&token.encrypted_card, &token.reveal_token, &token.user_public_key).map_err(|_| VerificationError::InvalidRevealToken)?;
         }
         let self_token = ct.gen_reveal_token(&self.sk);
         let other_tokens_sum = tokens.iter().map(|token| token.reveal_token).sum::<EcPoint>();
@@ -130,16 +116,14 @@ impl ClientPlayer {
     }
 
     pub fn verify_and_reveal_from_token(token: &RevealToken) -> Result<Plaintext, VerificationError> {
-        let ct_generic: ElGamalCiphertextGeneric<RistrettoCurve> = token.encrypted_card.clone().into();
-        token.proof.verify(&ct_generic, &token.reveal_token, &token.user_public_key)
+        token.proof.verify(&token.encrypted_card, &token.reveal_token, &token.user_public_key)
             .map_err(|_| VerificationError::InvalidRevealToken)?;
         Ok(token.encrypted_card.c2 - token.reveal_token)
     }
 
     pub fn generate_reveal_token(&self, ct: &ElGamalCiphertext) -> RevealToken {
         let reveal_token = ct.gen_reveal_token(&self.sk);
-        let ct_generic: ElGamalCiphertextGeneric<RistrettoCurve> = ct.clone().into();
-        let proof = RevealTokenProof::<RistrettoCurve>::prove(&self.sk, &self.pk, &ct_generic, &reveal_token, &mut OsRng);
+        let proof = RevealTokenProof::<DefaultCurve>::prove(&self.sk, &self.pk, ct, &reveal_token, &mut OsRng);
         RevealToken {
             user_public_key: self.pk,
             encrypted_card: ct.clone(),
@@ -167,7 +151,7 @@ impl ClientPlayer {
         let pk_proof = self.generate_pk_proof();
         let mask_and_shuffle_round = MaskAndShuffleRound::execute(input_cards, &share_pk, self.sk.clone(), &self.pk, &mut OsRng);
         JoinGameAndShuffleRound{
-            pk_hex: hex::encode(self.pk.compress().as_bytes()),
+            pk_hex: hex::encode(self.pk.compress().as_ref()),
             pk_ownership_proof: pk_proof,
             mask_and_shuffle_round,
         }
@@ -186,8 +170,7 @@ impl ClientPlayer {
 
         let encrypted_card = hand_encrypted[hand_index].clone();
         let reveal_token = encrypted_card.gen_reveal_token(&self.sk);
-        let ct_generic: ElGamalCiphertextGeneric<RistrettoCurve> = encrypted_card.clone().into();
-        let proof = RevealTokenProof::<RistrettoCurve>::prove(&self.sk, &self.pk, &ct_generic, &reveal_token, &mut OsRng);
+        let proof = RevealTokenProof::<DefaultCurve>::prove(&self.sk, &self.pk, &encrypted_card, &reveal_token, &mut OsRng);
 
         Ok(RevealToken {
             user_public_key: self.pk,
@@ -203,7 +186,7 @@ impl ClientPlayer {
     ) -> RevealToken {
         let ct_for_self = ElGamalCiphertext::encrypt(&comm_plaintext, &self.pk, &Scalar::random(&mut OsRng));
         let reveal_token = ct_for_self.gen_reveal_token(&self.sk);
-        let proof = RevealTokenProof::<RistrettoCurve>::prove(&self.sk, &self.pk, &to_generic(&ct_for_self), &reveal_token, &mut OsRng);
+        let proof = RevealTokenProof::<DefaultCurve>::prove(&self.sk, &self.pk, &ct_for_self, &reveal_token, &mut OsRng);
 
         RevealToken {
             user_public_key: self.pk,
@@ -234,7 +217,7 @@ impl ClientPlayer {
         tokens: &[RevealToken],
     ) -> Result<Plaintext, VerificationError> {
         for token in tokens {
-            token.proof.verify(&to_generic(&token.encrypted_card), &token.reveal_token, &token.user_public_key)
+            token.proof.verify(&token.encrypted_card, &token.reveal_token, &token.user_public_key)
                 .map_err(|_| VerificationError::InvalidRevealToken)?;
         }
         let tokens_sum: EcPoint = tokens.iter().map(|t| t.reveal_token).sum();
@@ -248,12 +231,12 @@ impl ClientPlayer {
     }
 
     pub fn reconstruct(&self,origin_cards: &[Plaintext], user_readable_cards: &[ElGamalCiphertext], coefficient: &Scalar) ->  Result<ReconstructDeck, VerificationError>  {
-        let (s_vec, output_cards, swap_out_cards) = reconstruct_deck(origin_cards, &to_generic_vec(user_readable_cards),   &self.sk, &self.pk, coefficient)?;
+        let (s_vec, output_cards, swap_out_cards) = reconstruct_deck(origin_cards, user_readable_cards, &self.sk, &self.pk, coefficient)?;
         let mut transcript = merlin::Transcript::new(b"zk_poker_reconstruct");
-        let reconstruct_proof = ReconstructProof::prove(origin_cards.to_vec(), to_generic_vec(user_readable_cards), output_cards.clone(), swap_out_cards.clone(), &self.sk,&self.pk, s_vec, &mut transcript)?;
+        let reconstruct_proof = ReconstructProof::<DefaultCurve>::prove(origin_cards.to_vec(), user_readable_cards.to_vec(), output_cards.clone(), swap_out_cards.clone(), &self.sk,&self.pk, s_vec, &mut transcript)?;
         Ok(ReconstructDeck {
-            output_cards: output_cards.into_iter().map(|ct| ct.into()).collect(),
-            swap_cards: swap_out_cards.into_iter().map(|(_, ct)| ct.into()).collect(),
+            output_cards,
+            swap_cards: swap_out_cards.into_iter().map(|(_, ct)| ct).collect(),
             proof: reconstruct_proof,
         })
     }
@@ -308,10 +291,8 @@ impl ShuffleRound {
             output.push(input_cards[i].re_encrypt(share_pk, &r_j));
         }
 
-        let input_generic = to_generic_vec(input_cards);
-        let output_generic = to_generic_vec(&output);
         let proof = ShuffleProof::prove(
-            &input_generic, &output_generic, &permute, &r_values, share_pk, &mut *rng, transcript,
+            input_cards, &output, &permute, &r_values, share_pk, &mut *rng, transcript,
         ).expect("shuffle prove failed: identity base point in input cards");
 
         ShuffleRound {
@@ -322,9 +303,7 @@ impl ShuffleRound {
     }
 
     pub fn verify(&self, share_pk: &EcPoint, transcript: &mut merlin::Transcript) -> bool {
-        let input_generic = to_generic_vec(&self.input_cards);
-        let output_generic = to_generic_vec(&self.output_cards);
-        self.proof.verify(&input_generic, &output_generic, share_pk, transcript).is_ok()
+        self.proof.verify(&self.input_cards, &self.output_cards, share_pk, transcript).is_ok()
     }
 }
 
@@ -342,7 +321,7 @@ pub struct MaskAndShuffleRound {
     pub mask_cards: Vec<ElGamalCiphertext>,
     pub output_cards: Vec<ElGamalCiphertext>,
     pub proof: ShuffleProof,
-    pub remask_proof: RemaskProof<RistrettoCurve>,
+    pub remask_proof: RemaskProof<DefaultCurve>,
 }
 
 impl MaskAndShuffleRound {
@@ -353,21 +332,18 @@ impl MaskAndShuffleRound {
         player_pk: &EcPoint,
         rng: &mut (impl RngCore + CryptoRng),
     ) -> Self {
-        use crate::crypto::curve::ElGamalCiphertextGeneric;
         use merlin::Transcript;
-        
+
         // 创建共享 transcript，绑定 remask_proof 和 shuffle_proof
         let mut transcript = Transcript::new(b"poker_protocol_mask_shuffle");
-        
-        let input_generic: Vec<ElGamalCiphertextGeneric<RistrettoCurve>> = input_cards.iter().map(|ct| ct.clone().into()).collect();
+
         let mut mask_cards: Vec<ElGamalCiphertext> = vec![];
         for i in 0..input_cards.len() {
-            let remask_card = remask_ciphertext(&input_generic[i], &player_sk, player_pk, rng)
+            let remask_card = remask_ciphertext(&input_cards[i], &player_sk, player_pk, rng)
                 .expect("remask_ciphertext failed: c1 is identity (should not happen for valid encrypted cards)");
-            mask_cards.push(ElGamalCiphertext::from(remask_card));
+            mask_cards.push(remask_card);
         }
-        let mask_cards_generic: Vec<ElGamalCiphertextGeneric<RistrettoCurve>> = mask_cards.iter().map(|ct: &ElGamalCiphertext| ElGamalCiphertextGeneric::<RistrettoCurve>::from(ct.clone())).collect();
-        let remask_proof = RemaskProof::prove(&input_generic, &mask_cards_generic, &player_sk, player_pk, &mut transcript);
+        let remask_proof = RemaskProof::<DefaultCurve>::prove(input_cards, &mask_cards, &player_sk, player_pk, &mut transcript);
         let shuffle_round = ShuffleRound::execute(&mask_cards, share_pk, &mut transcript, rng);
         Self {
             mask_cards,
@@ -408,7 +384,7 @@ pub struct DealResult {
 #[derive(Debug)]
 pub struct RevealToken {
     pub encrypted_card: ElGamalCiphertext,
-    pub proof: RevealTokenProof<RistrettoCurve>,
+    pub proof: RevealTokenProof<DefaultCurve>,
     pub reveal_token: EcPoint,
     pub user_public_key: PublicKey,
 }
@@ -417,19 +393,19 @@ pub struct RevealToken {
 pub struct ReconstructDeck {
     pub output_cards: Vec<ElGamalCiphertext>,
     pub swap_cards: Vec<ElGamalCiphertext>,
-    pub proof: ReconstructProof<RistrettoCurve>,
+    pub proof: ReconstructProof<DefaultCurve>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RevealTokenSimple {
-    pub proof: RevealTokenProof<RistrettoCurve>,
+    pub proof: RevealTokenProof<DefaultCurve>,
     pub reveal_token: EcPoint,
     pub user_public_key: PublicKey,
 }
 
 impl RevealToken {
     fn is_ok(&self) -> bool {
-        self.proof.verify(&to_generic(&self.encrypted_card), &self.reveal_token, &self.user_public_key).is_ok()
+        self.proof.verify(&self.encrypted_card, &self.reveal_token, &self.user_public_key).is_ok()
     }
 }
 
@@ -499,12 +475,11 @@ pub struct MentalPokerGame {
 
 /// Derive 52 deterministic, independent EcPoints as card plaintexts.
 ///
-/// Uses the Bulletproofs approach: for each index i, hash a domain-separated
-/// label to 64 bytes, then use `RistrettoPoint::hash_from_bytes::<Sha3_512>`
-/// to map to a group element. This ensures:
+/// Uses hash-to-scalar approach: for each index i, hash a domain-separated
+/// label to a scalar, then multiply by the generator. This ensures:
 /// - Deterministic: all parties derive the same 52 points
 /// - Independent: no subset of points has known DL relation to any other
-/// - Non-identity: Ristretto hash-to-group never produces identity
+/// - Non-identity: generator * non-zero scalar is never identity
 fn new_plain_text() -> Vec<Plaintext> {
     let mut rng = rand::thread_rng();
     let mut random_bytes = [0u8; 32];
@@ -516,7 +491,7 @@ fn new_plain_text() -> Vec<Plaintext> {
     (0..N_CARDS)
         .map(|i| {
             let label = format!("zgame/poker/{}/{}", String::from_utf8_lossy(&random_bytes), i);
-            RistrettoPoint::hash_from_bytes::<Sha3_512>(label.as_bytes())
+            DefaultCurve::base_g() * DefaultCurve::hash_to_scalar(label.as_bytes())
         })
         .collect()
 }
@@ -573,7 +548,7 @@ impl MentalPokerGame {
             p.hand_encrypted.clear();
         }
     }
-    
+
     pub fn register_player(&mut self, pk_hex: String, pk: EcPoint, proof: PKOwnershipProof) -> &PlayerState {
         self.key_manager.register_player( pk, proof)
             .expect("register should succeed");
@@ -639,12 +614,12 @@ impl MentalPokerGame {
     }
 
     pub fn deal_to_player(&mut self, player_pk: &str, n: usize) -> Result<(), VerificationError> {
-        
+
         let pending_players: Vec<EcPoint> = self.players.values().map(|p| p.pk).collect::<Vec<_>>();
-        
+
         let player = self.players.get_mut(player_pk)
             .ok_or(VerificationError::PlayerNotFound)?;
-        
+
         let pk_hex = player.pk_hex.clone();
         let mut card_index = Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted);
         if card_index + n > self.deck_encrypted.len() {
@@ -693,7 +668,7 @@ impl MentalPokerGame {
             encrypted_cards.push(encrypt_card.clone());
             self.community_cards_encrypted.push(PlayerEncryptedCard {
                 card_index:curr_idx as u32,
-                encrypted_card: encrypt_card.clone(), 
+                encrypted_card: encrypt_card.clone(),
                 reveal_state: RevealState {
                     pending_players: pending_players.clone(),
                     reveal_tokens: Vec::new(),
@@ -728,7 +703,7 @@ impl MentalPokerGame {
         }
         Ok(ret)
     }
-    
+
 
     pub fn aggregated_pk(&self) -> EcPoint {
         self.key_manager.get_aggregated_pk()
@@ -800,7 +775,7 @@ impl MentalPokerGame {
         }
 
         token.proof.verify(
-            &to_generic(&token.encrypted_card),
+            &token.encrypted_card,
             &token.reveal_token,
             &token.user_public_key,
         ).map(|_| true).map_err(|_| VerificationError::InvalidDummyCount)
@@ -838,7 +813,7 @@ impl MentalPokerGame {
         }
 
         token.proof.verify(
-            &to_generic(&token.encrypted_card),
+            &token.encrypted_card,
             &token.reveal_token,
             &token.user_public_key,
         ).map(|_| true).map_err(|_| VerificationError::InvalidDummyCount)
@@ -1020,7 +995,7 @@ impl MentalPokerGame {
 
         let player_card = hand[card_index].clone();
         let reveal_token = player_card.encrypted_card.gen_reveal_token(&sk);
-        let proof = RevealTokenProof::prove(&sk, &player.pk, &to_generic(&player_card.encrypted_card), &reveal_token, &mut OsRng);
+        let proof = RevealTokenProof::<DefaultCurve>::prove(&sk, &player.pk, &player_card.encrypted_card, &reveal_token, &mut OsRng);
 
         Ok(RevealToken {
             user_public_key: player.pk,
@@ -1040,7 +1015,7 @@ impl MentalPokerGame {
 
         let ct_for_self = ElGamalCiphertext::encrypt(&comm_plaintext, &player.pk, &Scalar::random(&mut OsRng));
         let reveal_token = ct_for_self.gen_reveal_token(&sk);
-        let proof = RevealTokenProof::prove(&sk, &player.pk, &to_generic(&ct_for_self), &reveal_token, &mut OsRng);
+        let proof = RevealTokenProof::<DefaultCurve>::prove(&sk, &player.pk, &ct_for_self, &reveal_token, &mut OsRng);
 
         Ok(RevealToken {
             user_public_key: player.pk,
@@ -1098,7 +1073,7 @@ impl MentalPokerGame {
                         if self.redeal_to_player(player_pk, idx, pt).is_ok() {
                             redealt_count += 1;
                         }
-                    } 
+                    }
                 }
             }
         }
@@ -1231,7 +1206,7 @@ impl MentalPokerGame {
                         if self.redeal_to_player(&player_pk, idx, pt).is_ok() {
                             redealt_count += 1;
                         }
-                    } 
+                    }
                 }
             }
         }
@@ -1262,8 +1237,8 @@ impl MentalPokerGame {
                     let sk = &self.entrusted_sk[pk];
                     let pk_val = &self.players[pk].pk;
                     let reveal_token = card_ct.gen_reveal_token(sk);
-                    let proof = RevealTokenProof::prove(sk, pk_val, &to_generic(card_ct), &reveal_token, &mut OsRng);
-                    Some(RevealToken { 
+                    let proof = RevealTokenProof::<DefaultCurve>::prove(sk, pk_val, card_ct, &reveal_token, &mut OsRng);
+                    Some(RevealToken {
                         user_public_key: *pk_val,
                         encrypted_card: card_ct.clone(), proof, reveal_token })
                 } else {
@@ -1316,22 +1291,22 @@ mod tests {
         player: &ClientPlayer,
         agg_pk: &EcPoint,
         card_indices: &[usize],
-    ) -> Vec<ExpelHandState<RistrettoCurve>> {
+    ) -> Vec<ExpelHandState<DefaultCurve>> {
         card_indices.iter().map(|&idx| {
             let pt = new_plain_text()[idx];
             let r = Scalar::random(&mut OsRng);
             let encrypted_card = ElGamalCiphertext::encrypt(&pt, agg_pk, &r);
-            
+
             let reveal_token = encrypted_card.gen_reveal_token(&player.sk);
-            let proof = RevealTokenProof::prove(&player.sk, &player.pk, &to_generic(&encrypted_card), &reveal_token, &mut OsRng);
-            
-            let token_and_proof = RevealTokenAndProof {
+            let proof = RevealTokenProof::<DefaultCurve>::prove(&player.sk, &player.pk, &encrypted_card, &reveal_token, &mut OsRng);
+
+            let token_and_proof = RevealTokenAndProof::<DefaultCurve> {
                 reveal_token,
                 proof,
             };
-            
-            ExpelHandState {
-                hand_encrypted: to_generic(&encrypted_card),
+
+            ExpelHandState::<DefaultCurve> {
+                hand_encrypted: encrypted_card,
                 reveal_tokens: vec![token_and_proof],
             }
         }).collect()
@@ -1341,17 +1316,17 @@ mod tests {
     fn test_reveal_token_generation_and_verification() {
         let player = create_test_player();
         let agg_pk = player.pk;
-        
+
         let pt = new_plain_text()[0];
         let r = Scalar::random(&mut OsRng);
         let encrypted_card = ElGamalCiphertext::encrypt(&pt, &agg_pk, &r);
-        
+
         let reveal_token = encrypted_card.gen_reveal_token(&player.sk);
-        let proof = RevealTokenProof::prove(&player.sk, &player.pk, &to_generic(&encrypted_card), &reveal_token, &mut OsRng);
-        
-        let verify_result = proof.verify(&to_generic(&encrypted_card), &reveal_token, &player.pk);
+        let proof = RevealTokenProof::<DefaultCurve>::prove(&player.sk, &player.pk, &encrypted_card, &reveal_token, &mut OsRng);
+
+        let verify_result = proof.verify(&encrypted_card, &reveal_token, &player.pk);
         assert!(verify_result.is_ok(), "Proof should verify: {:?}", verify_result);
-        
+
         let decrypted = encrypted_card.c2 - reveal_token;
         assert_eq!(decrypted, pt, "Should decrypt to original plaintext");
     }
@@ -1367,8 +1342,8 @@ mod tests {
 
     /// Helper: 比较两个 EcPoint 集合是否包含相同的点（不考虑顺序）
     fn assert_same_point_set(a: &[EcPoint], b: &[EcPoint]) {
-        let mut a_compressed: Vec<_> = a.iter().map(|p| p.compress().to_bytes()).collect();
-        let mut b_compressed: Vec<_> = b.iter().map(|p| p.compress().to_bytes()).collect();
+        let mut a_compressed: Vec<_> = a.iter().map(|p| p.compress().as_ref().to_vec()).collect();
+        let mut b_compressed: Vec<_> = b.iter().map(|p| p.compress().as_ref().to_vec()).collect();
         a_compressed.sort();
         b_compressed.sort();
         assert_eq!(a_compressed, b_compressed);
@@ -1439,7 +1414,7 @@ mod tests {
         // 篡改 input[1]
         let mut tampered_input = input.clone();
         tampered_input[1] = ElGamalCiphertext::encrypt(
-            &(*BASE_G * Scalar::from(99u64)), &pk, &Scalar::random(&mut OsRng),
+            &(*BASE_G * Scalar::from_u64(99u64)), &pk, &Scalar::random(&mut OsRng),
         );
         let tampered_round = ShuffleRound {
             input_cards: tampered_input,
@@ -1482,18 +1457,16 @@ mod tests {
         // 验证时需要按与 prove 相同的顺序重建 transcript 状态：
         // 1. 先验证 remask_proof（吸收 remask 数据到 transcript）
         // 2. 再验证 shuffle_proof（在 remask 数据之后继续吸收 shuffle 数据）
-        let input_generic = to_generic_vec(&input);
-        let mask_generic = to_generic_vec(&round.mask_cards);
 
         // remask proof 应通过
         let mut transcript = merlin::Transcript::new(b"poker_protocol_mask_shuffle");
-        assert!(round.remask_proof.verify(&input_generic, &mask_generic, &player_pk, &mut transcript),
+        assert!(round.remask_proof.verify(&input, &round.mask_cards, &player_pk, &mut transcript),
             "remask proof should verify");
 
         // shuffle proof 应通过（使用同一个 transcript，状态已包含 remask 数据）
         assert!(round.proof.verify(
-            &to_generic_vec(&round.mask_cards),
-            &to_generic_vec(&round.output_cards),
+            &round.mask_cards,
+            &round.output_cards,
             &share_pk,
             &mut transcript,
         ).is_ok(), "shuffle proof should verify");

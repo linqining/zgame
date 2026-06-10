@@ -1,12 +1,12 @@
 use crate::crypto::{EcPoint, Scalar, BASE_G};
+use crate::crypto::curve::{CurvePoint, CurveScalar};
 use sha2::{Sha256, Digest};
 use rand_core::{RngCore, CryptoRng};
-use curve25519_dalek::traits::{Identity, IsIdentity};
 use std::collections::HashMap;
 use hex;
 
 fn pk_to_hex(pk: &EcPoint) -> String {
-    hex::encode(pk.compress().as_bytes())
+    hex::encode(pk.compress().as_ref())
 }
 
 #[derive(Debug, Clone)]
@@ -21,13 +21,11 @@ impl PKOwnershipProof {
         let commitment = *BASE_G * w;
 
         let mut hasher = Sha256::new();
-        hasher.update(BASE_G.compress().as_bytes());
-        hasher.update(pk.compress().as_bytes());
-        hasher.update(commitment.compress().as_bytes());
+        hasher.update(BASE_G.compress().as_ref());
+        hasher.update(pk.compress().as_ref());
+        hasher.update(commitment.compress().as_ref());
         let challenge_bytes = hasher.finalize();
-        let mut challenge_arr = [0u8; 32];
-        challenge_arr.copy_from_slice(&challenge_bytes[..32]);
-        let challenge = Scalar::from_bytes_mod_order(challenge_arr);
+        let challenge = Scalar::from_bytes_mod_order(&challenge_bytes);
 
         let response = w + challenge * sk;
 
@@ -35,21 +33,19 @@ impl PKOwnershipProof {
     }
 
     pub fn verify(&self, pk: &EcPoint) -> bool {
-        if self.commitment.is_identity() {
+        if pk.is_identity() && self.commitment.is_identity() {
             return false;
         }
 
         let mut hasher = Sha256::new();
-        hasher.update(BASE_G.compress().as_bytes());
-        hasher.update(pk.compress().as_bytes());
-        hasher.update(self.commitment.compress().as_bytes());
+        hasher.update(BASE_G.compress().as_ref());
+        hasher.update(pk.compress().as_ref());
+        hasher.update(self.commitment.compress().as_ref());
         let challenge_bytes = hasher.finalize();
-        let mut challenge_arr = [0u8; 32];
-        challenge_arr.copy_from_slice(&challenge_bytes[..32]);
-        let challenge = Scalar::from_bytes_mod_order(challenge_arr);
+        let challenge = Scalar::from_bytes_mod_order(&challenge_bytes);
 
         let lhs = *BASE_G * &self.response;
-        let rhs = self.commitment + pk * &challenge;
+        let rhs = self.commitment + *pk * &challenge;
 
         lhs == rhs
     }
@@ -161,7 +157,7 @@ impl KeyManager {
     }
 
     pub fn compute_aggregate_from_pks(pks: &[EcPoint]) -> EcPoint {
-        pks.iter().fold(EcPoint::identity(), |agg, pk| agg + pk)
+        pks.iter().fold(EcPoint::identity(), |agg, pk| agg + *pk)
     }
 }
 
@@ -284,7 +280,7 @@ mod tests {
         let pk = *BASE_G * &sk;
         let proof = PKOwnershipProof::prove(&sk, &pk, &mut OsRng);
 
-        km.register_player(pk.clone(), proof.clone()).unwrap();
+        km.register_player(pk, proof.clone()).unwrap();
         let result = km.register_player(pk, proof);
         assert!(result.is_err(), "Duplicate registration should fail");
     }
@@ -304,7 +300,7 @@ mod tests {
         let pk = *BASE_G * &sk;
         let proof = PKOwnershipProof::prove(&sk, &pk, &mut OsRng);
 
-        km.register_player(pk.clone(), proof).unwrap();
+        km.register_player(pk, proof).unwrap();
         km.leave_player(pk, &sk).unwrap();
 
         let new_sk = Scalar::random(&mut OsRng);

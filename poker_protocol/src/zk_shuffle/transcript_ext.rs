@@ -31,7 +31,7 @@ impl<C: Curve> TranscriptExtension<C> for Transcript {
     fn challenge(&mut self, label: &'static [u8]) -> Challenge<C> {
         let mut buf = [0u8; 64];
         self.challenge_bytes(label, &mut buf);
-        let scalar = C::Scalar::from_bytes_mod_order_wide(&buf);
+        let scalar = C::Scalar::from_bytes_mod_order(&buf);
         Challenge { scalar }
     }
 }
