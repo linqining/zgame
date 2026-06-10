@@ -284,7 +284,7 @@ impl Table {
         };
         self.players.retain(|p| p.socket_id != socket_id);
         tracing::info!("remove_player stand_player: {}", socket_id);
-        self.stand_player(socket_id);
+        self.stand_player_by_pk(&pk);
         let _ = self.mental_poker_game.leave_player(&pk);
     }
 
@@ -296,7 +296,7 @@ impl Table {
         };
         self.players.retain(|p| p.pk_hex != pk);
         tracing::info!("remove_player_by_pk stand_player: {}", pk);
-        self.stand_player(&socket_id);
+        self.stand_player_by_pk(pk);
         let _ = self.mental_poker_game.leave_player(pk);
     }
 
@@ -371,6 +371,25 @@ impl Table {
         }
     }
 
+    pub fn stand_player_by_pk(&mut self, pk: &str) {
+        for (_id, seat_opt) in self.seats.iter_mut() {
+            if let Some(seat) = seat_opt {
+                if seat.player.as_ref().map_or(false, |p| p.pk_hex == pk) {
+                    *seat_opt = None;
+                }
+            }
+        }
+        let sat_count = self.seats.values().filter(|s| s.is_some()).count();
+        if sat_count == 1 {
+            self.end_without_showdown();
+            // end_without_showdown 已将 round_state 设为 HandComplete，
+            // 由 game loop 的 HandComplete 分支自然流转到 Waiting
+        }
+        if sat_count == 0 {
+            self.reset_empty_table();
+        }
+    }
+
     pub fn find_player_by_socket_id(&self, socket_id: &str) -> Option<&Seat> {
         for seat_opt in self.seats.values() {
             if let Some(seat) = seat_opt {
@@ -409,7 +428,7 @@ impl Table {
         while count < places {
             current = if current >= self.max_players { 1 } else { current + 1 };
             if let Some(Some(seat)) = self.seats.get(&current) {
-                if !seat.folded {
+                if !seat.folded && !seat.sitting_out {
                     count += 1;
                 }
             }
@@ -511,7 +530,7 @@ impl Table {
 
         self.pot += sb_amount + bb_amount;
         self.call_amount = Some(self.min_bet * 2);
-        self.min_raise = self.min_bet * 4;
+        self.min_raise = self.min_bet * 2; // = big_blind; minimum re-raise equals the big blind
     }
 
     pub fn clear_seats(&mut self) {
@@ -631,21 +650,19 @@ impl Table {
         if active.is_empty() {
             return true;
         }
-        // Ensure every active player has acted at least once.
-        // Without this check, PreFlop BB's option (check/raise) gets skipped
-        // because BB's bet already equals call_amount from the blind.
-        if let Some(ref betting) = self.betting_round {
-            if betting.get_actions_taken() < active.len() {
-                return false;
-            }
+        // Every active player must have acted at least once this round.
+        // This prevents the BB's option from being skipped and ensures
+        // that folds don't cause premature round completion.
+        if active.iter().any(|s| !s.has_acted) {
+            return false;
         }
-        for seat in &active {
-            if let Some(call_amount) = self.call_amount {
-                if seat.bet < call_amount {
+        // All active players must have matched the current bet (or are all-in).
+        if let Some(ref betting) = self.betting_round {
+            let current_bet = betting.current_bet();
+            for seat in &active {
+                if seat.bet < current_bet {
                     return false;
                 }
-            } else if !seat.checked {
-                return false;
             }
         }
         true
@@ -659,46 +676,38 @@ impl Table {
     }
 
     pub fn calculate_side_pots(&mut self) {
-        let all_in_players = self.players_all_in_this_turn();
-        let unfolded = self.unfolded_players();
-        if all_in_players.is_empty() {
+        // Collect (seat_id, bet) for all unfolded players with bets.
+        let mut player_bets: Vec<(u32, u64)> = self.seats.values()
+            .filter_map(|s| s.as_ref())
+            .filter(|s| !s.folded && s.bet > 0)
+            .map(|s| (s.id, s.bet))
+            .collect();
+
+        if player_bets.is_empty() {
             return;
         }
-        let mut sorted: Vec<&Seat> = all_in_players.clone();
-        sorted.sort_by(|a, b| a.bet.partial_cmp(&b.bet).unwrap());
-        if sorted.len() > 1 && sorted.len() == unfolded.len() {
-            sorted.pop();
-        }
-        let all_in_seat_ids: Vec<u32> = sorted.iter().map(|s| s.id).collect();
-        for seat_id in &all_in_seat_ids {
-            let all_in_bet = match self.seats.get(seat_id) {
-                Some(Some(s)) => s.bet,
-                _ => continue,
-            };
-            let mut side_pot = SidePot::new();
-            if all_in_bet > 0 {
-                for i in 1..=self.max_players {
-                    if i == *seat_id { continue; }
-                    if let Some(Some(seat)) = self.seats.get(&i) {
-                        if !seat.folded {
-                            if seat.bet > all_in_bet {
-                                let amount_over = seat.bet - all_in_bet;
-                                if !self.side_pots.is_empty() {
-                                    let last_idx = self.side_pots.len() - 1;
-                                    self.side_pots[last_idx].amount -= amount_over;
-                                } else {
-                                    self.pot -= amount_over;
-                                }
-                                side_pot.amount += amount_over;
-                                side_pot.players.push(i);
-                            }
-                        }
-                    }
+
+        // Sort by bet ascending — the foundation of the layered pot algorithm.
+        player_bets.sort_by_key(|(_, bet)| *bet);
+
+        self.side_pots.clear();
+        let mut prev_level: u64 = 0;
+
+        for i in 0..player_bets.len() {
+            let current_bet = player_bets[i].1;
+            if current_bet > prev_level {
+                let increment = current_bet - prev_level;
+                // All players at or above this bet level are eligible for this pot.
+                let eligible: Vec<u32> = player_bets[i..].iter().map(|(id, _)| *id).collect();
+                let pot_amount = increment * eligible.len() as u64;
+
+                if self.side_pots.is_empty() {
+                    // First layer = main pot
+                    self.pot = pot_amount;
+                } else {
+                    self.side_pots.push(SidePot { amount: pot_amount, players: eligible });
                 }
-                if let Some(Some(seat)) = self.seats.get_mut(seat_id) {
-                    seat.bet = 0;
-                }
-                self.side_pots.push(side_pot);
+                prev_level = current_bet;
             }
         }
     }
@@ -833,6 +842,7 @@ impl Table {
                 seat.bet = 0;
                 seat.checked = false;
                 seat.last_action = None;
+                seat.has_acted = false;
             }
         }
         self.call_amount = None;
@@ -1024,12 +1034,21 @@ impl Table {
         } else {
             self.pot += added_to_pot;
         }
-        self.min_raise = if let Some(ca) = self.call_amount {
-            ca + (amount - ca) * 2
-        } else {
-            amount * 2
+        self.min_raise = {
+            // min_raise stores the minimum total bet for the next raise.
+            // Standard rule: next minimum raise = current bet + last raise increment.
+            let raise_increment = amount.saturating_sub(self.call_amount.unwrap_or(0));
+            amount + raise_increment
         };
         self.call_amount = Some(amount);
+        // Reset has_acted for all other active players — they must respond to the raise.
+        for seat_opt in self.seats.values_mut() {
+            if let Some(seat) = seat_opt {
+                if seat.id != seat_id && !seat.folded && !seat.sitting_out && seat.stack > 0 {
+                    seat.has_acted = false;
+                }
+            }
+        }
         Some(ActionResult { seat_id, message: format!("{} raises to ${:.2}", player_name, amount) })
     }
 
@@ -1072,8 +1091,16 @@ impl Table {
             Some(Some(s)) => s.clone(),
             _ => return None,
         };
-        if seat.folded || seat.stack == 0 {
+        if seat.folded || seat.sitting_out || seat.stack == 0 {
+            // Turn is on a player who can't act — skip them and advance turn.
+            // Return a special marker so the caller knows to re-advance.
+            self.turn = Some(self.next_unfolded_player(turn_seat_id, 1));
             self.betting_timeout_start = Some(std::time::Instant::now());
+            for i in 1..=self.max_players {
+                if let Some(Some(seat)) = self.seats.get_mut(&i) {
+                    seat.turn = self.turn == Some(i);
+                }
+            }
             return None;
         }
         let needs_to_call = self.call_amount.map_or(false, |ca| ca > seat.bet);

@@ -23,6 +23,8 @@ pub struct Seat {
     pub disconnected_at: Option<u64>,
     #[serde(default)]
     pub is_waiting: bool,
+    #[serde(default)]
+    pub has_acted: bool,
 }
 
 impl Seat {
@@ -42,20 +44,25 @@ impl Seat {
             disconnected: false,
             disconnected_at: None,
             is_waiting: false,
+            has_acted: false,
         }
     }
 
     pub fn fold(&mut self) {
-        self.bet = 0;
+        // NOTE: do NOT zero self.bet here — the bet already contributed to the pot
+        // and is needed for correct side-pot calculation. Bets are cleared in
+        // reset_bets_and_actions() when the round advances.
         self.folded = true;
         self.last_action = Some(actions::FOLD.to_string());
         self.turn = false;
+        self.has_acted = true;
     }
 
     pub fn check(&mut self) {
         self.checked = true;
         self.last_action = Some(actions::CHECK.to_string());
         self.turn = false;
+        self.has_acted = true;
     }
 
     pub fn raise(&mut self, amount: u64) {
@@ -70,6 +77,7 @@ impl Seat {
         }
         self.turn = false;
         self.last_action = Some(actions::RAISE.to_string());
+        self.has_acted = true;
     }
 
     pub fn place_blind(&mut self, amount: u64) -> u64 {
@@ -88,6 +96,7 @@ impl Seat {
         self.stack -= amount_called;
         self.turn = false;
         self.last_action = Some(actions::CALL.to_string());
+        self.has_acted = true;
     }
 
     pub fn win_hand(&mut self, amount: u64) {

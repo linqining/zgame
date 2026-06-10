@@ -1385,6 +1385,7 @@ async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, table_id: u32
         };
         if let Some(res) = fold_result {
             broadcast_to_table(io, state, table_id, Some(&res.message)).await;
+            handle_turn_advance(io, state, table_id).await;
         }
     }
 }
@@ -1925,13 +1926,19 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
         let (stand_msg, need_clear) = {
             let mut gs = state.state.write().await;
+            let pk = gs.players.get(&socket_id).map(|p| p.pk_hex.clone());
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 let msg = table.find_player_by_socket_id(&socket_id)
                     .and_then(|seat| {
                         seat.player.as_ref().map(|p| format!("{} left the table", p.name))
                     });
-                tracing::info!("stand up stand_player: {}", socket_id);
-                table.stand_player(&socket_id);
+                if let Some(pk) = pk {
+                    tracing::info!("stand up stand_player_by_pk: socket_id={}, pk={}", socket_id, pk);
+                    table.stand_player_by_pk(&pk);
+                } else {
+                    tracing::info!("stand up stand_player: socket_id={}", socket_id);
+                    table.stand_player(&socket_id);
+                }
                 let clear = table.active_players().len() == 1;
                 (msg, clear)
             } else { (None, false) }

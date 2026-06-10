@@ -541,6 +541,17 @@ fun count_active_players(seats: &vector<Seat>): u64 {
     count
 }
 
+// Count all occupied seats (including folded), used for heads-up detection at blind posting.
+fun count_active_occupied(seats: &vector<Seat>): u64 {
+    let mut count = 0;
+    let mut i = 0;
+    while (i < seats.length()) {
+        if (seats[i].occupied) { count = count + 1 };
+        i = i + 1;
+    };
+    count
+}
+
 fun move_button(table: &mut Table) {
     let mut next = table.button + 1;
     let mut count = 0;
@@ -557,7 +568,16 @@ fun move_button(table: &mut Table) {
 
 fun post_blinds(table: &mut Table) {
     let n = table.max_players;
-    let sb_seat = find_next_active_seat(&table.seats, table.button, n);
+    let active = count_active_occupied(&table.seats);
+    let is_heads_up = active == 2;
+
+    // Heads-up: button = SB, next = BB
+    // Normal (3+): button+1 = SB, button+2 = BB
+    let sb_seat = if (is_heads_up) {
+        table.button
+    } else {
+        find_next_active_seat(&table.seats, table.button, n)
+    };
     let bb_seat = find_next_active_seat(&table.seats, sb_seat, n);
 
     // 小盲
@@ -576,7 +596,12 @@ fun post_blinds(table: &mut Table) {
     bb_seat_ref.total_bet = bb_amount;
     if (bb_seat_ref.stack == 0) { bb_seat_ref.all_in = true };
 
-    let first_to_act = find_next_active_seat(&table.seats, bb_seat, n);
+    // Pre-flop: first to act is after BB (UTG); heads-up: first to act is SB/button
+    let first_to_act = if (is_heads_up) {
+        sb_seat
+    } else {
+        find_next_active_seat(&table.seats, bb_seat, n)
+    };
     table.current_turn = option::some(first_to_act);
 }
 
@@ -638,9 +663,11 @@ fun is_betting_complete(table: &Table): bool {
     let mut i = 0;
     while (i < table.seats.length()) {
         let seat = &table.seats[i];
+        // Only check non-folded, non-all-in players (they can still act)
         if (seat.occupied && !seat.folded && !seat.all_in) {
             if (!seat.acted_this_round) { all_acted = false };
-            if (seat.bet != current_bet) { all_matched = false };
+            // A player who hasn't matched the current bet must still act
+            if (seat.bet < current_bet) { all_matched = false };
         };
         i = i + 1;
     };
