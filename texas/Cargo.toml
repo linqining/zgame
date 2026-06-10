@@ -29,6 +29,4 @@ sui_sdk = { git = "https://github.com/mystenlabs/sui", package = "sui-sdk", rev 
 sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
 sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09", features = ["pem"] }
 allocative = "0.3.4"
-curve25519-dalek = "4.1.3"
-subtle = "2"
 merlin = "3"

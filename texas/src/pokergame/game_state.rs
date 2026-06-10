@@ -4,13 +4,12 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use poker_protocol::z_poker::convert::{ecpoint_to_hex, hex_to_ecpoint, hex_to_scalar, scalar_to_hex};
 
-use poker_protocol::crypto::{CurveScalar, EcPoint, ElGamalCiphertext, Plaintext, Scalar};
+use poker_protocol::crypto::{CurveScalar, ElGamalCiphertext, Plaintext, Scalar};
 use poker_protocol::z_poker::key_manager::PKOwnershipProof;
 use poker_protocol::z_poker::protocol::MaskAndShuffleRound;
 use poker_protocol::zk_shuffle::remask_proof::RemaskProof;
 use poker_protocol::zk_shuffle::ShuffleProof;
-use poker_protocol::crypto::RistrettoCurve;
-use curve25519_dalek::ristretto::CompressedRistretto;
+use poker_protocol::crypto::DefaultCurve;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::zk_shuffle::reconstruction::{ReconstructProof, SwapOutCardProof, ReconstructionDLEQProof, ChaumPedersenDLEQProof};
 
@@ -306,7 +305,7 @@ pub struct RemaskProofJson {
 }
 
 impl RemaskProofJson {
-    pub fn to_remask_proof(&self) -> Result<RemaskProof<RistrettoCurve>, String> {
+    pub fn to_remask_proof(&self) -> Result<RemaskProof<DefaultCurve>, String> {
         Ok(RemaskProof {
             per_card_commitments: self.per_card_commitments_hex.iter()
                 .map(|h| hex_to_ecpoint(h))
@@ -325,7 +324,7 @@ pub struct GeneralizedSchnorrProofJson {
 }
 
 impl GeneralizedSchnorrProofJson {
-    pub fn to_proof(&self) -> Result<poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<RistrettoCurve>, String> {
+    pub fn to_proof(&self) -> Result<poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>, String> {
         let responses = self.responses_hex.iter()
             .map(|h| hex_to_scalar(h))
             .collect::<Result<Vec<_>, _>>()?;
@@ -344,10 +343,10 @@ pub struct SwapOutCardProofJson {
 }
 
 impl SwapOutCardProofJson {
-    pub fn to_proof(&self) -> Result<SwapOutCardProof<RistrettoCurve>, String> {
+    pub fn to_proof(&self) -> Result<SwapOutCardProof<DefaultCurve>, String> {
         Ok(SwapOutCardProof {
-            user_readable_card: self.user_readable_card.to_ciphertext()?.into(),
-            swap_out_card: self.swap_out_card.to_ciphertext()?.into(),
+            user_readable_card: self.user_readable_card.to_ciphertext()?,
+            swap_out_card: self.swap_out_card.to_ciphertext()?,
             chaum_pedersen_proof: self.chaum_pedersen_proof.to_proof()?,
         })
     }
@@ -361,7 +360,7 @@ pub struct ChaumPedersenDLEQProofJson {
 }
 
 impl ChaumPedersenDLEQProofJson {
-    pub fn to_proof(&self) -> Result<ChaumPedersenDLEQProof<RistrettoCurve>, String> {
+    pub fn to_proof(&self) -> Result<ChaumPedersenDLEQProof<DefaultCurve>, String> {
         Ok(ChaumPedersenDLEQProof {
             commitment_a: hex_to_ecpoint(&self.commitment_a_hex)?,
             commitment_b: hex_to_ecpoint(&self.commitment_b_hex)?,
@@ -378,7 +377,7 @@ pub struct ReconstructionDLEQProofJson {
 }
 
 impl ReconstructionDLEQProofJson {
-    pub fn to_proof(&self) -> Result<ReconstructionDLEQProof<RistrettoCurve>, String> {
+    pub fn to_proof(&self) -> Result<ReconstructionDLEQProof<DefaultCurve>, String> {
         Ok(ReconstructionDLEQProof {
             commitment: hex_to_ecpoint(&self.commitment_hex)?,
             response: hex_to_scalar(&self.response_hex)?,
@@ -403,7 +402,7 @@ pub struct ReconstructProofJson {
 }
 
 impl ReconstructProofJson {
-    pub fn to_proof(&self) -> Result<ReconstructProof<RistrettoCurve>, String> {
+    pub fn to_proof(&self) -> Result<ReconstructProof<DefaultCurve>, String> {
         Ok(ReconstructProof {
             swap_out_cards_proofs: self.swap_out_cards_proofs.iter()
                 .map(|p| p.to_proof())
@@ -479,7 +478,7 @@ pub struct RevealTokenProofJson {
 }
 
 impl RevealTokenProofJson {
-    pub fn to_proof(&self) -> Result<RevealTokenProof<RistrettoCurve>, String> {
+    pub fn to_proof(&self) -> Result<RevealTokenProof<DefaultCurve>, String> {
         Ok(RevealTokenProof {
             user_public_key: hex_to_ecpoint(&self.user_public_key_hex)?,
             commitment_t1: hex_to_ecpoint(&self.commitment_t1_hex)?,
@@ -487,7 +486,7 @@ impl RevealTokenProofJson {
             response_s: hex_to_scalar(&self.response_s_hex)?,
         })
     }
-    pub fn from_proof(proof: RevealTokenProof<RistrettoCurve>) -> Self {
+    pub fn from_proof(proof: RevealTokenProof<DefaultCurve>) -> Self {
         Self {
             user_public_key_hex: ecpoint_to_hex(&proof.user_public_key),
             commitment_t1_hex: ecpoint_to_hex(&proof.commitment_t1),

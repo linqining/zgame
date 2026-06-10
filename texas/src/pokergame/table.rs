@@ -13,11 +13,12 @@ use crate::pokergame::player::{Player, PlayerWithProof};
 use crate::pokergame::seat::{ClientSeat,Seat};
 use crate::pokergame::side_pot::SidePot;
 use poker_protocol::z_poker::{MentalPokerGame, GameConfig};
-use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Scalar, ElGamalCiphertextGeneric, RistrettoCurve};
-use curve25519_dalek::traits::Identity;
+use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Scalar};
 use poker_protocol::z_poker::convert::{ecpoint_to_hex, scalar_to_hex};
 use merlin::Transcript;
+use poker_protocol::crypto::CurvePoint;
 const MIN_START_NUM: u32 = 3;
+use poker_protocol::crypto::CurveScalar;
 
 
 
@@ -1352,9 +1353,9 @@ impl Table {
         if is_join_before_start {
             let round = round_json.to_mask_and_shuffle_round().map_err(|e| JoinError::Crypto(e))?;
             let mut transcript = Transcript::new(b"poker_protocol_mask_shuffle");
-            let input_cards = self.mental_poker_game.deck_encrypted.iter().map(|c| c.clone().into()).collect::<Vec<_>>();
+            let input_cards = self.mental_poker_game.deck_encrypted.iter().map(|c| c.clone()).collect::<Vec<_>>();
             if !round.remask_proof.verify( &input_cards,
-            &round.mask_cards.iter().map(|c| c.clone().into()).collect::<Vec<_>>(),
+            &round.mask_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
              &player_pk, &mut transcript) {
                 return Err(JoinError::InvalidRemaskProof);
             }
@@ -1362,8 +1363,8 @@ impl Table {
             let current_agg_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
             let share_pk = current_agg_pk + &player_pk;
             if round.proof.verify(
-                &round.mask_cards.iter().map(|c| c.clone().into()).collect::<Vec<_>>(),
-                &round.output_cards.iter().map(|c| c.clone().into()).collect::<Vec<_>>(),
+                &round.mask_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
+                &round.output_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
                 &share_pk,
                 &mut transcript,
             ).is_err() {
@@ -1421,8 +1422,8 @@ impl Table {
         let input_cards = self.mental_poker_game.deck_encrypted.clone();
         let mut transcript = Transcript::new(b"poker_protocol_player_shuffle");
         if proof.verify(
-            &input_cards.iter().map(|c| c.clone().into()).collect::<Vec<_>>(),
-            &output_cards.iter().map(|c| c.clone().into()).collect::<Vec<_>>(),
+            &input_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
+            &output_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
             &current_agg_pk,
             &mut transcript,
         ).is_err() {
@@ -1465,11 +1466,8 @@ impl Table {
         }
         let user_readable_cards = user_readable_cards.unwrap();
         let mut transcript = merlin::Transcript::new(b"zk_poker_reconstruct");
-        let output_cards_generic: Vec<_> = output_cards.iter().map(|c| ElGamalCiphertextGeneric::<RistrettoCurve>::from(*c)).collect();
-        let swap_cards_generic: Vec<_> = swap_cards.iter().map(|c| ElGamalCiphertextGeneric::<RistrettoCurve>::from(*c)).collect();
-        let user_readable_cards_generic: Vec<_> = user_readable_cards.readable_cards.iter().map(|c| ElGamalCiphertextGeneric::<RistrettoCurve>::from(*c)).collect();
-        if proof.verify(&self.reconstruct_state.cards, &output_cards_generic,
-        &swap_cards_generic, &user_readable_cards_generic,
+        if proof.verify(&self.reconstruct_state.cards, &output_cards,
+        &swap_cards, &user_readable_cards.readable_cards,
         &player, &mut transcript).is_err(){
             return Err("Invalid reconstruct proof".to_string());
         }

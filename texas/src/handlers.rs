@@ -20,7 +20,7 @@ use crate::pokergame::table::{JoinError, JoinResult};
 use poker_protocol::z_poker::protocol::ClientPlayer;
 use poker_protocol::crypto::EcPoint;
 use poker_protocol::z_poker::convert::hex_to_ecpoint;
-use curve25519_dalek::ristretto::CompressedRistretto;
+use poker_protocol::crypto::CurvePoint;
 use sui_sdk::sui_crypto::SuiVerifier;
 
 #[derive(Clone)]
@@ -288,15 +288,12 @@ pub async fn join_game_and_shuffle(
         }
     };
 
-    let player_pk = match hex::decode(&body.pk_hex)
-        .ok()
-        .and_then(|bytes| CompressedRistretto::from_slice(&bytes).ok().and_then(|c| c.decompress()))
-    {
-        Some(pk) => {
+    let player_pk = match hex_to_ecpoint(&body.pk_hex) {
+        Ok(pk) => {
             tracing::debug!("[join_game_and_shuffle] pk_hex decoded to EcPoint successfully");
             pk
         }
-        None => {
+        Err(_) => {
             tracing::warn!("[join_game_and_shuffle] invalid pk_hex, cannot decode to EcPoint: {}", body.pk_hex);
             return err_resp(StatusCode::BAD_REQUEST, "Invalid pk_hex");
         }
@@ -678,10 +675,10 @@ fn verify_sui_wallet_signature(
         ));
     }
 
-    let ecpoint: Option<EcPoint> = CompressedRistretto::from_slice(&pk_bytes).ok().and_then(|c| c.decompress());
+    let ecpoint: Option<EcPoint> = <EcPoint as CurvePoint>::from_compressed(&pk_bytes);
     let pk_hex = match ecpoint {
         Some(point) => {
-            let hex = hex::encode(point.compress().as_bytes());
+            let hex = hex::encode(point.compress().as_ref());
             tracing::debug!("[verify_sui_wallet_signature] derived pk_hex={}", hex);
             hex
         }

@@ -1,14 +1,11 @@
 use wasm_bindgen::prelude::*;
 use serde::{Serialize, Deserialize};
 use poker_protocol::z_poker::protocol::ClientPlayer;
-use poker_protocol::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext};
+use poker_protocol::crypto::{ElGamalCiphertext, Scalar, EcPoint, Plaintext, DefaultCurve, CurveScalar, CurvePoint};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::crypto::types::BASE_G;
 use rand_core::OsRng;
-use curve25519_dalek::ristretto::CompressedRistretto;
-use curve25519_dalek::traits::Identity;
 use serde_wasm_bindgen;
-use poker_protocol::crypto::RistrettoCurve;
 
 #[wasm_bindgen]
 extern "C" {
@@ -31,16 +28,26 @@ fn hex_to_scalar(hex_str: &str) -> Result<Scalar, String> {
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
-    Option::from(Scalar::from_canonical_bytes(arr)).ok_or_else(|| "Invalid scalar value".to_string())
+    Ok(Scalar::from_bytes_mod_order(&arr))
 }
 
 pub fn ecpoint_to_hex(p: &EcPoint) -> String {
-    hex::encode(p.compress().as_bytes())
+    hex::encode(p.compress().as_ref())
 }
 
 fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
     let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    CompressedRistretto::from_slice(&bytes).ok().and_then(|c| c.decompress()).ok_or_else(|| "Invalid EC point".to_string())
+    if bytes.len() != 48 {
+        return Err("EC point must be 48 bytes (BLS12-381 compressed)".to_string());
+    }
+    let mut arr = [0u8; 48];
+    arr.copy_from_slice(&bytes);
+    let ct_opt = EcPoint::from_compressed(&arr);
+    if ct_opt.is_some().into() {
+        Ok(ct_opt.unwrap())
+    } else {
+        Err("Invalid EC point".to_string())
+    }
 }
 
 fn ct_to_json(ct: &ElGamalCiphertext) -> String {
@@ -51,7 +58,7 @@ fn ct_to_json(ct: &ElGamalCiphertext) -> String {
     )
 }
 
-fn ct_generic_to_json(ct: &poker_protocol::crypto::ElGamalCiphertextGeneric<RistrettoCurve>) -> String {
+fn ct_generic_to_json(ct: &poker_protocol::crypto::ElGamalCiphertextGeneric<DefaultCurve>) -> String {
     format!(
         r#"{{"c1_hex":"{}","c2_hex":"{}"}}"#,
         ecpoint_to_hex(&ct.c1),
@@ -98,7 +105,7 @@ fn json_to_ct_vec(json_str: &str) -> Result<Vec<ElGamalCiphertext>, String> {
     Ok(result)
 }
 
-fn reveal_token_proof_to_json(proof: &RevealTokenProof<RistrettoCurve>) -> String {
+fn reveal_token_proof_to_json(proof: &RevealTokenProof<DefaultCurve>) -> String {
     format!(
         r#"{{"user_public_key_hex":"{}","commitment_t1_hex":"{}","commitment_t2_hex":"{}","response_s_hex":"{}"}}"#,
         ecpoint_to_hex(&proof.user_public_key),
@@ -108,7 +115,7 @@ fn reveal_token_proof_to_json(proof: &RevealTokenProof<RistrettoCurve>) -> Strin
     )
 }
 
-fn json_to_reveal_token_proof(json_str: &str) -> Result<RevealTokenProof<RistrettoCurve>, String> {
+fn json_to_reveal_token_proof(json_str: &str) -> Result<RevealTokenProof<DefaultCurve>, String> {
     let val: serde_json::Value = serde_json::from_str(json_str)
         .map_err(|e| format!("JSON parse error: {}", e))?;
     Ok(RevealTokenProof {
@@ -295,7 +302,7 @@ impl WasmClientPlayer {
 
         let round = self.inner.shuffle(&deck, &agg_pk);
 
-        fn schnorr_proof_to_json(proof: &poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<RistrettoCurve>) -> String {
+        fn schnorr_proof_to_json(proof: &poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>) -> String {
             let responses_hex: Vec<String> = proof.responses.iter().map(scalar_to_hex).collect();
             format!(
                 r#"{{"commitment_hex":"{}","responses_hex":[{}]}}"#,
@@ -343,7 +350,7 @@ impl WasmClientPlayer {
             scalar_to_hex(&ms.remask_proof.nonce),
         );
 
-        fn schnorr_proof_to_json(proof: &poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<RistrettoCurve>) -> String {
+        fn schnorr_proof_to_json(proof: &poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>) -> String {
             let responses_hex: Vec<String> = proof.responses.iter().map(scalar_to_hex).collect();
             format!(
                 r#"{{"commitment_hex":"{}","responses_hex":[{}]}}"#,
@@ -553,7 +560,7 @@ impl WasmClientPlayer {
         let result = self.inner.reconstruct(&origin_cards, &user_readable_cards, &coefficient)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
-        fn schnorr_proof_to_json(proof: &poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<RistrettoCurve>) -> String {
+        fn schnorr_proof_to_json(proof: &poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>) -> String {
             let responses_hex: Vec<String> = proof.responses.iter().map(scalar_to_hex).collect();
             format!(
                 r#"{{"commitment_hex":"{}","responses_hex":[{}]}}"#,
@@ -562,7 +569,7 @@ impl WasmClientPlayer {
             )
         }
 
-        fn chaum_pedersen_proof_to_json(proof: &poker_protocol::zk_shuffle::reconstruction::ChaumPedersenDLEQProof<RistrettoCurve>) -> String {
+        fn chaum_pedersen_proof_to_json(proof: &poker_protocol::zk_shuffle::reconstruction::ChaumPedersenDLEQProof<DefaultCurve>) -> String {
             format!(
                 r#"{{"commitment_a_hex":"{}","commitment_b_hex":"{}","response_hex":"{}"}}"#,
                 ecpoint_to_hex(&proof.commitment_a),
@@ -571,7 +578,7 @@ impl WasmClientPlayer {
             )
         }
 
-        fn reconstruction_dleq_proof_to_json(proof: &poker_protocol::zk_shuffle::reconstruction::ReconstructionDLEQProof<RistrettoCurve>) -> String {
+        fn reconstruction_dleq_proof_to_json(proof: &poker_protocol::zk_shuffle::reconstruction::ReconstructionDLEQProof<DefaultCurve>) -> String {
             format!(
                 r#"{{"commitment_hex":"{}","response_hex":"{}","nonce_hex":"{}"}}"#,
                 ecpoint_to_hex(&proof.commitment),
@@ -580,7 +587,7 @@ impl WasmClientPlayer {
             )
         }
 
-        fn swap_out_card_proof_to_json(proof: &poker_protocol::zk_shuffle::reconstruction::SwapOutCardProof<RistrettoCurve>) -> String {
+        fn swap_out_card_proof_to_json(proof: &poker_protocol::zk_shuffle::reconstruction::SwapOutCardProof<DefaultCurve>) -> String {
             format!(
                 r#"{{"user_readable_card":{},"swap_out_card":{},"chaum_pedersen_proof":{}}}"#,
                 ct_generic_to_json(&proof.user_readable_card),
