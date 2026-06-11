@@ -1,153 +1,142 @@
-import React, { useRef, useContext } from 'react';
-import Container from '../components/layout/Container';
-import { Navigate, Link } from 'react-router-dom';
-import HeadingWithLogo from '../components/typography/HeadingWithLogo';
-import Button from '../components/buttons/Button';
-import { Input } from '../components/forms/Input';
-import { Form } from '../components/forms/Form';
-import { FormGroup } from '../components/forms/FormGroup';
-import { ButtonGroup } from '../components/forms/ButtonGroup';
-import { Label } from '../components/forms/Label';
-import RelativeWrapper from '../components/layout/RelativeWrapper';
-import ShowPasswordButton from '../components/buttons/ShowPasswordButton';
+import React, { useContext } from 'react';
+import { Navigate } from 'react-router-dom';
 import useScrollToTopOnPageLoad from '../hooks/useScrollToTopOnPageLoad';
 import authContext from '../context/auth/authContext';
-import { useContentContext } from '../context/content/contentContext';
 import { TiledBackgroundImage } from '../components/decoration/TiledBackgroundImage';
 import { ConnectButton } from '@mysten/dapp-kit-react/ui';
 import styled from 'styled-components';
+import LogoWithText from '../components/logo/LogoWithText';
+
+const PageWrapper = styled.div`
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+  padding: 6rem 2rem 3rem;
+  background-color: #f8fafc;
+`;
+
+
+const RegisterCard = styled.div`
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 420px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 20px;
+  padding: 2.5rem 2rem;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+`;
+
+const LogoWrapper = styled.div`
+  display: flex;
+  justify-content: center;
+  margin-bottom: 2rem;
+`;
+
+const FormTitle = styled.h2`
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 1.5rem;
+  font-weight: 700;
+  text-align: center;
+  color: #0f172a;
+  margin-bottom: 1.5rem;
+  letter-spacing: -0.02em;
+`;
 
 const WalletSection = styled.div`
   display: flex;
   flex-direction: column;
   align-items: center;
-  margin-bottom: 1.5rem;
-  padding: 1rem;
-  border-radius: 1rem;
-  background-color: ${(props) => props.theme.colors.lightestBg};
+  margin-bottom: 1.25rem;
+  padding: 1.5rem 1.25rem;
+  border-radius: 16px;
+  background: rgba(241, 245, 249, 0.6);
+  border: 1.5px dashed rgba(77, 162, 255, 0.25);
+  gap: 0.5rem;
+  transition: all 0.3s ease;
+
+  &:hover {
+    border-color: rgba(77, 162, 255, 0.45);
+    background: rgba(241, 245, 249, 0.8);
+  }
 `;
 
-const Divider = styled.div`
+const SuiLogoWrapper = styled.div`
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: rgba(77, 162, 255, 0.1);
+  border: 1px solid rgba(77, 162, 255, 0.2);
   display: flex;
   align-items: center;
-  margin: 1rem 0;
-  width: 100%;
+  justify-content: center;
+  margin-bottom: 0.5rem;
 
-  &::before,
-  &::after {
-    content: '';
-    flex: 1;
-    border-bottom: 1px solid ${(props) => props.theme.colors.darkBg};
+  svg {
+    width: 24px;
+    height: 24px;
   }
+`;
 
-  span {
-    padding: 0 1rem;
-    color: ${(props) => props.theme.colors.fontColorDarkLighter};
-    font-size: 0.9rem;
-  }
+const WalletTitle = styled.div`
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #0f172a;
+  text-align: center;
+`;
+
+const WalletDesc = styled.div`
+  font-size: 0.78rem;
+  color: #64748b;
+  text-align: center;
+  margin-bottom: 0.5rem;
 `;
 
 const RegistrationPage: React.FC = () => {
-  const { getLocalizedString } = useContentContext();
-  const { register, isLoggedIn } = useContext(authContext)!;
+  const { isLoggedIn } = useContext(authContext)!;
 
   useScrollToTopOnPageLoad();
-
-  const emailRef = useRef<HTMLInputElement>(null);
-  const passwordRef = useRef<HTMLInputElement>(null);
-  const nicknameRef = useRef<HTMLInputElement>(null);
 
   if (isLoggedIn) return <Navigate to="/" />;
 
   return (
-    <RelativeWrapper>
+    <PageWrapper>
       <TiledBackgroundImage />
-      <Container
-        fullHeight
-        flexDirection="column"
-        justifyContent="center"
-        alignItems="center"
-        padding="6rem 2rem 2rem 2rem"
-        contentCenteredMobile
-      >
-        <Form
-          onSubmit={(e) => {
-            e.preventDefault();
+      <RegisterCard>
+        <LogoWrapper>
+          <LogoWithText />
+        </LogoWrapper>
+        <FormTitle>Sign in with Sui Wallet</FormTitle>
 
-            const name = nicknameRef.current?.value;
-            const email = emailRef.current?.value;
-            const password = passwordRef.current?.value;
-
-            if (
-              name &&
-              email &&
-              password &&
-              name.length >= 5 &&
-              name.length <= 12 &&
-              email.length >= 0 &&
-              password.length >= 6
-            ) {
-              register(name, email, password);
-            }
-          }}
-        >
-          <HeadingWithLogo textCentered hideIconOnMobile={false}>
-            {getLocalizedString('registration_page-header_txt')}
-          </HeadingWithLogo>
-
-          <WalletSection>
-            <ConnectButton />
-          </WalletSection>
-
-          <Divider>
-            <span>OR</span>
-          </Divider>
-
-          <FormGroup>
-            <Label htmlFor="email">
-              {getLocalizedString('registration_page-email_lbl_txt')}
-            </Label>
-            <Input type="email" name="email" ref={emailRef} required />
-          </FormGroup>
-          <FormGroup>
-            <Label htmlFor="nickname">
-              {getLocalizedString('registration_page-nickname_lbl_txt')}
-            </Label>
-            <Input
-              type="text"
-              name="nickname"
-              autoComplete="off"
-              ref={nicknameRef}
-              minLength={5}
-              maxLength={12}
-              required
-            />
-          </FormGroup>
-          <FormGroup>
-            <Label htmlFor="password">
-              {getLocalizedString('registration_page-password_lbl_txt')}
-            </Label>
-            <ShowPasswordButton passwordRef={passwordRef} />
-            <Input
-              type="password"
-              name="password"
-              minLength={6}
-              autoComplete="new-password"
-              ref={passwordRef}
-              required
-            />
-          </FormGroup>
-          <ButtonGroup>
-            <Button primary type="submit" fullWidth>
-              {getLocalizedString('registration_page-cta_btn_txt')}
-            </Button>
-            <Link to="/login">
-              {getLocalizedString('registration_page-already_account_txt')}
-            </Link>
-          </ButtonGroup>
-        </Form>
-      </Container>
-    </RelativeWrapper>
+        <WalletSection>
+          <SuiLogoWrapper>
+            <svg viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path
+                d="M18 2C9.163 2 2 9.163 2 18s7.163 16 16 16 16-7.163 16-16S26.837 2 18 2zm0 29.091c-7.228 0-13.09-5.863-13.09-13.091S10.772 4.909 18 4.909 31.09 10.772 31.09 18 25.228 31.091 18 31.091z"
+                fill="#4DA2FF"
+                fillOpacity="0.2"
+              />
+              <path
+                d="M26.5 14.5c-1.5-3-5-5-8.5-5s-7 2-8.5 5c-.5 1-.5 2.5 0 3.5 1 2 3 3.5 5 4.5 2 1 4.5 1.5 6.5 1s4-1.5 5-3c1-1.5 1.5-3.5.5-6z"
+                stroke="#4DA2FF"
+                strokeWidth="2"
+                fill="none"
+                strokeLinecap="round"
+              />
+              <circle cx="18" cy="18" r="2" fill="#4DA2FF" />
+            </svg>
+          </SuiLogoWrapper>
+          <WalletTitle>Sign in with Sui Wallet</WalletTitle>
+          <WalletDesc>One-click authentication</WalletDesc>
+          <ConnectButton />
+        </WalletSection>
+      </RegisterCard>
+    </PageWrapper>
   );
 };
 

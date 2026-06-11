@@ -1689,7 +1689,9 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         };
 
         let tables_info = state.get_current_tables().await;
+        let players_info = state.get_current_players().await;
         let _ = io.emit(actions::TABLES_UPDATED, &tables_info).await;
+        let _ = io.emit(actions::PLAYERS_UPDATED, &players_info).await;
         let _ = s.emit(actions::TABLE_LEFT, &TableLeftPayload { tables: tables_info, table_id });
 
         if let Some(msg) = &leave_msg {

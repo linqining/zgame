@@ -3,6 +3,8 @@ import styled, { css } from 'styled-components';
 interface ButtonProps {
   primary?: boolean;
   secondary?: boolean;
+  dark?: boolean;
+  darkSecondary?: boolean;
   small?: boolean;
   large?: boolean;
   fullWidth?: boolean;
@@ -12,7 +14,7 @@ interface ButtonProps {
 }
 
 const Button = styled.button.withConfig({
-  shouldForwardProp: (prop) => !['primary', 'secondary', 'small', 'large', 'fullWidth', 'fullWidthOnMobile'].includes(prop),
+  shouldForwardProp: (prop) => !['primary', 'secondary', 'dark', 'darkSecondary', 'small', 'large', 'fullWidth', 'fullWidthOnMobile'].includes(prop),
 })<ButtonProps>`
   display: inline-flex;
   align-items: center;
@@ -117,6 +119,88 @@ const Button = styled.button.withConfig({
         border: 2px solid grey;
         background-color: grey;
         color: ${({ theme }) => theme.colors.fontColorDark};
+      }
+    `}
+
+  ${({ dark, large, small }) =>
+    dark &&
+    css`
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      color: white;
+      border: none;
+      box-shadow: 0 4px 20px rgba(102, 126, 234, 0.35);
+      padding: ${() => {
+        if (large) return 'calc(1rem - 2px) calc(2rem - 2px)';
+        else if (small) return 'calc(0.5rem - 2px) calc(1rem - 2px)';
+        else return 'calc(0.75rem - 2px) calc(1.5rem - 2px)';
+      }};
+
+      &,
+      &:visited {
+        background: linear-gradient(135deg, #667eea, #764ba2);
+        color: white;
+      }
+
+      &:hover,
+      &:active {
+        background: linear-gradient(135deg, #7b8ff0, #8559ad);
+        transform: translateY(-2px);
+        box-shadow: 0 12px 35px rgba(102, 126, 234, 0.55);
+        color: white;
+      }
+
+      &:focus {
+        outline: none;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.3);
+        color: white;
+      }
+
+      &:disabled {
+        background: grey;
+        box-shadow: none;
+        color: white;
+      }
+    `}
+
+  ${({ darkSecondary, large, small }) =>
+    darkSecondary &&
+    css`
+      background: rgba(241, 245, 249, 0.8);
+      color: #0f172a;
+      border: 1px solid rgba(203, 213, 225, 0.8);
+      backdrop-filter: blur(10px);
+      padding: ${() => {
+        if (large) return 'calc(1rem - 2px) calc(2rem - 2px)';
+        else if (small) return 'calc(0.5rem - 2px) calc(1rem - 2px)';
+        else return 'calc(0.75rem - 2px) calc(1.5rem - 2px)';
+      }};
+
+      &,
+      &:visited {
+        background: rgba(241, 245, 249, 0.8);
+        color: #0f172a;
+        border-color: rgba(203, 213, 225, 0.8);
+      }
+
+      &:hover,
+      &:active {
+        background: rgba(226, 232, 240, 0.9);
+        border-color: #3b82f6;
+        color: #0f172a;
+        transform: translateY(-2px);
+      }
+
+      &:focus {
+        outline: none;
+        border-color: #667eea;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+        color: #0f172a;
+      }
+
+      &:disabled {
+        background: grey;
+        border-color: grey;
+        color: white;
       }
     `}
 

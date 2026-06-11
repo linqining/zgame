@@ -9,6 +9,8 @@ import ProtectedRoute from './ProtectedRoute';
 import StaticPage from '../../pages/StaticPage';
 import NotFoundPage from '../../pages/NotFoundPage';
 import contentContext from '../../context/content/contentContext';
+import SecretPokerLobby from '../../pages/SecretPokerLobby';
+import SecretPokerGameTable from '../../pages/SecretPokerGameTable';
 
 const RoutesComponent: React.FC = () => {
   const { staticPages } = useContext(contentContext)!;
@@ -42,6 +44,8 @@ const RoutesComponent: React.FC = () => {
           </ProtectedRoute>
         }
       />
+      <Route path="/lobby" element={<SecretPokerLobby />} />
+      <Route path="/game/:gameId" element={<SecretPokerGameTable />} />
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
   );

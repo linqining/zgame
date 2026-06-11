@@ -1,7 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom';
 import CloseButton from '../buttons/CloseButton';
-import HeadingWithLogo from '../typography/HeadingWithLogo';
 import Button from '../buttons/Button';
 import styled from 'styled-components';
 import Text from '../typography/Text';
@@ -16,7 +15,9 @@ const ModalWrapper = styled.div`
   width: 100%;
   height: 100%;
   z-index: 101;
-  background-color: rgba(0, 0, 0, 0.5);
+  background-color: rgba(15, 23, 42, 0.35);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 `;
 
 const StyledModal = styled.div`
@@ -24,21 +25,27 @@ const StyledModal = styled.div`
   z-index: 101;
   max-width: 480px;
   min-width: 264px;
-  width: '100%';
+  width: 100%;
   text-align: center;
-  background-color: ${({ theme }) => theme.colors.lightestBg};
-  border-radius: ${({ theme }) => theme.other.stdBorderRadius};
-  padding: 1.5rem;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 20px;
+  padding: 2rem 1.5rem;
   margin: 0 1rem;
-  box-shadow: ${({ theme }) => theme.other.cardDropShadow};
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
   opacity: 0;
-  animation: fade-in 0.75s ease-out forwards;
+  animation: fade-in 0.5s ease-out forwards;
+
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
 
   @media screen and (min-width: 1024px) {
-    padding: 2rem;
+    padding: 2.5rem 2rem;
     margin: 0;
     min-width: 400px;
-    max-width: 600px;
+    max-width: 520px;
   }
 `;
 
@@ -47,20 +54,52 @@ const ModalContent = styled.div`
   flex-direction: column;
   justify-content: center;
   align-items: center;
+  gap: 1.5rem;
+`;
 
-  & > *:not(:last-child) {
-    margin-bottom: 2rem;
-  }
-
-  & > :first-child {
-    margin-bottom: 0;
-  }
+const ModalHeading = styled.h2`
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: -0.02em;
+  margin: 0;
 `;
 
 const IconWrapper = styled.div`
   position: absolute;
   top: 1rem;
-  right: 1.5rem;
+  right: 1rem;
+
+  button {
+    color: #64748b !important;
+
+    &:hover {
+      color: #0f172a !important;
+    }
+  }
+`;
+
+const ModalButton = styled(Button)`
+  background: linear-gradient(135deg, #667eea, #764ba2) !important;
+  color: white !important;
+  border: none !important;
+  border-radius: 10px !important;
+  font-weight: 600 !important;
+  padding: 0.65rem 2rem !important;
+  box-shadow: 0 4px 20px rgba(102, 126, 234, 0.25) !important;
+  transition: all 0.35s cubic-bezier(0.22, 1, 0.36, 1) !important;
+
+  &:hover:not(:disabled) {
+    box-shadow: 0 6px 24px rgba(102, 126, 234, 0.35) !important;
+    transform: translateY(-1px);
+  }
+`;
+
+const ModalText = styled(Text)`
+  color: #475569;
+  font-size: 0.95rem;
+  line-height: 1.6;
 `;
 
 interface ModalProps {
@@ -92,22 +131,20 @@ const Modal: React.FC<ModalProps> = ({
           <CloseButton clickHandler={onClose} />
         </IconWrapper>
         <ModalContent>
-          <HeadingWithLogo textCentered hideIconOnMobile={false}>
-            {headingText}
-          </HeadingWithLogo>
+          <ModalHeading>{headingText}</ModalHeading>
           {children ? (
             children
           ) : (
-            <Text>
+            <ModalText>
               Lorem ipsum, dolor sit amet consectetur adipisicing elit.
               Blanditiis error aspernatur vel fugiat quisquam aut tempore,
               consequatur quo. Neque officiis magni molestias quasi, accusamus
               rem sunt incidunt inventore esse. Modi.
-            </Text>
+            </ModalText>
           )}
-          <Button primary onClick={onBtnClicked}>
+          <ModalButton primary onClick={onBtnClicked}>
             {btnText}
-          </Button>
+          </ModalButton>
         </ModalContent>
       </StyledModal>
     </ModalWrapper>,
@@ -117,14 +154,14 @@ const Modal: React.FC<ModalProps> = ({
 
 const initialModalData = {
   children: () => (
-    <Text>
+    <ModalText>
       Lorem ipsum dolor sit amet consectetur adipisicing elit. Reiciendis rerum
       omnis, minima perferendis, illum quasi expedita quo saepe fuga nulla
       cupiditate. Reprehenderit fugit placeat error corrupti illo ut? Numquam
       repellat molestias autem porro. Autem enim asperiores voluptatem itaque
       libero aspernatur cupiditate porro atque vel. Esse numquam tempora hic
       soluta excepturi?
-    </Text>
+    </ModalText>
   ),
   headingText: 'Modal',
   btnText: 'Button',

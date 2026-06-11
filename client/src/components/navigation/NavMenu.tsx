@@ -7,7 +7,6 @@ import ColoredText from '../typography/ColoredText';
 import ChipsAmount from '../user/ChipsAmount';
 import { Link } from 'react-router-dom';
 import lobbyIcon from '../../assets/icons/lobby-icon.svg';
-import newsIcon from '../../assets/icons/news-icon.svg';
 import userIcon from '../../assets/icons/user-icon.svg';
 import contentContext from '../../context/content/contentContext';
 import socketContext from '../../context/websocket/socketContext';
@@ -23,7 +22,9 @@ const NavMenuWrapper = styled.div`
   width: 100%;
   height: 100%;
   z-index: 100;
-  background-color: rgba(0, 0, 0, 0.3);
+  background-color: rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 `;
 
 const StyledNavMenu = styled.div`
@@ -34,8 +35,9 @@ const StyledNavMenu = styled.div`
   right: 0;
   width: 320px;
   height: 100%;
-  background-color: ${(props) => props.theme.colors.lightestBg};
-  box-shadow: ${(props) => props.theme.other.navMenuDropShadow};
+  background: rgba(255, 255, 255, 0.95);
+  border-left: 1px solid rgba(226, 232, 240, 0.9);
+  box-shadow: -8px 0 40px rgba(0, 0, 0, 0.08);
   overflow: hidden;
 
   @media screen and (max-width: 400px) {
@@ -44,44 +46,68 @@ const StyledNavMenu = styled.div`
 `;
 
 const MenuHeader = styled.div`
-  padding: 0.5rem 1rem 0;
+  padding: 1rem 1.25rem 0;
   justify-self: flex-start;
 `;
 
 const MenuItem = styled(Link)`
   display: flex;
-  padding: 0.75rem 1rem;
+  padding: 0.85rem 1.25rem;
   justify-content: space-between;
+  align-items: center;
   width: 100%;
   text-align: right;
-  font-family: ${(props) => props.theme.fonts.fontFamilySansSerif};
-  color: ${(props) => props.theme.colors.primaryCta} !important;
-  border-bottom: 1px solid ${(props) => props.theme.colors.lightestBg};
-  background-color: ${(props) => props.theme.colors.lightBg} !important;
-  font-size: ${(props) => props.theme.fonts.fontSizeParagraph};
-  font-weight: normal;
+  font-family: 'Inter', -apple-system, sans-serif;
+  color: #0f172a !important;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.6);
+  background-color: transparent !important;
+  font-size: 0.95rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: all 0.2s ease;
+
+  img {
+    opacity: 0.6;
+    transition: opacity 0.2s ease;
+  }
 
   &:hover {
-    background-color: ${(props) => props.theme.colors.goldenColor} !important;
+    background-color: rgba(102, 126, 234, 0.08) !important;
+    color: #667eea !important;
+
+    img {
+      opacity: 1;
+    }
   }
 
   &:focus {
     outline: none;
-    border-left: 4px solid ${(props) => props.theme.colors.primaryCta};
+    border-left: 3px solid #667eea;
   }
 `;
 
 const MenuBody = styled.div`
   overflow-y: auto;
+  margin-top: 0.5rem;
 
   &::-webkit-scrollbar {
-    width: 0.5rem;
+    width: 0.4rem;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: rgba(203, 213, 225, 0.6);
+    border-radius: 4px;
   }
 `;
 
 const MenuFooter = styled.div`
-  padding: 0.5rem;
+  padding: 1rem 1.25rem;
   margin: auto 0 0 0;
+  border-top: 1px solid rgba(226, 232, 240, 0.6);
 `;
 
 const HorizontalWrapper = styled.div`
@@ -89,21 +115,72 @@ const HorizontalWrapper = styled.div`
   margin: 1.5rem auto;
   justify-content: space-between;
   align-items: center;
+  gap: 0.75rem;
 
   ${Button} {
     min-width: 6.5rem;
+    background: linear-gradient(135deg, #667eea, #764ba2) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 10px !important;
+    box-shadow: 0 2px 12px rgba(102, 126, 234, 0.2) !important;
   }
 `;
 
 const SalutationText = styled(Text)`
-  font-family: ${(props) => props.theme.fonts.fontFamilySerif};
-  font-size: 1.5rem;
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: -0.02em;
+
+  ${ColoredText} {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+`;
+
+const OnlineText = styled(Text)`
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 0.85rem;
+  color: #64748b;
+  margin-top: 0.25rem;
+
+  ${ColoredText} {
+    color: #10b981;
+    font-weight: 600;
+  }
 `;
 
 const IconWrapper = styled.div`
   position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
+  top: 0.75rem;
+  right: 0.75rem;
+
+  button {
+    color: #64748b !important;
+
+    &:hover {
+      color: #0f172a !important;
+    }
+  }
+`;
+
+const LogoutButton = styled(Button)`
+  background: rgba(241, 245, 249, 0.8) !important;
+  color: #475569 !important;
+  border: 1px solid rgba(226, 232, 240, 0.8) !important;
+  border-radius: 10px !important;
+  font-weight: 500 !important;
+  transition: all 0.25s ease !important;
+
+  &:hover {
+    border-color: rgba(239, 68, 68, 0.4) !important;
+    color: #ef4444 !important;
+    background: rgba(239, 68, 68, 0.06) !important;
+  }
 `;
 
 interface NavMenuProps {
@@ -164,9 +241,9 @@ const NavMenu: React.FC<NavMenuProps> = ({
             <ColoredText>{userName}!</ColoredText>
           </SalutationText>
           {players && (
-            <SalutationText textAlign="left">
+            <OnlineText textAlign="left">
               {getLocalizedString('game_online-lbl')} <ColoredText>{players.length}</ColoredText>
-            </SalutationText>
+            </OnlineText>
           )}
           <HorizontalWrapper>
             <ChipsAmount
@@ -189,8 +266,8 @@ const NavMenu: React.FC<NavMenuProps> = ({
             <img
               src={lobbyIcon}
               alt="Lobby"
-              width="25"
-              style={{ width: '25px' }}
+              width="22"
+              style={{ width: '22px' }}
             />
           </MenuItem>
           <MenuItem
@@ -203,27 +280,14 @@ const NavMenu: React.FC<NavMenuProps> = ({
             <img
               src={userIcon}
               alt="Dashboard"
-              width="25"
-              style={{ width: '25px' }}
+              width="22"
+              style={{ width: '22px' }}
             />
           </MenuItem>
-          <MenuItem
-            to="/news"
-            onClick={() => {
-              onClose();
-            }}
-          >
-            {getLocalizedString('navmenu-menu_item-news_txt')}
-            <img
-              src={newsIcon}
-              alt="News"
-              width="25"
-              style={{ width: '25px' }}
-            />
-          </MenuItem>
+
         </MenuBody>
         <MenuFooter>
-          <Button
+          <LogoutButton
             onClick={() => {
               cleanUp();
               logout();
@@ -234,7 +298,7 @@ const NavMenu: React.FC<NavMenuProps> = ({
             small
           >
             {getLocalizedString('navmenu-logout_btn')}
-          </Button>
+          </LogoutButton>
         </MenuFooter>
       </StyledNavMenu>
     </NavMenuWrapper>

@@ -2,14 +2,13 @@ import React from 'react';
 import Container from '../components/layout/Container';
 import CenteredBlock from '../components/layout/CenteredBlock';
 import Heading from '../components/typography/Heading';
-import Button from '../components/buttons/Button';
-import { Link } from 'react-router-dom';
 import Hider from '../components/layout/Hider';
 import illustrationMobile from '../assets/img/main-illustration-mobile@2x.png';
 import illustrationDesktop from '../assets/img/main-illustration-desktop@2x.png';
 import styled from 'styled-components';
 import useScrollToTopOnPageLoad from '../hooks/useScrollToTopOnPageLoad';
 import { useContentContext } from '../context/content/contentContext';
+import { ConnectButton } from '@mysten/dapp-kit-react/ui';
 
 const MarketingHeadline = styled(Heading)`
   @media screen and (min-width: 1024px) {
@@ -45,19 +44,7 @@ const Landing: React.FC = () => {
             }}
           />
         <Wrapper>
-          <Button
-            as={Link}
-            to="/register"
-            large
-            primary
-            fullWidthOnMobile
-            autoFocus
-          >
-            {getLocalizedString('navbar-register_btn')}
-          </Button>
-          <Button as={Link} to="/login" large secondary fullWidthOnMobile>
-            {getLocalizedString('navbar-login_btn')}
-          </Button>
+          <ConnectButton />
         </Wrapper>
       </CenteredBlockWithAnimation>
       <Hider hideOnMobile>
@@ -163,18 +150,9 @@ const Wrapper = styled.div`
   max-width: 624px;
   margin: 0 auto;
 
-  & ${Button}:not(:first-child) {
-    margin-top: 1rem;
-  }
-
   @media screen and (min-width: 1024px) {
     margin: 0;
     margin-top: 1.5rem;
-
-    & ${Button}:not(:first-child) {
-      margin-left: 1rem;
-      margin-top: 0;
-    }
   }
 `;
 

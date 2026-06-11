@@ -29,15 +29,22 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
 
   const location = useLocation();
 
+  // 根据路由判断是否隐藏布局
+  const hideLayout = location.pathname.includes('/play');
+
+  // 整体已改为亮色主题，固定使用 light variant
+  const themeVariant = 'light';
+
   return (
     <div id="layout-wrapper">
-      {!location.pathname.includes('/play') && (
+      {!hideLayout && (
         <Navbar
           chipsAmount={chipsAmount}
           loggedIn={isLoggedIn}
           openModal={openModal}
           openNavMenu={openNavMenu}
           className="blur-target"
+          variant={themeVariant}
         />
       )}
       {showNavMenu && (
@@ -53,13 +60,14 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       )}
       <main className="blur-target">{children}</main>
       <WatermarkWrapper className="blur-target" />
-      {!location.pathname.includes('/play') && (
+      {/* {!hideLayout && (
         <Footer
           className="blur-target"
           setLang={setLang}
           staticPages={staticPages}
+          variant={themeVariant}
         />
-      )}
+      )} */}
       {!isCookieSet && (
         <CookieBanner clickHandler={() => setCookie('1', 365)} />
       )}

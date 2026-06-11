@@ -74,6 +74,7 @@ async fn main() -> std::io::Result<()> {
     let api_routes = Router::new()
         .route("/auth",routing::get(handlers::get_current_user).post(handlers::login))
         .route("/auth/wallet", routing::post(handlers::wallet_login))
+        .route("/auth/wallet/logout", routing::post(handlers::wallet_logout))
         .route("/users", routing::post(handlers::register))
         .route("/chips/free", routing::get(handlers::free_chips))
         .route("/tables/:table_id", routing::get(handlers::get_table))

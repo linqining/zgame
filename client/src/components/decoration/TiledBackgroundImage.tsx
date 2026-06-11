@@ -31,7 +31,7 @@ const Wrapper = styled.div`
     width: 100%;
     height: 100%;
     display: block;
-    background-color: rgba(36, 80, 105, 0.4);
+    background-color: rgba(36, 80, 105, 0.08);
     filter: blur(1px);
   }
 `;

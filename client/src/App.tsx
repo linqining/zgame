@@ -9,8 +9,9 @@ import Text from './components/typography/Text';
 import modalContext, { useModalContext } from './context/modal/modalContext';
 import config from './clientConfig';
 import GoogleAnalytics from './components/analytics/GoogleAnalytics';
+import { PlayerProvider } from './context/player/SecretPokerPlayerContext';
 
-const App: React.FC = () => {
+const AppInner: React.FC = () => {
   const { isLoading, chipsAmount, setChipsAmount, setIsLoading } = useGlobalContext();
   const { getLocalizedString } = useContentContext();
   const { openModal, closeModal } = useModalContext();
@@ -32,7 +33,8 @@ const App: React.FC = () => {
 
       setChipsAmount(chipsAmount);
     } catch (error) {
-      alert(error);
+      // alert(error);
+      console.error(error);
     } finally {
       closeModal();
     }
@@ -76,6 +78,14 @@ const App: React.FC = () => {
       )}
       {config.isProduction && <GoogleAnalytics />}
     </>
+  );
+};
+
+const App: React.FC = () => {
+  return (
+    <PlayerProvider>
+      <AppInner />
+    </PlayerProvider>
   );
 };
 

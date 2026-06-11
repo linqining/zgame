@@ -1,39 +1,139 @@
 import React, { useContext } from 'react';
 import { Link } from 'react-router-dom';
-import Container from '../components/layout/Container';
-import HeadingWithLogo from '../components/typography/HeadingWithLogo';
 import Button from '../components/buttons/Button';
-import { FormGroup } from '../components/forms/FormGroup';
-import { Label } from '../components/forms/Label';
 import { Input } from '../components/forms/Input';
 import styled from 'styled-components';
-import { Form } from '../components/forms/Form';
-import RelativeWrapper from '../components/layout/RelativeWrapper';
+import LogoWithText from '../components/logo/LogoWithText';
 import { useGlobalContext } from '../context/global/globalContext';
 import { useContentContext } from '../context/content/contentContext';
+
+const PageWrapper = styled.div`
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f1f5f9;
+  padding: 2rem;
+`;
+
+const DashboardCard = styled.div`
+  width: 100%;
+  max-width: 600px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 20px;
+  padding: 2.5rem 2rem;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+`;
+
+const LogoWrapper = styled.div`
+  display: flex;
+  justify-content: center;
+  margin-bottom: 2rem;
+`;
+
+const FormTitle = styled.h2`
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 1.5rem;
+  font-weight: 700;
+  text-align: center;
+  color: #0f172a;
+  margin-bottom: 2rem;
+  letter-spacing: -0.02em;
+`;
 
 const Wrapper = styled.div`
   display: grid;
   grid-template-columns: 1fr 1fr;
-  grid-gap: 2rem;
-  margin-bottom: 2rem;
-
-  ${FormGroup} > *~* {
-    margin: 0.5rem 0;
-  }
+  grid-gap: 1.25rem;
+  margin-bottom: 1.5rem;
 
   @media screen and (max-width: 624px) {
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    width: 100%;
-    max-width: 320px;
-
-    ${FormGroup} > *~* {
-      margin: 0.5rem 0;
-    }
+    gap: 1.25rem;
   }
+`;
+
+const FormGroup = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+`;
+
+const StyledLabel = styled.label`
+  font-size: 0.85rem;
+  color: #475569;
+  font-weight: 500;
+`;
+
+const StyledInput = styled(Input)`
+  background: #ffffff !important;
+  border: 1px solid rgba(203, 213, 225, 0.8) !important;
+  border-radius: 10px !important;
+  color: #0f172a !important;
+  height: 44px;
+  font-size: 1rem;
+
+  &:focus {
+    border-color: #667eea !important;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
+  }
+`;
+
+const ActionButton = styled(Button)`
+  background: linear-gradient(135deg, #667eea, #764ba2) !important;
+  color: white !important;
+  border: none !important;
+  border-radius: 10px !important;
+  font-weight: 600 !important;
+  height: 40px;
+  box-shadow: 0 2px 12px rgba(102, 126, 234, 0.2) !important;
+  transition: all 0.3s ease !important;
+
+  &:hover:not(:disabled) {
+    box-shadow: 0 4px 20px rgba(102, 126, 234, 0.35) !important;
+    transform: translateY(-1px);
+  }
+`;
+
+const DangerButton = styled(Button)`
+  background: rgba(241, 245, 249, 0.8) !important;
+  color: #64748b !important;
+  border: 1px solid rgba(203, 213, 225, 0.8) !important;
+  border-radius: 10px !important;
+  font-weight: 500 !important;
+  height: 40px;
+  transition: all 0.25s ease !important;
+
+  &:hover {
+    border-color: rgba(226, 232, 240, 0.9) !important;
+    color: #ef4444 !important;
+    background: rgba(241, 245, 249, 1) !important;
+  }
+`;
+
+const BackButton = styled(Button)`
+  background: transparent !important;
+  color: #64748b !important;
+  border: 1px solid rgba(203, 213, 225, 0.8) !important;
+  border-radius: 10px !important;
+  font-weight: 500 !important;
+  height: 40px;
+  transition: all 0.25s ease !important;
+
+  &:hover {
+    border-color: rgba(102, 126, 234, 0.4) !important;
+    color: #667eea !important;
+  }
+`;
+
+const FullWidthGroup = styled.div`
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
 `;
 
 const Dashboard: React.FC = () => {
@@ -41,54 +141,43 @@ const Dashboard: React.FC = () => {
   const { userName, email } = useGlobalContext();
 
   return (
-    <RelativeWrapper>
-      <Container
-        fullHeight
-        flexDirection="column"
-        justifyContent="center"
-        contentCenteredMobile
-        alignItems="center"
-        padding="6rem 2rem 2rem 2rem"
-      >
-        <Form onSubmit={(e) => e.preventDefault()}>
-          <HeadingWithLogo textCentered hideIconOnMobile={false}>
-            {getLocalizedString('dashboard-heading_txt')}
-          </HeadingWithLogo>
-          <Wrapper>
-            <FormGroup>
-              <Label>{getLocalizedString('dashboard-nickname_lbl_txt')}</Label>
-              <Input value={userName ?? ''} />
-              <Button primary>
-                {getLocalizedString('dashboard-nickname_btn_txt')}
-              </Button>
-            </FormGroup>
-            <FormGroup>
-              <Label>{getLocalizedString('dashboard-email_lbl_txt')}</Label>
-              <Input type="email" value={email ?? ''} />
-              <Button primary>
-                {getLocalizedString('dashboard-email_btn_txt')}
-              </Button>
-            </FormGroup>
-            <FormGroup style={{ gridColumnStart: '1', gridColumnEnd: '3' }}>
-              <Button primary>
-                {getLocalizedString('dashboard-reset_pw_btn_text')}
-              </Button>
-              <Button>
-                {getLocalizedString('dashboard-delete_acct_btn_text')}
-              </Button>
-            </FormGroup>
-            <Button
-              as={Link}
-              to="/"
-              secondary
-              style={{ gridColumnStart: '1', gridColumnEnd: '3' }}
-            >
+    <PageWrapper>
+      <DashboardCard>
+        <LogoWrapper>
+          <LogoWithText />
+        </LogoWrapper>
+        <FormTitle>{getLocalizedString('dashboard-heading_txt')}</FormTitle>
+        <Wrapper>
+          <FormGroup>
+            <StyledLabel>{getLocalizedString('dashboard-nickname_lbl_txt')}</StyledLabel>
+            <StyledInput value={userName ?? ''} readOnly />
+            <ActionButton primary>
+              {getLocalizedString('dashboard-nickname_btn_txt')}
+            </ActionButton>
+          </FormGroup>
+          <FormGroup>
+            <StyledLabel>{getLocalizedString('dashboard-email_lbl_txt')}</StyledLabel>
+            <StyledInput type="email" value={email ?? ''} readOnly />
+            <ActionButton primary>
+              {getLocalizedString('dashboard-email_btn_txt')}
+            </ActionButton>
+          </FormGroup>
+          <FullWidthGroup>
+            <ActionButton primary>
+              {getLocalizedString('dashboard-reset_pw_btn_text')}
+            </ActionButton>
+            <DangerButton>
+              {getLocalizedString('dashboard-delete_acct_btn_text')}
+            </DangerButton>
+          </FullWidthGroup>
+          <FullWidthGroup>
+            <BackButton as={Link} to="/">
               {getLocalizedString('static_page-back_btn_txt')}
-            </Button>
-          </Wrapper>
-        </Form>
-      </Container>
-    </RelativeWrapper>
+            </BackButton>
+          </FullWidthGroup>
+        </Wrapper>
+      </DashboardCard>
+    </PageWrapper>
   );
 };
 

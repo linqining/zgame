@@ -56,24 +56,24 @@ const theme: Theme = {
   // Colors
   colors: {
     // Primary Brand Colors
-    primaryCta: 'hsl(202, 49%, 28%)',
-    primaryCtaDarker: 'hsl(202, 49%, 18%)',
-    secondaryCta: 'hsl(202, 36%, 55%)',
-    secondaryCtaDarker: 'hsl(202, 36%, 45%)',
-    secondaryCtaDarkest: 'hsl(202, 36%, 35%)',
+    primaryCta: '#4f46e5',
+    primaryCtaDarker: '#4338ca',
+    secondaryCta: '#667eea',
+    secondaryCtaDarker: '#5a67d8',
+    secondaryCtaDarkest: '#4f46e5',
     // Secondary Brand Colors
-    darkBg: 'hsl(43, 40%, 60%)',
-    lightBg: 'hsl(43, 40%, 81%)',
-    lightestBg: 'hsl(43, 40%, 86%)',
+    darkBg: '#e2e8f0',
+    lightBg: '#f1f5f9',
+    lightestBg: '#ffffff',
     // Font Colors
-    fontColorLight: 'hsl(40, 100%, 99%)',
-    fontColorDark: 'hsl(36, 71%, 3%)',
-    fontColorDarkLighter: 'hsl(36, 71%, 13%)',
+    fontColorLight: '#f8fafc',
+    fontColorDark: '#0f172a',
+    fontColorDarkLighter: '#334155',
     // Other colors
-    playingCardBg: 'hsl(49, 63%, 92%)',
-    playingCardBgLighter: 'hsl(49, 63%, 94%)',
-    goldenColorDarker: 'hsl(43, 40%, 60%)',
-    goldenColor: 'hsl(43, 40%, 65%)',
+    playingCardBg: '#f8fafc',
+    playingCardBgLighter: '#ffffff',
+    goldenColorDarker: '#d4a843',
+    goldenColor: '#e2b84d',
     dangerColorLighter: 'hsl(0, 100%, 56%)',
     dangerColor: 'hsl(0, 100%, 46%)',
   },
@@ -99,8 +99,8 @@ const theme: Theme = {
     // Border-radius
     stdBorderRadius: '2rem',
     // Drop Shadows
-    cardDropShadow: '10px 10px 30px rgba(0, 0, 0, 0.1)',
-    navMenuDropShadow: '-10px 0px 30px rgba(0, 0, 0, 0.1)',
+    cardDropShadow: '0 8px 30px rgba(0, 0, 0, 0.06)',
+    navMenuDropShadow: '-10px 0px 30px rgba(0, 0, 0, 0.06)',
   },
 };
 

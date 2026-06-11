@@ -41,13 +41,13 @@ const GlobalStyles = createGlobalStyle`
   }
 
   ::-moz-selection {
-    background: ${(props) => props.theme.colors.darkBg};
-    color: ${(props) => props.theme.colors.fontColorLight};
+    background: ${(props) => props.theme.colors.primaryCta};
+    color: #ffffff;
   }
 
   ::selection {
-    background: ${(props) => props.theme.colors.darkBg};
-    color: ${(props) => props.theme.colors.fontColorLight};
+    background: ${(props) => props.theme.colors.primaryCta};
+    color: #ffffff;
   }
 
   body {
