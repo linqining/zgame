@@ -19,8 +19,6 @@ pub const SIT_DOWN_V2: &str = "SIT_DOWN_V2";
 pub const STAND_UP: &str = "STAND_UP";
 pub const SITTING_OUT: &str = "SITTING_OUT";
 pub const SITTING_IN: &str = "SITTING_IN";
-#[allow(dead_code)]
-pub const DISCONNECT: &str = "DISCONNECT";
 pub const SHUFFLE_SUBMIT: &str = "SHUFFLE_SUBMIT";
 pub const SHUFFLE_NOTICE: &str = "SHUFFLE_NOTICE";
 pub const REVEAL_SUBMIT: &str = "REVEAL_SUBMIT";

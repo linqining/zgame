@@ -1,13 +1,13 @@
 use crate::pokergame::actions;
 use crate::pokergame::deck::Card;
-use crate::pokergame::player::Player;
+use crate::pokergame::player::{GamePlayer, Player};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Seat {
     pub id: u32,
-    pub player: Option<Player>,
+    pub player: Option<GamePlayer>,
     pub buyin: u64,
     pub stack: u64,
     pub hand: Vec<Card>,
@@ -28,7 +28,7 @@ pub struct Seat {
 }
 
 impl Seat {
-    pub fn new(id: u32, player: Option<Player>, buyin: u64, stack: u64) -> Self {
+    pub fn new(id: u32, player: Option<GamePlayer>, buyin: u64, stack: u64) -> Self {
         Self {
             id,
             player,
@@ -130,7 +130,7 @@ impl Seat {
 #[serde(rename_all = "camelCase")]
 pub struct ClientSeat {
     pub id: u32,
-    pub player: Option<Player>,
+    pub player: Option<GamePlayer>,
     pub buyin: u64,
     pub stack: u64,
     pub hand: Vec<Card>,

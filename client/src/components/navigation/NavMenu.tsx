@@ -4,6 +4,7 @@ import CloseButton from '../buttons/CloseButton';
 import Button from '../buttons/Button';
 import Text from '../typography/Text';
 import ColoredText from '../typography/ColoredText';
+import { PlayerName } from '../game/PlayerName';
 import ChipsAmount from '../user/ChipsAmount';
 import { Link } from 'react-router-dom';
 import lobbyIcon from '../../assets/icons/lobby-icon.svg';
@@ -238,7 +239,7 @@ const NavMenu: React.FC<NavMenuProps> = ({
           <SalutationText textAlign="left">
             {getLocalizedString('main_page-salutation')}
             <br />
-            <ColoredText>{userName}!</ColoredText>
+            <ColoredText><PlayerName name={userName} />!</ColoredText>
           </SalutationText>
           {players && (
             <OnlineText textAlign="left">

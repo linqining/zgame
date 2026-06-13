@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, RefreshCw, AlertCircle } from 'lucide-react'
 import api, { GameState } from '../api/secretPokerClient'
+import { PlayerName } from '../components/game/PlayerName'
 import { gameWsClient } from '../api/wsClient'
 
 export default function GameTable() {
@@ -204,7 +205,7 @@ export default function GameTable() {
                 border: game.current_player_index === i ? '2px solid #10b981' : '1px solid rgba(226, 232, 240, 0.9)',
               }}>
                 <div style={{ fontWeight: 600, marginBottom: '0.3rem', textDecoration: p.folded ? 'line-through' : 'none', opacity: p.folded ? 0.4 : 1 }}>
-                  {p.name}
+                  <PlayerName name={p.name} />
                 </div>
                 <div style={{ color: '#ffd700', fontFamily: "'JetBrains Mono', monospace", fontSize: '0.9rem' }}>
                   ${p.chips.toLocaleString()}

@@ -3,18 +3,20 @@ use sui_crypto::secp256k1::Secp256k1Verifier;
 use sui_crypto::{SuiSigner, SuiVerifier};
 use sui_sdk_types::PersonalMessage;
 use sui_sdk_types::{UserSignature, SimpleSignature, Secp256k1PublicKey};
-use poker_protocol::crypto::EcPoint;
-use poker_protocol::z_poker::convert::ecpoint_to_hex;
+use poker_protocol::crypto::curve::{Curve, CurvePoint, RistrettoCurve};
+use poker_protocol::z_poker::convert::curve_point_to_hex;
 use blake2b_simd::Params;
 use std::path::Path;
 
-pub fn secp_pubkey_to_ecpoint<P: AsRef<[u8]>>(pubkey_bytes: P) -> Result<EcPoint, String> {
-    let bytes = pubkey_bytes.as_ref();
-    curve25519_dalek::ristretto::CompressedRistretto::from_slice(bytes)
-        .map_err(|e| format!("Invalid compressed point: {}", e))?
-        .decompress()
+pub fn pubkey_to_curve_point<C: Curve>(pubkey_bytes: &[u8]) -> Result<C::Point, String> {
+    C::Point::from_compressed(pubkey_bytes)
         .ok_or_else(|| "Invalid EC point".to_string())
 }
+
+/// Type alias for Ristretto255-based WalletLogin (backward compatibility).
+pub type RistrettoWalletLogin = WalletLogin<RistrettoCurve>;
+/// Type alias for Ristretto255-based KeyStore (backward compatibility).
+pub type RistrettoKeyStore = KeyStore<RistrettoCurve>;
 
 pub fn pubkey_to_sui_address(pubkey_bytes: &[u8], scheme_flag: u8) -> String {
     let mut hasher = Params::new().hash_length(32).to_state();
@@ -25,25 +27,27 @@ pub fn pubkey_to_sui_address(pubkey_bytes: &[u8], scheme_flag: u8) -> String {
 }
 
 #[derive(Debug, Clone)]
-pub struct WalletLogin {
+pub struct WalletLogin<C: Curve> {
     private_key: Secp256k1PrivateKey,
+    _phantom: std::marker::PhantomData<C>,
 }
 
-impl WalletLogin {
+impl<C: Curve> WalletLogin<C> {
     pub fn generate() -> Self {
         Self {
             private_key: Secp256k1PrivateKey::generate(&mut rand::thread_rng()),
+            _phantom: std::marker::PhantomData,
         }
     }
 
     pub fn from_private_key(private_key: Secp256k1PrivateKey) -> Self {
-        Self { private_key }
+        Self { private_key, _phantom: std::marker::PhantomData }
     }
 
     pub fn from_pem(pem_str: &str) -> Result<Self, String> {
         let private_key = Secp256k1PrivateKey::from_pem(pem_str)
             .map_err(|e| format!("Invalid PEM: {}", e))?;
-        Ok(Self { private_key })
+        Ok(Self { private_key, _phantom: std::marker::PhantomData })
     }
 
     pub fn private_key_pem(&self) -> String {
@@ -59,8 +63,8 @@ impl WalletLogin {
         pubkey_to_sui_address(self.public_key().as_bytes(), 0x01)
     }
 
-    pub fn ecpoint(&self) -> Result<EcPoint, String> {
-        secp_pubkey_to_ecpoint(self.public_key().as_bytes())
+    pub fn ecpoint(&self) -> Result<C::Point, String> {
+        pubkey_to_curve_point::<C>(self.public_key().as_bytes())
     }
 
     pub fn sign_login_message(&self, message: &str) -> Result<UserSignature, String> {
@@ -76,13 +80,13 @@ struct KeyStoreData {
     keys: Vec<String>,
 }
 
-pub struct KeyStore {
-    wallets: Vec<WalletLogin>,
+pub struct KeyStore<C: Curve> {
+    wallets: Vec<WalletLogin<C>>,
 }
 
-impl KeyStore {
+impl<C: Curve> KeyStore<C> {
     pub fn generate(count: usize) -> Self {
-        let wallets: Vec<WalletLogin> = (0..count)
+        let wallets: Vec<WalletLogin<C>> = (0..count)
             .map(|_| WalletLogin::generate())
             .collect();
         Self { wallets }
@@ -104,7 +108,7 @@ impl KeyStore {
             .map_err(|e| format!("Failed to read key file: {}", e))?;
         let data: KeyStoreData = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse key file: {}", e))?;
-        let wallets: Vec<WalletLogin> = data.keys.iter()
+        let wallets: Vec<WalletLogin<C>> = data.keys.iter()
             .map(|pem| WalletLogin::from_pem(pem))
             .collect::<Result<Vec<_>, _>>()?;
         println!("Loaded {} keys from {}", wallets.len(), path);
@@ -124,7 +128,7 @@ impl KeyStore {
         Ok(())
     }
 
-    pub fn get(&self, index: usize) -> Option<&WalletLogin> {
+    pub fn get(&self, index: usize) -> Option<&WalletLogin<C>> {
         self.wallets.get(index)
     }
 
@@ -132,7 +136,7 @@ impl KeyStore {
         self.wallets.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &WalletLogin> {
+    pub fn iter(&self) -> impl Iterator<Item = &WalletLogin<C>> {
         self.wallets.iter()
     }
 
@@ -152,7 +156,7 @@ impl KeyStore {
             let address = wallet.address();
             let pk = wallet.public_key();
             let ecpoint = wallet.ecpoint()
-                .map(|p| ecpoint_to_hex(&p))
+                .map(|p| curve_point_to_hex::<C>(&p))
                 .unwrap_or_else(|e| format!("Error: {}", e));
             println!("  [{}] Address: {}", i, address);
             println!("       PK:      {:?}", pk);
@@ -197,10 +201,11 @@ impl LoginVerifier {
 
  mod tests{
     use super::*;
+    use poker_protocol::crypto::curve::RistrettoCurve;
 
     #[test]
     pub fn test_wallet_login_full_flow(){
-        let wallet = WalletLogin::generate();
+        let wallet: WalletLogin<RistrettoCurve> = WalletLogin::generate();
         let address = wallet.address();
         let pk = wallet.public_key();
         let ecpoint = wallet.ecpoint().unwrap();
@@ -208,7 +213,7 @@ impl LoginVerifier {
         println!("\n=== 1. 钱包信息 ===");
         println!("SUI Address: {}", address);
         println!("Public Key:  {:?}", pk);
-        println!("EcPoint:     {}", ecpoint_to_hex(&ecpoint));
+        println!("EcPoint:     {}", curve_point_to_hex::<RistrettoCurve>(&ecpoint));
 
         let login_message = "login:secret-poker:1700000000";
         println!("\n=== 2. 签名登录消息 ===");
@@ -236,7 +241,7 @@ impl LoginVerifier {
     #[test]
     pub fn test_login_with_existing_key(){
         let private_key = Secp256k1PrivateKey::generate(&mut rand::thread_rng());
-        let wallet = WalletLogin::from_private_key(private_key);
+        let wallet: WalletLogin<RistrettoCurve> = WalletLogin::from_private_key(private_key);
         let address = wallet.address();
 
         let message = "login:secret-poker:1700000000";
@@ -253,10 +258,10 @@ impl LoginVerifier {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("keys.json").to_str().unwrap().to_string();
 
-        let store = KeyStore::generate(3);
+        let store: KeyStore<RistrettoCurve> = KeyStore::generate(3);
         store.save(&path).unwrap();
 
-        let loaded = KeyStore::load(&path).unwrap();
+        let loaded: KeyStore<RistrettoCurve> = KeyStore::load(&path).unwrap();
         assert_eq!(store.len(), loaded.len());
 
         for i in 0..store.len() {
@@ -269,7 +274,7 @@ impl LoginVerifier {
 
     #[test]
     pub fn test_keystore_login(){
-        let store = KeyStore::generate(3);
+        let store: KeyStore<RistrettoCurve> = KeyStore::generate(3);
         let message = "login:secret-poker:1700000000";
 
         let (address, signature) = store.login(0, message).unwrap();
@@ -280,8 +285,8 @@ impl LoginVerifier {
 
     #[test]
     pub fn test_conv(){
-        let wallet = WalletLogin::generate();
+        let wallet: WalletLogin<RistrettoCurve> = WalletLogin::generate();
         let ecpoint = wallet.ecpoint().unwrap();
-        println!("EcPoint: {:?}", ecpoint_to_hex(&ecpoint));
+        println!("EcPoint: {:?}", curve_point_to_hex::<RistrettoCurve>(&ecpoint));
     }
 }

@@ -142,6 +142,19 @@ export interface RemaskProofJson {
   nonce_hex: string;
 }
 
+export interface LeaveProofJson {
+  per_card_commitments_hex: string[];
+  commitment_pk_hex: string;
+  response_hex: string;
+  nonce_hex: string;
+}
+
+export interface LeaveGameRoundJson {
+  input_cards: ElGamalCiphertextJson[];
+  output_cards: ElGamalCiphertextJson[];
+  leave_proof: LeaveProofJson;
+}
+
 export interface MaskAndShuffleRoundJson {
   player_pk: string;
   mask_cards: ElGamalCiphertextJson[];

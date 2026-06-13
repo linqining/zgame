@@ -4,6 +4,7 @@ import { Socket } from 'socket.io-client';
 export interface SocketContextType {
   socket: Socket | null;
   socketId: string | null;
+  isConnected: boolean;
   cleanUp: () => void;
 }
 

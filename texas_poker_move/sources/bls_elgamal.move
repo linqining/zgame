@@ -16,8 +16,6 @@ public struct ElGamalCiphertext has store, copy, drop {
 }
 
 #[error]
-const EInvalidCiphertext: vector<u8> = b"Invalid ciphertext: c1 or c2 is identity";
-#[error]
 const EC1IsIdentity: vector<u8> = b"c1 is identity point, cannot remask";
 
 // ========== 加密操作 ==========

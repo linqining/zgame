@@ -7,21 +7,61 @@ use poker_protocol::z_poker::convert::{ecpoint_to_hex, hex_to_ecpoint, hex_to_sc
 use poker_protocol::crypto::{CurveScalar, ElGamalCiphertext, Plaintext, Scalar};
 use poker_protocol::z_poker::key_manager::PKOwnershipProof;
 use poker_protocol::z_poker::protocol::MaskAndShuffleRound;
+use poker_protocol::z_poker::protocol::LeaveGameRound;
 use poker_protocol::zk_shuffle::remask_proof::RemaskProof;
-use poker_protocol::zk_shuffle::ShuffleProof;
+use poker_protocol::zk_shuffle::leave_proof::LeaveProof;
 use poker_protocol::crypto::DefaultCurve;
+use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::zk_shuffle::reconstruction::{ReconstructProof, SwapOutCardProof, ReconstructionDLEQProof, ChaumPedersenDLEQProof};
+
+use crate::pokergame::player::GamePkHex;
+
+/// Macro to generate a JSON proof adapter struct and its conversion method.
+/// Reduces boilerplate for structs where all fields are hex strings mapping to EcPoint or Scalar.
+///
+/// - `point` fields: hex string → EcPoint via `hex_to_ecpoint`
+/// - `scalar` fields: hex string → Scalar via `hex_to_scalar`
+/// - `scalar_vec` fields: Vec<String> → Vec<Scalar> via mapping `hex_to_scalar`
+macro_rules! hex_proof_adapter {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident => [$($target:tt)+] {
+            $($pfield:ident : $ptarget:ident),* $(,)?
+        }
+        scalar { $($sfield:ident : $starget:ident),* $(,)? }
+        $(scalar_vec { $($svfield:ident : $svtarget:ident),* $(,)? })?
+    ) => {
+        $(#[$meta])*
+        $vis struct $name {
+            $($pfield: String,)*
+            $($sfield: String,)*
+            $($($svfield: Vec<String>,)*)?
+        }
+
+        impl $name {
+            pub fn to_proof(&self) -> Result<$($target)+, String> {
+                Ok($($target)+ {
+                    $($ptarget: hex_to_ecpoint(&self.$pfield)?,)*
+                    $($starget: hex_to_scalar(&self.$sfield)?,)*
+                    $($($svtarget: self.$svfield.iter()
+                        .map(|h| hex_to_scalar(h))
+                        .collect::<Result<Vec<_>, _>>()?,)*)?
+                })
+            }
+        }
+    };
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShuffleState {
     pub is_active: bool,
-    pub current_player_pk: Option<String>,
+    pub current_player_pk: Option<GamePkHex>,
     #[serde(skip)]
     pub timeout_start: Option<std::time::Instant>,
     pub timeout_seconds: u64,
-    pub completed_players: Vec<String>,
-    pub pending_players: Vec<String>,
+    pub completed_players: Vec<GamePkHex>,
+    pub pending_players: Vec<GamePkHex>,
 }
 
 impl ShuffleState {
@@ -76,9 +116,9 @@ pub struct RevealTokenState {
     #[serde(skip)]
     pub timeout_start: Option<std::time::Instant>,
     pub timeout_seconds: u64,
-    pub completed_players: Vec<String>,
-    pub pending_players: Vec<String>,
-    pub player_assignments: HashMap<String, PlayerRevealAssignment>,
+    pub completed_players: Vec<GamePkHex>,
+    pub pending_players: Vec<GamePkHex>,
+    pub player_assignments: HashMap<GamePkHex, PlayerRevealAssignment>,
 }
 
 impl RevealTokenState {
@@ -191,12 +231,12 @@ pub struct ReconstructState {
     // pub phase: ReconstructPhase,
     pub timeout_start: Option<std::time::Instant>,
     pub timeout_seconds: u64,
-    pub completed_players: Vec<String>,
-    pub pending_players: Vec<String>,// 发起时的玩家列表
+    pub completed_players: Vec<GamePkHex>,
+    pub pending_players: Vec<GamePkHex>,// 发起时的玩家列表
     pub cards: Vec<Plaintext>,
     pub coefficient: Scalar, //公共变量
-    pub player_readable_cards: HashMap<String, PlayerReadableCard>,
-    pub player_deck: HashMap<String, Vec<ElGamalCiphertext>>,
+    pub player_readable_cards: HashMap<GamePkHex, PlayerReadableCard>,
+    pub player_deck: HashMap<GamePkHex, Vec<ElGamalCiphertext>>,
 }
 
 impl ReconstructState {
@@ -230,19 +270,19 @@ impl ReconstructState {
 pub struct RevealTokenPublicState {
     pub is_active: bool,
     pub phase: String,
-    pub completed_players: Vec<String>,
-    pub pending_players: Vec<String>,
-    pub player_assignments: HashMap<String, PlayerRevealAssignment>,
+    pub completed_players: Vec<GamePkHex>,
+    pub pending_players: Vec<GamePkHex>,
+    pub player_assignments: HashMap<GamePkHex, PlayerRevealAssignment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconstructPublicState {
     pub is_active: bool,
-    pub completed_players: Vec<String>,
-    pub pending_players: Vec<String>,
+    pub completed_players: Vec<GamePkHex>,
+    pub pending_players: Vec<GamePkHex>,
     pub cards: Vec<String>,
     pub coefficient_hex: String, //公共变量
-    pub player_readable_cards: HashMap<String, PlayerReadableCardJson>,
+    pub player_readable_cards: HashMap<GamePkHex, PlayerReadableCardJson>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,9 +303,9 @@ impl ElGamalCiphertextJson {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShufflePublicState {
     pub is_active: bool,
-    pub current_player_pk: Option<String>,
-    pub completed_players: Vec<String>,
-    pub pending_players: Vec<String>,
+    pub current_player_pk: Option<GamePkHex>,
+    pub completed_players: Vec<GamePkHex>,
+    pub pending_players: Vec<GamePkHex>,
     pub deck_encrypted: Vec<ElGamalCiphertextJson>,
     pub aggregate_pk: String,
 }
@@ -281,20 +321,13 @@ impl ElGamalCiphertextJson {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct PkProofJson {
-    pub commitment_hex: String,
-    pub response_hex: String,
-}
-
-impl PkProofJson {
-    pub fn to_pk_proof(&self) -> Result<PKOwnershipProof, String> {
-        Ok(PKOwnershipProof {
-            commitment: hex_to_ecpoint(&self.commitment_hex)?,
-            response: hex_to_scalar(&self.response_hex)?,
-        })
+hex_proof_adapter!(
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct PkProofJson => [PKOwnershipProof] {
+        commitment_hex : commitment,
     }
-}
+    scalar { response_hex : response }
+);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RemaskProofJson {
@@ -306,13 +339,57 @@ pub struct RemaskProofJson {
 
 impl RemaskProofJson {
     pub fn to_remask_proof(&self) -> Result<RemaskProof<DefaultCurve>, String> {
-        Ok(RemaskProof {
-            per_card_commitments: self.per_card_commitments_hex.iter()
+        Ok(RemaskProof::from_parts(
+            self.per_card_commitments_hex.iter()
                 .map(|h| hex_to_ecpoint(h))
                 .collect::<Result<Vec<_>, _>>()?,
-            commitment_pk: hex_to_ecpoint(&self.commitment_pk_hex)?,
-            response: hex_to_scalar(&self.response_hex)?,   
-            nonce: hex_to_scalar(&self.nonce_hex)?,
+            hex_to_ecpoint(&self.commitment_pk_hex)?,
+            hex_to_scalar(&self.response_hex)?,
+            hex_to_scalar(&self.nonce_hex)?,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LeaveProofJson {
+    pub per_card_commitments_hex: Vec<String>,
+    pub commitment_pk_hex: String,
+    pub response_hex: String,
+    pub nonce_hex: String,
+}
+
+impl LeaveProofJson {
+    pub fn to_leave_proof(&self) -> Result<LeaveProof<DefaultCurve>, String> {
+        Ok(LeaveProof::from_parts(
+            self.per_card_commitments_hex.iter()
+                .map(|h| hex_to_ecpoint(h))
+                .collect::<Result<Vec<_>, _>>()?,
+            hex_to_ecpoint(&self.commitment_pk_hex)?,
+            hex_to_scalar(&self.response_hex)?,
+            hex_to_scalar(&self.nonce_hex)?,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LeaveGameRoundJson {
+    pub input_cards: Vec<ElGamalCiphertextJson>,
+    pub output_cards: Vec<ElGamalCiphertextJson>,
+    pub leave_proof: LeaveProofJson,
+}
+
+impl LeaveGameRoundJson {
+    pub fn to_leave_game_round(&self) -> Result<LeaveGameRound, String> {
+        let input_cards = self.input_cards.iter()
+            .map(|c| c.to_ciphertext())
+            .collect::<Result<Vec<_>, _>>()?;
+        let output_cards = self.output_cards.iter()
+            .map(|c| c.to_ciphertext())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(LeaveGameRound {
+            input_cards,
+            output_cards,
+            leave_proof: self.leave_proof.to_leave_proof()?,
         })
     }
 }
@@ -352,39 +429,21 @@ impl SwapOutCardProofJson {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChaumPedersenDLEQProofJson {
-    pub commitment_a_hex: String,
-    pub commitment_b_hex: String,
-    pub response_hex: String,
-}
-
-impl ChaumPedersenDLEQProofJson {
-    pub fn to_proof(&self) -> Result<ChaumPedersenDLEQProof<DefaultCurve>, String> {
-        Ok(ChaumPedersenDLEQProof {
-            commitment_a: hex_to_ecpoint(&self.commitment_a_hex)?,
-            commitment_b: hex_to_ecpoint(&self.commitment_b_hex)?,
-            response: hex_to_scalar(&self.response_hex)?,
-        })
+hex_proof_adapter!(
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ChaumPedersenDLEQProofJson => [ChaumPedersenDLEQProof::<DefaultCurve>] {
+        commitment_a_hex : commitment_a, commitment_b_hex : commitment_b,
     }
-}
+    scalar { response_hex : response }
+);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReconstructionDLEQProofJson {
-    pub commitment_hex: String,
-    pub response_hex: String,
-    pub nonce_hex: String,
-}
-
-impl ReconstructionDLEQProofJson {
-    pub fn to_proof(&self) -> Result<ReconstructionDLEQProof<DefaultCurve>, String> {
-        Ok(ReconstructionDLEQProof {
-            commitment: hex_to_ecpoint(&self.commitment_hex)?,
-            response: hex_to_scalar(&self.response_hex)?,
-            nonce: hex_to_scalar(&self.nonce_hex)?,
-        })
+hex_proof_adapter!(
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ReconstructionDLEQProofJson => [ReconstructionDLEQProof::<DefaultCurve>] {
+        commitment_hex : commitment,
     }
-}
+    scalar { response_hex : response, nonce_hex : nonce }
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconstructProofJson {

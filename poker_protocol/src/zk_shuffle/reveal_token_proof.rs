@@ -67,6 +67,7 @@ where Transcript: TranscriptExtension<C>
         encrypted_card: &ElGamalCiphertextGeneric<C>,
         reveal_token: &C::Point,
         rng: &mut (impl CryptoRng + RngCore),
+        transcript: &mut Transcript,
     ) -> Self {
         let omega = C::Scalar::random(rng);
         let t1 = C::base_g() * omega;
@@ -78,6 +79,7 @@ where Transcript: TranscriptExtension<C>
             reveal_token,
             &t1,
             &t2,
+            transcript,
         );
 
         let response_s = omega + challenge * *sk;
@@ -95,6 +97,7 @@ where Transcript: TranscriptExtension<C>
         encrypted_card: &ElGamalCiphertextGeneric<C>,
         reveal_token: &C::Point,
         expected_pk: &C::Point,
+        transcript: &mut Transcript,
     ) -> Result<(), RevealProofError> {
         if !encrypted_card.is_valid() {
             return Err(RevealProofError::InvalidElGamalStructure);
@@ -116,6 +119,7 @@ where Transcript: TranscriptExtension<C>
             reveal_token,
             &self.commitment_t1,
             &self.commitment_t2,
+            transcript,
         );
 
         let lhs_g = C::base_g() * self.response_s;
@@ -138,15 +142,15 @@ where Transcript: TranscriptExtension<C>
         reveal_token: &C::Point,
         t1: &C::Point,
         t2: &C::Point,
+        transcript: &mut Transcript,
     ) -> C::Scalar {
-        let mut transcript = Transcript::new(b"reveal_token_proof_v3");
         transcript.append_point(b"pk", pk);
         transcript.append_point(b"c1", &encrypted_card.c1);
         transcript.append_point(b"c2", &encrypted_card.c2);
         transcript.append_point(b"reveal_token", reveal_token);
         transcript.append_point(b"t1", t1);
         transcript.append_point(b"t2", t2);
-        transcript.challenge(b"challenge").scalar
+        transcript.challenge(b"reveal_token_challenge").scalar
     }
 }
 
@@ -173,8 +177,10 @@ mod tests {
         let reveal_token = ct.gen_reveal_token(&sk);
         assert_eq!(ct.c2 - reveal_token, pt, "token should decrypt to plaintext");
 
-        let proof = RevealTokenProof::<C>::prove(&sk, &pk, &ct, &reveal_token, &mut rand_core::OsRng);
-        assert!(proof.verify(&ct, &reveal_token, &pk).is_ok(), "Valid proof should pass");
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        let proof = RevealTokenProof::<C>::prove(&sk, &pk, &ct, &reveal_token, &mut rand_core::OsRng, &mut transcript);
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        assert!(proof.verify(&ct, &reveal_token, &pk, &mut transcript).is_ok(), "Valid proof should pass");
     }
 
     #[test]
@@ -186,11 +192,14 @@ mod tests {
         let ct = ElGamalCiphertext::encrypt(&pt, &pk, &r);
 
         let wrong_token = ct.gen_reveal_token(&wrong_sk);
-        let _proof = RevealTokenProof::<C>::prove(&wrong_sk, &pk, &ct, &wrong_token, &mut rand_core::OsRng);
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        let _proof = RevealTokenProof::<C>::prove(&wrong_sk, &pk, &ct, &wrong_token, &mut rand_core::OsRng, &mut transcript);
 
         let _wrong_pt = ct.c2 - wrong_token;
-        assert!(RevealTokenProof::<C>::prove(&wrong_sk, &pk, &ct, &wrong_token, &mut rand_core::OsRng)
-            .verify(&ct, &wrong_token, &pk).is_err(), "Wrong SK fails DLEq");
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        let wrong_proof = RevealTokenProof::<C>::prove(&wrong_sk, &pk, &ct, &wrong_token, &mut rand_core::OsRng, &mut transcript);
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        assert!(wrong_proof.verify(&ct, &wrong_token, &pk, &mut transcript).is_err(), "Wrong SK fails DLEq");
     }
 
     #[test]
@@ -201,9 +210,11 @@ mod tests {
         let ct = ElGamalCiphertext::encrypt(&real_pt, &pk, &r);
 
         let reveal_token = ct.gen_reveal_token(&sk);
-        let proof = RevealTokenProof::<C>::prove(&sk, &pk, &ct, &reveal_token, &mut rand_core::OsRng);
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        let proof = RevealTokenProof::<C>::prove(&sk, &pk, &ct, &reveal_token, &mut rand_core::OsRng, &mut transcript);
 
-        assert!(proof.verify(&ct, &reveal_token, &pk).is_ok(), "DLEq proof valid regardless of plaintext");
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        assert!(proof.verify(&ct, &reveal_token, &pk, &mut transcript).is_ok(), "DLEq proof valid regardless of plaintext");
         let computed_pt = ct.c2 - reveal_token;
         assert_eq!(computed_pt, real_pt, "Caller must verify c2 - token == expected plaintext");
     }
@@ -218,9 +229,11 @@ mod tests {
         let ct2 = ElGamalCiphertext::encrypt(&pt, &pk, &r2);
 
         let token1 = ct1.gen_reveal_token(&sk);
-        let proof = RevealTokenProof::<C>::prove(&sk, &pk, &ct1, &token1, &mut rand_core::OsRng);
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        let proof = RevealTokenProof::<C>::prove(&sk, &pk, &ct1, &token1, &mut rand_core::OsRng, &mut transcript);
 
-        assert!(proof.verify(&ct2, &token1, &pk).is_err(), "Token for ct1 invalid on ct2");
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        assert!(proof.verify(&ct2, &token1, &pk, &mut transcript).is_err(), "Token for ct1 invalid on ct2");
     }
 
     /// SECURITY VERIFICATION: is_valid() now correctly uses && (not ||)
@@ -292,17 +305,20 @@ mod tests {
         let attacker_token = ct.gen_reveal_token(&attacker_sk);
 
         // 攻击者用 attacker_sk 生成证明
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
         let proof = RevealTokenProof::<C>::prove(
-            &attacker_sk, &attacker_pk, &ct, &attacker_token, &mut rand_core::OsRng,
+            &attacker_sk, &attacker_pk, &ct, &attacker_token, &mut rand_core::OsRng, &mut transcript,
         );
 
         // 修复后: verify() 需要传入 expected_pk，并验证 proof.user_public_key == expected_pk
         // 用 real_pk 验证会失败，因为 proof.user_public_key = attacker_pk ≠ real_pk
-        assert!(proof.verify(&ct, &attacker_token, &real_pk).is_err(),
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        assert!(proof.verify(&ct, &attacker_token, &real_pk, &mut transcript).is_err(),
             "FIXED: proof with wrong pk is now rejected when expected_pk is provided");
 
         // 用 attacker_pk 验证会成功（但调用方应该使用 real_pk）
-        assert!(proof.verify(&ct, &attacker_token, &attacker_pk).is_ok(),
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        assert!(proof.verify(&ct, &attacker_token, &attacker_pk, &mut transcript).is_ok(),
             "proof passes when expected_pk matches attacker_pk");
 
         // 解密结果错误: c2 - attacker_token = M + real_pk*r - attacker_pk*r
@@ -317,12 +333,14 @@ mod tests {
         };
 
         let forged_token = forged_ct.gen_reveal_token(&attacker_sk);
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
         let forged_proof = RevealTokenProof::<C>::prove(
-            &attacker_sk, &attacker_pk, &forged_ct, &forged_token, &mut rand_core::OsRng,
+            &attacker_sk, &attacker_pk, &forged_ct, &forged_token, &mut rand_core::OsRng, &mut transcript,
         );
 
         // 修复后: 需要传入 expected_pk，伪造证明会被拒绝（如果调用方使用 real_pk）
-        assert!(forged_proof.verify(&forged_ct, &forged_token, &real_pk).is_err(),
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        assert!(forged_proof.verify(&forged_ct, &forged_token, &real_pk, &mut transcript).is_err(),
             "FIXED: forged proof rejected when expected_pk is real_pk");
     }
 
@@ -345,16 +363,19 @@ mod tests {
         let token = ct.gen_reveal_token(&attacker_sk);
 
         // 攻击者生成证明
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
         let proof = RevealTokenProof::<C>::prove(
-            &attacker_sk, &attacker_pk, &ct, &token, &mut rand_core::OsRng,
+            &attacker_sk, &attacker_pk, &ct, &token, &mut rand_core::OsRng, &mut transcript,
         );
 
         // 修复后: 如果调用方使用 real_pk 作为 expected_pk，伪造证明会被拒绝
-        assert!(proof.verify(&ct, &token, &real_pk).is_err(),
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        assert!(proof.verify(&ct, &token, &real_pk, &mut transcript).is_err(),
             "FIXED: fabricated proof rejected when expected_pk doesn't match");
 
         // 如果调用方错误地使用 attacker_pk，证明会通过（调用方责任）
-        assert!(proof.verify(&ct, &token, &attacker_pk).is_ok(),
+        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        assert!(proof.verify(&ct, &token, &attacker_pk, &mut transcript).is_ok(),
             "proof passes when expected_pk matches attacker_pk (caller responsibility)");
 
         // 解密正确

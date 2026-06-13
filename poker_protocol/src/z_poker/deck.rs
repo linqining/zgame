@@ -1,20 +1,20 @@
+use std::collections::VecDeque;
+
 use super::card::{PlayingCard, Suit, Rank, standard_deck};
 
 #[derive(Debug, Clone)]
 pub struct Deck {
-    cards: Vec<PlayingCard>,
+    cards: VecDeque<PlayingCard>,
 }
-
-pub const STANDARD_DECK_SIZE: usize = 52;
 
 impl Deck {
     pub fn new_standard() -> Self {
-        let cards = standard_deck();
+        let cards = standard_deck().into();
         Self { cards }
     }
 
     pub fn from_cards(cards: Vec<PlayingCard>) -> Self {
-        Self { cards }
+        Self { cards: cards.into() }
     }
 
     pub fn len(&self) -> usize {
@@ -29,17 +29,17 @@ impl Deck {
         self.cards.get(index)
     }
 
-    pub fn cards(&self) -> &[PlayingCard] {
-        &self.cards
+    pub fn cards(&self) -> Vec<PlayingCard> {
+        self.cards.iter().copied().collect()
     }
 
     pub fn into_cards(self) -> Vec<PlayingCard> {
-        self.cards
+        self.cards.into()
     }
 
     pub fn shuffle<R: rand::Rng + ?Sized>(&mut self, rng: &mut R) {
         use rand::seq::SliceRandom;
-        self.cards.shuffle(rng);
+        self.cards.make_contiguous().shuffle(rng);
     }
 
     pub fn deal(&mut self, count: usize) -> Option<Vec<PlayingCard>> {
@@ -50,15 +50,11 @@ impl Deck {
     }
 
     pub fn deal_one(&mut self) -> Option<PlayingCard> {
-        if self.cards.is_empty() {
-            None
-        } else {
-            Some(self.cards.remove(0))
-        }
+        self.cards.pop_front()
     }
 
     pub fn push(&mut self, card: PlayingCard) {
-        self.cards.push(card);
+        self.cards.push_back(card);
     }
 
     pub fn extend<I>(&mut self, cards: I)
@@ -70,7 +66,7 @@ impl Deck {
 
     pub fn remove(&mut self, index: usize) -> Option<PlayingCard> {
         if index < self.cards.len() {
-            Some(self.cards.remove(index))
+            self.cards.remove(index)
         } else {
             None
         }
@@ -97,7 +93,7 @@ impl Default for Deck {
 
 impl IntoIterator for Deck {
     type Item = PlayingCard;
-    type IntoIter = std::vec::IntoIter<PlayingCard>;
+    type IntoIter = std::collections::vec_deque::IntoIter<PlayingCard>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.cards.into_iter()
@@ -107,6 +103,7 @@ impl IntoIterator for Deck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::z_poker::card::STANDARD_DECK_SIZE;
     use rand;
 
     #[test]

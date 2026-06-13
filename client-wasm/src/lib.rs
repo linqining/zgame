@@ -393,6 +393,30 @@ impl WasmClientPlayer {
         Ok(json_val_to_jsvalue(join_game_and_shuffle_json))
     }
 
+    pub fn leave_game(&self, deck_encrypted_json: &str) -> Result<JsValue, JsValue> {
+        let deck = json_to_ct_vec(deck_encrypted_json).map_err(|e| JsValue::from_str(&e))?;
+
+        let round = self.inner.leave_game(&deck);
+
+        let per_card_commitments_hex: Vec<String> = round.leave_proof.per_card_commitments.iter()
+            .map(ecpoint_to_hex).collect();
+        let leave_proof_json = format!(
+            r#"{{"per_card_commitments_hex":{},"commitment_pk_hex":"{}","response_hex":"{}","nonce_hex":"{}"}}"#,
+            serde_json::to_string(&per_card_commitments_hex).unwrap_or("[]".to_string()),
+            ecpoint_to_hex(&round.leave_proof.commitment_pk),
+            scalar_to_hex(&round.leave_proof.response),
+            scalar_to_hex(&round.leave_proof.nonce),
+        );
+
+        let leave_game_json = format!(
+            r#"{{"input_cards":{},"output_cards":{},"leave_proof":{}}}"#,
+            ct_vec_to_json(&round.input_cards),
+            ct_vec_to_json(&round.output_cards),
+            leave_proof_json,
+        );
+        Ok(json_val_to_jsvalue(leave_game_json))
+    }
+
     pub fn reveal_own_card(
         &self,
         hand_index: usize,

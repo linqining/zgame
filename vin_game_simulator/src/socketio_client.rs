@@ -127,11 +127,7 @@ impl ElGamalCiphertextInfo {
 }
 
 fn hex_to_ecpoint(hex_str: &str) -> Result<poker_protocol::crypto::EcPoint, String> {
-    let bytes = hex::decode(hex_str).map_err(|e| format!("Hex decode error: {}", e))?;
-    curve25519_dalek::ristretto::CompressedRistretto::from_slice(&bytes)
-        .map_err(|e| format!("Invalid compressed point: {}", e))?
-        .decompress()
-        .ok_or("Invalid EC point".to_string())
+    poker_protocol::z_poker::convert::hex_to_curve_point::<poker_protocol::crypto::DefaultCurve>(hex_str)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

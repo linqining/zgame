@@ -2,6 +2,7 @@ mod config;
 mod models;
 mod auth;
 mod handlers;
+mod wallet_auth;
 mod pokergame;
 mod socket;
 
@@ -25,7 +26,7 @@ async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "debug,tokio_runtime=info".into())
+                .unwrap_or_else(|_| "info,tokio_runtime=info".into())
         )
         .with_target(true)
         .with_thread_ids(false)
@@ -47,9 +48,9 @@ async fn main() -> std::io::Result<()> {
     let db = Database::new(&mongo_db).await;
 
     let mut initial_tables = HashMap::new();
-    initial_tables.insert(1, Table::new(1, "Table 1".to_string(), 10000, 5));
-    initial_tables.insert(2, Table::new(2, "Table 2".to_string(), 20000, 5));
-    initial_tables.insert(3, Table::new(3, "Table 3".to_string(), 50000, 5));
+    initial_tables.insert(1, Table::new(1, "Table 1".to_string(), 10000, config.max_players_per_table));
+    initial_tables.insert(2, Table::new(2, "Table 2".to_string(), 20000, config.max_players_per_table));
+    initial_tables.insert(3, Table::new(3, "Table 3".to_string(), 50000, config.max_players_per_table));
     for table in initial_tables.values_mut() {
         table.start_shuffle();
     }
@@ -78,10 +79,7 @@ async fn main() -> std::io::Result<()> {
         .route("/users", routing::post(handlers::register))
         .route("/chips/free", routing::get(handlers::free_chips))
         .route("/tables/:table_id", routing::get(handlers::get_table))
-        .route("/tables/:table_id/join-and-shuffle", routing::post(handlers::join_game_and_shuffle))
         .route("/games/:game_id/join", routing::post(handlers::join_game))
-        .route("/games/:game_id/join-and-shuffle", routing::post(handlers::join_game_and_shuffle))
-        .route("/games/:game_id/join-game-and-shuffle", routing::post(handlers::join_game_and_shuffle))
         .route("/games/:game_id/action", routing::post(handlers::player_action))
         .route("/games/:game_id/reveal-token", routing::post(handlers::submit_reveal_token));
 

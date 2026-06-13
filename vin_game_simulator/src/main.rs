@@ -15,6 +15,8 @@ pub use wallet_login::*;
 
 pub mod socketio_client;
 pub use socketio_client::*;
+use poker_protocol::crypto::CurveScalar;
+use poker_protocol::crypto::CurvePoint;
 
 const BASE_URL: &str = "http://localhost:3000/api";
 const KEYSTORE_PATH: &str = "keys.json";
@@ -128,22 +130,12 @@ fn ecpoint_to_hex(p: &EcPoint) -> String {
 }
 
 fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
-    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    curve25519_dalek::ristretto::CompressedRistretto::from_slice(&bytes)
-        .map_err(|e| format!("Invalid compressed point: {}", e))?
-        .decompress()
-        .ok_or_else(|| "Invalid EC point".to_string())
+    poker_protocol::z_poker::convert::hex_to_curve_point::<poker_protocol::crypto::DefaultCurve>(hex_str)
 }
 
 fn hex_to_scalar(hex_str: &str) -> Result<Scalar, String> {
     let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
-    if bytes.len() != 32 {
-        return Err("Scalar must be 32 bytes".to_string());
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Option::from(Scalar::from_canonical_bytes(arr))
-        .ok_or_else(|| "Invalid scalar value".to_string())
+    Ok(Scalar::from_bytes_mod_order(&bytes))
 }
 
 fn ct_to_json_obj(ct: &ElGamalCiphertext) -> serde_json::Value {
@@ -186,7 +178,7 @@ struct SimulatedPlayer {
     pk_hex: String,
     table_id: u32,
     client: Client,
-    wallet: WalletLogin,
+    wallet: RistrettoWalletLogin,
     token: Option<String>,
     socket_client: Option<SocketClient>,
 }
@@ -203,7 +195,7 @@ impl std::fmt::Debug for SimulatedPlayer {
 }
 
 impl SimulatedPlayer {
-    fn new(name: String, table_id: u32, client: Client, wallet: WalletLogin) -> Self {
+    fn new(name: String, table_id: u32, client: Client, wallet: RistrettoWalletLogin) -> Self {
         let client_player = ClientPlayer::new();
         let pk_hex = hex::encode(client_player.pk.compress().as_bytes());
         let json_client = SimulatorClientPlayer { inner: client_player.clone() };
@@ -509,7 +501,7 @@ impl GameSimulator {
         }
     }
 
-    async fn add_player(&mut self, name: String, table_id: u32, wallet: &WalletLogin) -> Result<(), Box<dyn std::error::Error>> {
+    async fn add_player(&mut self, name: String, table_id: u32, wallet: &RistrettoWalletLogin) -> Result<(), Box<dyn std::error::Error>> {
         println!("👤 Adding player: {}...", name);
 
         let mut player = SimulatedPlayer::new(name, table_id, self.client.clone(), wallet.clone());
@@ -759,7 +751,7 @@ fn random_u64() -> u64 {
     hasher.finish()
 }
 
-fn init_keystore() -> KeyStore {
+fn init_keystore() -> RistrettoKeyStore {
     match KeyStore::load_or_create(KEYSTORE_PATH, KEYSTORE_COUNT) {
         Ok(store) => store,
         Err(e) => {

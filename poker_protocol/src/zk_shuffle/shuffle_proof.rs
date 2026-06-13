@@ -91,8 +91,8 @@ impl<C: Curve> ZKShuffleProof<C> where Transcript: TranscriptExtension<C> {
         base_points_c1.push(C::base_g());
         base_points_c2.push(*pk);
 
-        let no_identity_c2 = input_cts.iter().all(|ct| !ct.c2.is_identity());
-        if !(no_identity_c2) {
+        let no_identity_input_c2 = input_cts.iter().all(|ct| !ct.c2.is_identity());
+        if !no_identity_input_c2 {
             return Err(VerificationError::IdentityBasePoint);
         }
 

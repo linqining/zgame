@@ -7,6 +7,7 @@ interface WasmClientPlayer {
   get_sk_hex(): string
   generate_pk_proof(): string
   join_game_and_shuffle(deckEncryptedJson: string, aggPkHex: string): string
+  leave_game(deckEncryptedJson: string): string
   shuffle(shuffleRoundIndex: number | undefined, aggregatePk: string): any
   batch_generate_reveal_token(cardJson: string): any
   verify_remask_proof(deckJson: string, maskCardsJson: string, remaskProofJson: string, pkHex: string): boolean

@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod betting;
 pub mod deck;
+pub mod error;
 pub mod evaluator;
 pub mod game_state;
 pub mod hand_rank;

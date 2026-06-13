@@ -3,10 +3,13 @@ module texas_poker::zk_verifier;
 use sui::bls12381;
 use sui::bls12381::G1;
 use sui::group_ops;
+use std::hash;
+use texas_poker::bls_scalar;
 use texas_poker::bls_transcript::{Self, Transcript};
 use texas_poker::bls_elgamal::{Self, ElGamalCiphertext};
 use texas_poker::reveal_token_proof::{Self, RevealTokenProof};
 use texas_poker::remask_proof::{Self, RemaskProof};
+use texas_poker::leave_proof::{Self, LeaveProof};
 use texas_poker::shuffle_proof::{Self, ShuffleProof};
 use texas_poker::reconstruct_proof::{Self, ReconstructProof};
 
@@ -16,9 +19,13 @@ const EShuffleProofFailed: vector<u8> = b"Shuffle proof verification failed";
 #[error]
 const ERemaskProofFailed: vector<u8> = b"Remask proof verification failed";
 #[error]
+const ELeaveProofFailed: vector<u8> = b"Leave proof verification failed";
+#[error]
 const ERevealTokenProofFailed: vector<u8> = b"Reveal token proof verification failed";
 #[error]
 const EReconstructProofFailed: vector<u8> = b"Reconstruct proof verification failed";
+#[error]
+const EPkOwnershipProofFailed: vector<u8> = b"PK ownership proof verification failed";
 
 // ========== Transcript 工厂 ==========
 
@@ -31,6 +38,12 @@ public fun new_shuffle_transcript(): Transcript {
 /// 创建重掩码证明的 Transcript
 public fun new_remask_transcript(): Transcript {
     let label = b"zk_remask_proof_v1";
+    bls_transcript::new(&label)
+}
+
+/// 创建离场证明的 Transcript
+public fun new_leave_transcript(): Transcript {
+    let label = b"zk_leave_proof_v1";
     bls_transcript::new(&label)
 }
 
@@ -82,6 +95,27 @@ public fun verify_remask_or_abort(
     proof: &RemaskProof,
 ) {
     assert!(verify_remask(input_cts, output_cts, player_pk, proof), ERemaskProofFailed);
+}
+
+/// 验证离场证明
+public fun verify_leave(
+    input_cts: &vector<ElGamalCiphertext>,
+    output_cts: &vector<ElGamalCiphertext>,
+    player_pk: &group_ops::Element<G1>,
+    proof: &LeaveProof,
+): bool {
+    let mut t = new_leave_transcript();
+    leave_proof::verify(proof, input_cts, output_cts, player_pk, &mut t)
+}
+
+/// 验证离场证明（断言版本）
+public fun verify_leave_or_abort(
+    input_cts: &vector<ElGamalCiphertext>,
+    output_cts: &vector<ElGamalCiphertext>,
+    player_pk: &group_ops::Element<G1>,
+    proof: &LeaveProof,
+) {
+    assert!(verify_leave(input_cts, output_cts, player_pk, proof), ELeaveProofFailed);
 }
 
 /// 验证揭牌令牌证明
@@ -162,4 +196,75 @@ public fun deserialize_ciphertexts(data: &vector<u8>): vector<ElGamalCiphertext>
 /// 从字节反序列化公钥
 public fun deserialize_pk(pk_bytes: &vector<u8>): group_ops::Element<G1> {
     bls12381::g1_from_bytes(pk_bytes)
+}
+
+// ========== PK 所有权证明 ==========
+
+/// 验证 PK 所有权证明 (Schnorr proof of knowledge of sk where pk = G * sk)
+/// proof_bytes 格式: commitment (48 bytes G1) + response (32 bytes scalar)
+/// 使用 SHA2-256 哈希，与 Rust 端 key_manager.rs 保持一致
+public fun verify_pk_ownership(pk: &group_ops::Element<G1>, proof_bytes: &vector<u8>): bool {
+    // 检查长度: 48 (commitment) + 32 (response) = 80
+    if (proof_bytes.length() != 80) {
+        return false
+    };
+
+    // 拒绝恒等元公钥
+    let g = bls12381::g1_generator();
+    let pk_bytes = bls_scalar::g1_to_bytes(pk);
+    let g_bytes = bls_scalar::g1_to_bytes(&g);
+
+    // 反序列化 commitment 和 response
+    let mut commitment_bytes = vector[];
+    let mut i = 0;
+    while (i < 48) {
+        commitment_bytes.push_back(*(vector::borrow(proof_bytes, i)));
+        i = i + 1;
+    };
+    let mut response_bytes = vector[];
+    i = 48;
+    while (i < 80) {
+        response_bytes.push_back(*(vector::borrow(proof_bytes, i)));
+        i = i + 1;
+    };
+
+    let commitment = bls12381::g1_from_bytes(&commitment_bytes);
+    let response = bls12381::scalar_from_bytes(&response_bytes);
+
+    // 拒绝恒等元 commitment
+    if (bls_scalar::g1_is_identity(&commitment)) {
+        return false
+    };
+
+    // 计算 challenge = SHA256(G_bytes || pk_bytes || commitment_bytes)
+    let mut hash_input = vector[];
+    let mut j = 0;
+    while (j < g_bytes.length()) {
+        hash_input.push_back(g_bytes[j]);
+        j = j + 1;
+    };
+    j = 0;
+    while (j < pk_bytes.length()) {
+        hash_input.push_back(pk_bytes[j]);
+        j = j + 1;
+    };
+    j = 0;
+    while (j < commitment_bytes.length()) {
+        hash_input.push_back(commitment_bytes[j]);
+        j = j + 1;
+    };
+    let challenge_bytes = hash::sha2_256(hash_input);
+    let challenge = bls12381::scalar_from_bytes(&challenge_bytes);
+
+    // 验证: G * response == commitment + pk * challenge
+    let lhs = bls12381::g1_mul(&response, &g);
+    let pk_c = bls12381::g1_mul(&challenge, pk);
+    let rhs = bls12381::g1_add(&commitment, &pk_c);
+
+    bls_scalar::g1_equal(&lhs, &rhs)
+}
+
+/// 验证 PK 所有权证明（断言版本）
+public fun verify_pk_ownership_or_abort(pk: &group_ops::Element<G1>, proof_bytes: &vector<u8>) {
+    assert!(verify_pk_ownership(pk, proof_bytes), EPkOwnershipProofFailed);
 }

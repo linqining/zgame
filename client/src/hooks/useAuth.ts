@@ -29,8 +29,11 @@ const useAuth = (): UseAuthReturn => {
   } = useGlobalContext();
 
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [walletAddress, setWalletAddress] = useState<string | null>(
+    localStorage.getItem('walletAddress')
+  );
   const [prevWalletAddress, setPrevWalletAddress] = useState<string | null>(null);
+  const [authRetryCount, setAuthRetryCount] = useState(0);
 
   const currentAccount = useCurrentAccount();
 
@@ -49,6 +52,7 @@ const useAuth = (): UseAuthReturn => {
     if (currentAccount) {
       setWalletAddress(currentAccount.address);
       setPrevWalletAddress(currentAccount.address);
+      localStorage.setItem('walletAddress', currentAccount.address);
     } else {
       setWalletAddress(null);
       // Wallet was connected before but now disconnected
@@ -56,16 +60,22 @@ const useAuth = (): UseAuthReturn => {
         disconnectWallet();
       }
       setPrevWalletAddress(null);
+      localStorage.removeItem('walletAddress');
     }
   }, [currentAccount]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-authenticate with backend when wallet connects
+  // Auto-authenticate with backend when wallet connects (skip if already logged in)
   useEffect(() => {
-    if (walletAddress && !isLoggedIn) {
-      authenticateWithWallet(walletAddress);
+    if (walletAddress && !isLoggedIn && authRetryCount < 3) {
+      const storedToken = localStorage.getItem('token');
+      if (!storedToken) {
+        authenticateWithWallet(walletAddress);
+      } else {
+        loadUser(storedToken);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walletAddress]);
+  }, [walletAddress, isLoggedIn, authRetryCount]);
 
   const authenticateWithWallet = async (address: string): Promise<void> => {
     setIsLoading(true);
@@ -91,9 +101,15 @@ const useAuth = (): UseAuthReturn => {
         localStorage.setItem('token', token);
         setAuthToken(token);
         await loadUser(token);
+        setAuthRetryCount(0);
       }
     } catch (error) {
+      const err = error as Error;
       console.error('Wallet authentication failed:', error);
+      if (err.message?.includes('Incorrect password') || err.message?.includes('User rejected')) {
+        console.warn('[Auth] Wallet signing rejected or failed, will not auto-retry');
+      }
+      setAuthRetryCount(prev => prev + 1);
     }
     setIsLoading(false);
   };
@@ -158,12 +174,14 @@ const useAuth = (): UseAuthReturn => {
       setChipsAmount(chipsAmount);
     } catch (error) {
       localStorage.removeItem('token');
-      alert(error);
+      setAuthRetryCount(prev => prev + 1);
+      console.error('loadUser failed:', error);
     }
   };
 
   const logout = useCallback((): void => {
     localStorage.removeItem('token');
+    localStorage.removeItem('walletAddress');
     setIsLoggedIn(false);
     setId(null);
     setUserName(null);

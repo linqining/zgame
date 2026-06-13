@@ -127,8 +127,8 @@ export interface GameContextType {
   revealLoading: boolean;
   decryptedHandCards: string[];
   communityCards: Card[];
-  joinTable: (tableId: number) => void;
-  leaveTable: (shouldNavigate?: boolean) => void;
+  joinTable: (tableId: number, pkHex: string) => void;
+  leaveTable: (shouldNavigate?: boolean, pkHex?: string) => void;
   sitDown: (tableId: string, seatId: number, amount: number) => Promise<void>;
   standUp: () => void;
   addMessage: (message: string) => void;

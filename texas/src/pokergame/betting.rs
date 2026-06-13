@@ -1,6 +1,5 @@
 use crate::pokergame::seat::Seat;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct BettingRound {
     current_bet: u64,
@@ -10,7 +9,6 @@ pub struct BettingRound {
     actions_taken: usize,
 }
 
-#[allow(dead_code)]
 impl BettingRound {
     pub fn new(big_blind: u64) -> Self {
         Self {
@@ -82,43 +80,11 @@ impl BettingRound {
         Ok(())
     }
 
-    pub fn process_fold(&mut self) -> Result<(), String> {
-        self.actions_taken += 1;
-        Ok(())
-    }
 
-    pub fn process_check(&mut self) -> Result<(), String> {
-        self.actions_taken += 1;
-        Ok(())
-    }
 
-    pub fn process_call(&mut self, seat: &mut Seat) -> Result<u64, String> {
-        let chips_to_call = self.current_bet.saturating_sub(seat.bet);
-        if chips_to_call == 0 {
-            return Err("nothing to call - use check instead".to_string());
-        }
-        let actual = if chips_to_call > seat.stack { seat.stack } else { chips_to_call };
-        seat.call_raise(self.current_bet);
-        self.actions_taken += 1;
-        Ok(actual)
-    }
-
-    pub fn process_raise(&mut self, seat: &mut Seat, total_bet: u64, seat_id: u32) -> Result<u64, String> {
-        let raise_amount = total_bet.saturating_sub(self.current_bet);
-        self.validate_raise(seat, raise_amount)?;
-        seat.raise(total_bet);
-        self.min_raise = raise_amount;
-        self.current_bet = seat.bet;
-        self.last_raiser_seat_id = Some(seat_id);
-        self.actions_taken += 1;
-        Ok(raise_amount)
-    }
-
-    pub fn is_complete(&self, seats: &[Option<&Seat>]) -> bool {
+    pub fn is_complete(&self, seats: &[&Seat]) -> bool {
         let active_players: Vec<&&Seat> = seats
             .iter()
-            .filter(|s| s.is_some())
-            .map(|s| s.as_ref().unwrap())
             .filter(|s| !s.folded && !s.sitting_out && s.stack > 0)
             .collect();
 

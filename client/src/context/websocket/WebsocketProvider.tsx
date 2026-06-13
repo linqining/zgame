@@ -27,18 +27,21 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   const [socket, setSocket] = useState<Socket | null>(null);
   const [socketId, setSocketId] = useState<string | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
   const socketRef = useRef<Socket | null>(null);
 
   const cleanUp = useCallback(() => {
     if (socketRef.current) {
       socketRef.current.emit(DISCONNECT);
       socketRef.current.off();
+      socketRef.current.io.off();
       socketRef.current.close();
       socketRef.current = null;
     }
     window.socket = undefined;
     setSocket(null);
     setSocketId(null);
+    setIsConnected(false);
     setPlayers(null);
     setTables(null);
   }, [setPlayers, setTables]);
@@ -59,6 +62,10 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         const newSocket = io(config.socketURI, {
           transports: ['websocket'],
           upgrade: false,
+          reconnection: true,
+          reconnectionAttempts: 10,
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 5000,
         });
 
         newSocket.on(RECEIVE_LOBBY_INFO, ({ tables, players, socketId }: ReceiveLobbyInfoPayload) => {
@@ -76,6 +83,23 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         newSocket.on(TABLES_UPDATED, (tables: unknown[]) => {
           console.log(TABLES_UPDATED, tables);
           setTables(tables);
+        });
+
+        // On reconnect, re-emit FETCH_LOBBY_INFO to trigger server-side reconnection logic
+        newSocket.io.on('reconnect', () => {
+          console.log('[Socket] Reconnected, re-emitting FETCH_LOBBY_INFO');
+          const token = localStorage.token;
+          if (token) newSocket.emit(FETCH_LOBBY_INFO, token);
+        });
+
+        newSocket.on('connect', () => {
+          console.log('[Socket] Connected');
+          setIsConnected(true);
+        });
+
+        newSocket.on('disconnect', (reason) => {
+          console.log('[Socket] Disconnected:', reason);
+          setIsConnected(false);
         });
 
         socketRef.current = newSocket;
@@ -97,7 +121,7 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   }, [isLoggedIn, walletAddress]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <SocketContext.Provider value={{ socket, socketId, cleanUp }}>
+    <SocketContext.Provider value={{ socket, socketId, isConnected, cleanUp }}>
       {children}
     </SocketContext.Provider>
   );

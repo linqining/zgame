@@ -264,6 +264,19 @@ export class WasmClientPlayer {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * @param {string} deck_encrypted_json
+     * @returns {any}
+     */
+    leave_game(deck_encrypted_json) {
+        const ptr0 = passStringToWasm0(deck_encrypted_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmclientplayer_leave_game(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * @param {string} plaintext_hex
      * @param {string} pk_hex
      * @returns {any}

@@ -2,6 +2,7 @@ import React, { useContext } from 'react';
 import Container from '../components/layout/Container';
 import Heading from '../components/typography/Heading';
 import ColoredText from '../components/typography/ColoredText';
+import { PlayerName } from '../components/game/PlayerName';
 import jackImg from '../assets/img/jack-rounded-img@2x.png';
 import kingImg from '../assets/img/king-rounded-img@2x.png';
 import queenImg from '../assets/img/queen-rounded-img@2x.png';
@@ -130,7 +131,7 @@ const MainPage: React.FC = () => {
     >
       <WelcomeHeading as="h2" textCentered>
         {getLocalizedString('main_page-salutation')}{' '}
-        <ColoredText>{userName}!</ColoredText>
+        <ColoredText><PlayerName name={userName} />!</ColoredText>
       </WelcomeHeading>
       <MainMenuWrapper>
         <MainMenuCard onClick={() => navigate('/play')}>

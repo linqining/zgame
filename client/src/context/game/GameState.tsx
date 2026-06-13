@@ -164,27 +164,44 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const currentTableRef = useRef<Table | null>(null);
   const shuffleLoadingRef = useRef(false);
   const revealLoadingRef = useRef(false);
+  const isUnmountingRef = useRef(false);
 
-  const isPlayerSeated = !!(currentTable && socketId && currentTable.seats && Object.values(currentTable.seats).some(
-    (seat: Seat) => seat && seat.player && seat.player.socketId === socketId
+  // Mark component as unmounting so the socket effect cleanup knows to leave table
+  useEffect(() => {
+    return () => {
+      isUnmountingRef.current = true;
+    };
+  }, []);
+
+  const isPlayerSeated = !!(currentTable && pkHex && currentTable.seats && Object.values(currentTable.seats).some(
+    (seat: Seat) => seat && seat.player && seat.player.pkHex === pkHex
   ));
 
-  const seatId: number | null = currentTable && socketId && currentTable.seats
+  const seatId: number | null = currentTable && pkHex && currentTable.seats
     ? Object.values(currentTable.seats).find(
-        (seat: Seat) => seat && seat.player && seat.player.socketId === socketId
+        (seat: Seat) => seat && seat.player && seat.player.pkHex === pkHex
       )?.id ?? null
     : null;
 
   const displayTable = useMemo(() => {
     if (!currentTable || decryptedHandCards.length === 0 || seatId === null) {
+      console.log('[displayTable] Skipping hand injection:', {
+        hasTable: !!currentTable,
+        decryptedCount: decryptedHandCards.length,
+        seatId,
+      });
       return currentTable;
     }
     const seat = currentTable.seats[seatId];
-    if (!seat) return currentTable;
+    if (!seat) {
+      console.log('[displayTable] Seat not found for seatId:', seatId, 'available keys:', Object.keys(currentTable.seats));
+      return currentTable;
+    }
     const handCards: Card[] = decryptedHandCards.map((cardStr) => ({
       suit: cardStr.slice(0, 1),
       rank: cardStr.slice(1),
     }));
+    console.log('[displayTable] Injecting decrypted hand cards:', handCards, 'for seatId:', seatId);
     return {
       ...currentTable,
       seats: {
@@ -379,7 +396,7 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     }
   }, [playerKeys, pkHex, getPlayerKeys, addMessage]);
 
-  const handleHandRevealResult = useCallback(async (data: HandRevealResultData) => {
+  const handleHandRevealResult = useCallback((data: HandRevealResultData): HandRevealReturn | null => {
     console.log(HAND_REVEAL_RESULT, data);
     const { tableId, playerPk, readableCards, deckPlaintext } = data;
 
@@ -499,7 +516,7 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   }, [playerKeys, pkHex, getPlayerKeys, addMessage]);
 
   useEffect(() => {
-    const onUnload = () => leaveTable(false);
+    const onUnload = () => leaveTable(false, pkHex || undefined);
     window.addEventListener('unload', onUnload);
     window.addEventListener('close', onUnload);
 
@@ -520,7 +537,7 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       socket.on(TABLE_LEFT, ({ tables, tableId }: TableLeftPayload) => {
         console.log(TABLE_LEFT, tables, tableId);
         setCurrentTable(null);
-        loadUser(localStorage.token);
+        // loadUser(localStorage.token);
         setMessages([]);
         setDecryptedHandCards([]);
         setCommunityCards([]);
@@ -562,7 +579,7 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       });
 
       socket.on(HAND_REVEAL_RESULT, (data: HandRevealResultData) => {
-        const redealInfo = handleHandRevealResult(data) as unknown as HandRevealReturn | null;
+        const redealInfo = handleHandRevealResult(data);
         if (redealInfo) {
           socket.emit(REDEAL_REQUEST, {
             tableId: currentTableRef.current?.id,
@@ -583,7 +600,7 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       });
 
       socket.on(REDEAL_RESULT, (data: HandRevealResultData) => {
-        const redealInfo = handleHandRevealResult(data) as unknown as HandRevealReturn | null;
+        const redealInfo = handleHandRevealResult(data);
         if (redealInfo) {
           addMessage(`Redeal decryption still failed for ${redealInfo.failedCardIndices?.length || 0} cards`);
         } else {
@@ -605,21 +622,25 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       socket?.off(COMMUNITY_REVEAL_RESULT);
       socket?.off(REDEAL_NOTICE);
       socket?.off(REDEAL_RESULT);
-      leaveTable();
+      // Only leave table on actual component unmount, not on socket disconnect
+      // Socket disconnect will trigger reconnect via FETCH_LOBBY_INFO
+      if (isUnmountingRef.current) {
+        leaveTable(true, pkHex || undefined);
+      }
     };
   }, [socket, handleShuffleNotice, handleRevealNotice, handleReconstructNotice, handleHandRevealResult, handleCommunityRevealResult]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const joinTable = (tableId: number) => {
-    console.log(JOIN_TABLE, tableId);
-    socket?.emit(JOIN_TABLE, tableId);
+  const joinTable = (tableId: number, pkHex: string) => {
+    console.log(JOIN_TABLE, { tableId, pkHex });
+    socket?.emit(JOIN_TABLE, { tableId, pkHex });
   };
 
-  const leaveTable = (shouldNavigate = true) => {
+  const leaveTable = (shouldNavigate = true, pkHex?: string) => {
     isPlayerSeated && standUp();
     currentTableRef &&
       currentTableRef.current &&
       currentTableRef.current.id &&
-      socket?.emit(LEAVE_TABLE, currentTableRef.current.id);
+      socket?.emit(LEAVE_TABLE, { tableId: currentTableRef.current.id, pkHex: pkHex || '' });
     if (shouldNavigate) navigate('/');
   };
 
@@ -650,13 +671,19 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       return;
     }
     try {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        console.error('[SitDown] No auth token available');
+        addMessage('Cannot sit down: please connect your wallet first');
+        return;
+      }
       const pkHexes = (Object.values(table.seats) || [])
         .filter((p: Seat) => p.player && p.player.pkHex && p.player.pkHex !== pkHex).map((p: Seat) => p.player!.pkHex);
       const pkHexesJson = JSON.stringify(pkHexes);
       const aggPkHex = compute_aggregate_key(pkHexesJson);
 
       const deckEncryptedJson = JSON.stringify(deckEncrypted);
-      console.log('SIT_DOWN_V2', tableId, seatId, amount, pkHex, aggPkHex, deckEncryptedJson);
+      console.log('SIT_DOWN_V2', tableId, seatId, amount, pkHex, aggPkHex);
       const joinResult = wrapCryptoOp(() => {
         const result = keys.join_game_and_shuffle(deckEncryptedJson, aggPkHex);
         if (!result) throw new Error('join_game_and_shuffle returned null');
@@ -670,8 +697,8 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         shuffle_proof: joinResult.mask_and_shuffle_round.shuffle_proof,
       };
       const pkProof = joinResult.pk_ownership_proof;
-      console.log('SIT_DOWN_V2', tableId, seatId, amount, pkHex, pkProof, maskAndShuffleRound, keys.get_pk_hex());
-      socket?.emit(SIT_DOWN_V2, { tableId, seatId, amount, pkHex, pkProof, maskAndShuffleRound });
+      console.log('SIT_DOWN_V2', tableId, seatId, amount, pkHex, pkProof, maskAndShuffleRound, keys.get_pk_hex(), localStorage.token);
+      socket?.emit(SIT_DOWN_V2, { token, tableId, seatId, amount, pkHex, pkProof, maskAndShuffleRound });
       addMessage('Joined table and shuffled successfully');
     } catch (e) {
       const err = e as Error;
@@ -684,10 +711,43 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     socket?.emit(REBUY, { tableId, seatId, amount });
   };
 
-  const standUp = () => {
-    currentTableRef &&
-      currentTableRef.current &&
-      socket?.emit(STAND_UP, currentTableRef.current.id);
+  const standUp = async () => {
+    if (!currentTableRef.current) return;
+    const table = currentTableRef.current;
+
+
+    const keys = playerKeys || getPlayerKeys();
+    if (!keys) {
+      console.error('[StandUp] No player keys available');
+      return;
+    }
+
+    const deckEncrypted = table.shuffleState?.deck_encrypted || table.deck?.cards;
+    if (!deckEncrypted || deckEncrypted.length === 0) {
+      console.warn('[StandUp] No deck_encrypted, falling back to simple stand up');
+      return;
+    }
+
+    try {
+      const deckEncryptedJson = JSON.stringify(deckEncrypted);
+      const leaveResult = wrapCryptoOp(() => {
+        const result = keys.leave_game(deckEncryptedJson);
+        if (!result) throw new Error('leave_game returned null');
+        return typeof result === 'string' ? JSON.parse(result) : result;
+      }, 'leave_game') as { input_cards: unknown; output_cards: unknown; leave_proof: unknown };
+
+      const leaveRound = {
+        input_cards: leaveResult.input_cards,
+        output_cards: leaveResult.output_cards,
+        leave_proof: leaveResult.leave_proof,
+      };
+
+      socket?.emit(STAND_UP, { tableId: table.id, pkHex, leaveRound });
+    } catch (e) {
+      const err = e as Error;
+      console.error('[StandUp] leave_game failed:', e);
+      // Fallback to simple stand up without proof
+    }
   };
 
   const fold = () => {

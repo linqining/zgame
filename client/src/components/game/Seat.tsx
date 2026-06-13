@@ -17,11 +17,14 @@ import { EmptySeat } from './EmptySeat';
 import { OccupiedSeat } from './OccupiedSeat';
 import { Hand } from './Hand';
 import { NameTag } from './NameTag';
+import { PlayerName } from './PlayerName';
 import contentContext from '../../context/content/contentContext';
 import Markdown from 'react-markdown';
 import DealerButton from '../icons/DealerButton';
 import { StyledSeat } from './StyledSeat';
 import { Table } from '../../types/game';
+import authContext from '../../context/auth/authContext';
+import { ConnectButton } from '@mysten/dapp-kit-react/ui';
 
 interface SeatProps {
   currentTable: Table;
@@ -35,10 +38,17 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
   const { chipsAmount } = useContext(globalContext)!;
   const { standUp, seatId, rebuy } = useContext(gameContext)!;
   const { getLocalizedString } = useContext(contentContext)!;
+  const { isLoggedIn, walletAddress } = useContext(authContext)!;
+  const hasWallet = !!walletAddress;
 
   const seat = currentTable.seats[seatNumber];
   const maxBuyin = currentTable.limit;
   const minBuyIn = currentTable.minBet * 2 * 10;
+
+  // Debug: log hand cards for the current player's seat
+  if (seat && seatId !== null && seat.id === seatId) {
+    console.log('[Seat] seatNumber:', seatNumber, 'seatId:', seatId, 'hand:', seat.hand);
+  }
 
   useEffect(() => {
     if (
@@ -111,6 +121,14 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
             <Button
               small
               onClick={() => {
+                if (!isLoggedIn && !hasWallet) {
+                  openModal(
+                    () => <ConnectButton />,
+                    getLocalizedString('game_buyin-modal_header'),
+                    getLocalizedString('game_buyin-modal_cancel'),
+                  );
+                  return;
+                }
                 openModal(
                   () => (
                     <Form
@@ -175,7 +193,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
           <PositionedUISlot top="-6.25rem" left="-75px" origin="top center">
             <NameTag>
               <ColoredText primary textAlign="center">
-                {seat.player!.name}
+                <PlayerName name={seat.player!.name} />
                 <br />
                 {seat.stack && (
                   <ColoredText secondary>

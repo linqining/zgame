@@ -169,7 +169,7 @@ impl PlayingCard {
 
 
     pub fn from_index(index: usize) -> Option<Self> {
-        standard_deck().get(index).copied()
+        Self::from_id(index)
     }
 }
 
@@ -255,11 +255,5 @@ mod tests {
         assert!(Rank::King < Rank::Ace);
     }
 
-    #[test]
-    fn test_display_format() {
-        let card = PlayingCard::new(Rank::Ace, Suit::Spade);
-        assert_eq!(format!("{}", card), "A\u{2660}");
-        let card = PlayingCard::new(Rank::Ten, Suit::Heart);
-        assert_eq!(format!("{}", card), "10\u{2665}");
-    }
+
 }

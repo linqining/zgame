@@ -12,15 +12,15 @@ use std::sync::Arc;
 use crate::auth;
 use crate::config::Config;
 use crate::models::{Database, UserResponse};
-use crate::pokergame::player::Player;
-use crate::pokergame::game_state::{MaskAndShuffleRoundJson, PkProofJson, SubmitRevealTokenJson};
+use crate::pokergame::player::{Player, WalletAddress};
+use crate::pokergame::game_state::SubmitRevealTokenJson;
 use crate::socket::SocketState;
 use crate::pokergame::game_state::RevealPhase;
-use crate::pokergame::table::{JoinError, JoinResult};
+
 use poker_protocol::z_poker::protocol::ClientPlayer;
-use poker_protocol::crypto::EcPoint;
 use poker_protocol::z_poker::convert::hex_to_ecpoint;
-use poker_protocol::crypto::CurvePoint;
+
+use crate::wallet_auth;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -105,16 +105,6 @@ struct JoinGameRequest {
 }
 
 #[derive(Deserialize)]
-struct JoinAndShuffleRequest {
-    pk_hex: String,
-    name: String,
-    pk_proof: PkProofJson,
-    mask_and_shuffle_round: MaskAndShuffleRoundJson,
-    seat_id: u32,
-    amount: u64,
-}
-
-#[derive(Deserialize)]
 struct ActionRequestHttp {
     pk_hex: String,
     action: String,
@@ -127,12 +117,8 @@ struct RevealTokenRequest {
     reveal_tokens: Vec<SubmitRevealTokenJson>,
 }
 
-fn parse_game_id(game_id: &str) -> Option<u32> {
-    game_id.parse::<u32>().ok()
-}
-
-fn parse_table_id(table_id: &str) -> Option<u32> {
-    table_id.parse::<u32>().ok()
+fn parse_id(id: &str) -> Option<u32> {
+    id.parse::<u32>().ok()
 }
 
 fn err_resp(code: StatusCode, msg: &str) -> Response {
@@ -157,7 +143,7 @@ pub async fn get_table(
     Path(table_id): Path<String>,
 ) -> Response {
     tracing::debug!("[get_table] request received, table_id={}", table_id);
-    let table_id = match parse_game_id(&table_id) {
+    let table_id = match parse_id(&table_id) {
         Some(id) => id,
         None => {
             tracing::warn!("[get_table] invalid table_id: {}", table_id);
@@ -196,7 +182,7 @@ pub async fn join_game(
     };
     let body = match serde_json::from_slice::<JoinGameRequest>(&body) {
         Ok(v) => {
-            tracing::debug!("[join_game] parsed body, pk_hex={}, name={}", v.pk_hex, v.name);
+            tracing::info!("[join_game] parsed body, pk_hex={}, name={}", v.pk_hex, v.name);
             v
         }
         Err(_) => {
@@ -205,7 +191,7 @@ pub async fn join_game(
         }
     };
 
-    let table_id = match parse_game_id(&game_id) {
+    let table_id = match parse_id(&game_id) {
         Some(id) => id,
         None => {
             tracing::warn!("[join_game] invalid game_id: {}", game_id);
@@ -213,12 +199,14 @@ pub async fn join_game(
         }
     };
 
-    if state.socket_state.is_player_in_seat(&body.pk_hex).await {
-        tracing::warn!("[join_game] player already in seat, pk_hex={}", body.pk_hex);
+    let pk_hex = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
+
+    if state.socket_state.is_player_in_seat(&pk_hex).await {
+        tracing::warn!("[join_game] player already in seat, pk_hex={}", pk_hex);
         return err_resp(StatusCode::BAD_REQUEST, "Player already in game");
     }
 
-    let player = match state.socket_state.find_player_by_pk(&body.pk_hex).await {
+    let player = match state.socket_state.find_player_by_pk(table_id, &pk_hex).await {
         Some(p) => {
             tracing::debug!("[join_game] found existing player by pk_hex, socket_id={}", p.socket_id);
             p
@@ -230,13 +218,12 @@ pub async fn join_game(
                 id: body.pk_hex.clone(),
                 name: body.name.clone(),
                 bankroll: 0,
-                pk_hex: body.pk_hex.clone(),
-                readable_hands: vec![],
+                wallet_address: WalletAddress::new(""),
             }
         }
     };
 
-    if state.socket_state.add_player_to_table(table_id, player).await.is_err() {
+    if state.socket_state.add_player_to_table(table_id, player, &pk_hex).await.is_err() {
         tracing::warn!("[join_game] table not found, table_id={}", table_id);
         return err_resp(StatusCode::NOT_FOUND, "Table not found");
     }
@@ -249,120 +236,6 @@ pub async fn join_game(
 }
 
 
-pub async fn join_game_and_shuffle(
-    headers: HeaderMap,
-    Extension(state): Extension<Arc<AppState>>,
-    Path(table_id): Path<String>,
-    req: Request<Body>,
-) -> Response {
-    if let Err(resp) = verify_auth(&headers, &state.config.jwt_secret) {
-        return resp;
-    }
-    tracing::debug!("[join_game_and_shuffle] request received, table_id={}", table_id);
-    let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
-        Ok(b) => b,
-        Err(_) => {
-            tracing::warn!("[join_game_and_shuffle] failed to read request body");
-            return err_resp(StatusCode::BAD_REQUEST, "Invalid request body");
-        }
-    };
-
-    let body = match serde_json::from_slice::<JoinAndShuffleRequest>(&body) {
-        Ok(v) => {
-            tracing::debug!("[join_game_and_shuffle] parsed body, pk_hex={}, name={}", v.pk_hex, v.name);
-            v
-        }
-        Err(e) => {
-            tracing::warn!("[join_game_and_shuffle] failed to parse JSON body: {}", e);
-            return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e));
-        }
-    };
-    tracing::debug!("[join_game_and_shuffle] parsed body: {:?}", body.pk_proof);
-
-    let table_id = match parse_table_id(&table_id) {
-        Some(id) => id,
-        None => {
-            tracing::warn!("[join_game_and_shuffle] invalid table_id: {}", table_id);
-            return err_resp(StatusCode::BAD_REQUEST, "Invalid table_id");
-        }
-    };
-
-    let player_pk = match hex_to_ecpoint(&body.pk_hex) {
-        Ok(pk) => {
-            tracing::debug!("[join_game_and_shuffle] pk_hex decoded to EcPoint successfully");
-            pk
-        }
-        Err(_) => {
-            tracing::warn!("[join_game_and_shuffle] invalid pk_hex, cannot decode to EcPoint: {}", body.pk_hex);
-            return err_resp(StatusCode::BAD_REQUEST, "Invalid pk_hex");
-        }
-    };
-
-    let player_id = match state.db.find_user_by_pk_hex(&body.pk_hex).await {
-        Some(user) => {
-            tracing::debug!("[join_game_and_shuffle] found existing user by pk_hex, user_id={}", user.id);
-            user.id
-        }
-        None => {
-            let id = format!("wallet:{}", body.pk_hex);
-            tracing::debug!("[join_game_and_shuffle] no user found for pk_hex, using generated id={}", id);
-            id
-        }
-    };
-
-    let player = match state.socket_state.find_player_by_pk(&body.pk_hex).await {
-        Some(p) => {
-            tracing::debug!("[join_game_and_shuffle] found existing player by pk_hex, socket_id={}", p.socket_id);
-            p
-        }
-        None => {
-            tracing::debug!("[join_game_and_shuffle] no existing player found for pk_hex, creating http player", );
-            Player {
-                socket_id: format!("http_{}", body.pk_hex),
-                id: player_id,
-                name: body.name.clone(),
-                bankroll: 0,
-                pk_hex: body.pk_hex.clone(),
-                readable_hands: vec![],
-            }
-        }
-    };
-
-    match state.socket_state.join_player_and_shuffle(table_id, player, player_pk, body.pk_proof, body.mask_and_shuffle_round, body.seat_id, body.amount).await {
-        Ok((should_start_game_loop, join_result)) => {
-            match join_result {
-                JoinResult::JoinedAndShuffled => {
-                    tracing::debug!("[join_game_and_shuffle] joined and shuffled successfully, pk_hex={}, table_id={}, should_start_game_loop={}", body.pk_hex, table_id, should_start_game_loop);
-                    if should_start_game_loop {
-                        tracing::info!("[join_game_and_shuffle] all players shuffled, starting game loop for table_id={}", table_id);
-                        state.socket_state.start_game_loop_from_ctx(state.socket_state.clone(), table_id).await;
-                    }
-                    (StatusCode::OK, Json(serde_json::json!({
-                        "player": {"id": body.pk_hex},
-                        "message": "Joined and shuffled successfully",
-                        "status": "joinedAndShuffled"
-                    }))).into_response()
-                }
-                JoinResult::JoinedWaiting => {
-                    tracing::debug!("[join_game_and_shuffle] joined as waiting, pk_hex={}, table_id={}", body.pk_hex, table_id);
-                    (StatusCode::OK, Json(serde_json::json!({
-                        "player": {"id": body.pk_hex},
-                        "message": "Joined, waiting for next hand",
-                        "status": "joinedWaiting"
-                    }))).into_response()
-                }
-            }
-        }
-        Err(JoinError::Crypto(msg)) if msg == "Table not found" => {
-            tracing::warn!("[join_game_and_shuffle] table not found, table_id={}", table_id);
-            err_resp(StatusCode::NOT_FOUND, &msg)
-        }
-        Err(e) => {
-            tracing::warn!("[join_game_and_shuffle] join and shuffle failed, pk_hex={}, table_id={}, error={}", body.pk_hex, table_id, e);
-            err_resp(StatusCode::BAD_REQUEST, &e.to_string())
-        }
-    }
-}
 
 pub async fn player_action(
     headers: HeaderMap,
@@ -393,7 +266,7 @@ pub async fn player_action(
         }
     };
 
-    let table_id = match parse_game_id(&game_id) {
+    let table_id = match parse_id(&game_id) {
         Some(id) => id,
         None => {
             tracing::warn!("[player_action] invalid game_id: {}", game_id);
@@ -402,28 +275,14 @@ pub async fn player_action(
     };
 
     // Verify that the authenticated user owns the pk_hex
-    let user = match state.db.find_user_by_id(&claims.user.id).await {
+    let _user = match state.db.find_user_by_id(&claims.user.id).await {
         Some(u) => u,
         None => {
             tracing::warn!("[player_action] user not found, user_id={}", claims.user.id);
             return err_resp(StatusCode::UNAUTHORIZED, "User not found");
         }
     };
-    if user.pk_hex != body.pk_hex {
-        tracing::warn!("[player_action] pk_hex mismatch: user={} attempted action for pk_hex={}", user.pk_hex, body.pk_hex);
-        return err_resp(StatusCode::FORBIDDEN, "Not authorized to act for this player");
-    }
 
-    let socket_id = match state.socket_state.find_socket_id_by_pk(&body.pk_hex).await {
-        Some(id) => {
-            tracing::debug!("[player_action] found socket_id={} for pk_hex={}", id, body.pk_hex);
-            id
-        }
-        None => {
-            tracing::warn!("[player_action] player not found, pk_hex={}", body.pk_hex);
-            return err_resp(StatusCode::NOT_FOUND, "Player not found");
-        }
-    };
 
     let sender = match state.socket_state.get_action_sender(table_id).await {
         Some(s) => {
@@ -437,7 +296,7 @@ pub async fn player_action(
     };
 
     let action_request = crate::pokergame::table::ActionRequest {
-        socket_id,
+        pk_hex: crate::pokergame::player::GamePkHex::new(body.pk_hex.clone()),
         action: body.action.clone(),
         amount: body.amount,
     };
@@ -484,7 +343,7 @@ pub async fn submit_reveal_token(
         }
     };
 
-    let table_id = match parse_game_id(&game_id) {
+    let table_id = match parse_id(&game_id) {
         Some(id) => id,
         None => {
             tracing::warn!("[submit_reveal_token] invalid game_id: {}", game_id);
@@ -535,15 +394,17 @@ pub async fn submit_reveal_token(
 
     let reveal_phase = state.socket_state.get_reveal_phase_for_table(table_id).await.unwrap_or_default();
 
-    if let Err(e) = state.socket_state.submit_reveal_tokens_for_pk(table_id, &body.pk_hex, tokens).await {
-        tracing::warn!("[submit_reveal_token] submit failed, table_id={}, pk_hex={}, error={}", table_id, body.pk_hex, e);
+    let pk_hex = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
+
+    if let Err(e) = state.socket_state.submit_reveal_tokens_for_pk(table_id, &pk_hex, tokens).await {
+        tracing::warn!("[submit_reveal_token] submit failed, table_id={}, pk_hex={}, error={}", table_id, pk_hex, e);
         return err_resp(StatusCode::BAD_REQUEST, &e);
     }
 
     // todo 发送完成通知
-    let all_complete = match state.socket_state.mark_reveal_complete_for_pk(table_id, &body.pk_hex).await {
+    let all_complete = match state.socket_state.mark_reveal_complete_for_pk(table_id, &pk_hex).await {
         Ok(result) => {
-            tracing::debug!("[submit_reveal_token] reveal marked, table_id={}, pk_hex={}, all_complete={}", table_id, body.pk_hex, result);
+            tracing::info!("[submit_reveal_token] reveal marked, table_id={}, pk_hex={}, all_complete={}", table_id, body.pk_hex, result);
             result
         }
         Err(e) => {
@@ -635,215 +496,6 @@ struct WalletLoginRequest {
     message: String,
 }
 
-async fn verify_sui_wallet_signature<'a>(
-    message: &'a str,
-    signature: &'a sui_sdk_types::UserSignature,
-    expected_address: &'a str,
-) -> Result<(String, String), String> {
-    tracing::debug!("[verify_sui_wallet_signature] verifying signature, expected_address={}", expected_address);
-    let personal_msg = sui_sdk_types::PersonalMessage(message.as_bytes().into());
-
-    match signature {
-        sui_sdk_types::UserSignature::Simple(simple_sig) => {
-            verify_simple_signature(&personal_msg, simple_sig, expected_address)
-        }
-        sui_sdk_types::UserSignature::ZkLogin(zklogin) => {
-            verify_zklogin_signature(&personal_msg, zklogin, expected_address).await
-        }
-        _ => {
-            tracing::warn!("[verify_sui_wallet_signature] unsupported signature scheme");
-            Err("Unsupported signature scheme. Only Ed25519, Secp256k1, Secp256r1, zkLogin are supported".to_string())
-        }
-    }
-}
-
-fn verify_simple_signature(
-    personal_msg: &sui_sdk_types::PersonalMessage,
-    simple_sig: &sui_sdk_types::SimpleSignature,
-    expected_address: &str,
-) -> Result<(String, String), String> {
-    use sui_sdk::sui_crypto::Verifier;
-    let verifier = sui_sdk::sui_crypto::simple::SimpleVerifier;
-    let signing_digest = personal_msg.signing_digest();
-    verifier.verify(signing_digest.as_ref(), simple_sig)
-        .map_err(|e| {
-            tracing::warn!("[verify_sui_wallet_signature] simple signature verification failed: {}", e);
-            format!("Signature verification failed: {}", e)
-        })?;
-
-    let derived_address = match simple_sig {
-        sui_sdk_types::SimpleSignature::Ed25519 { public_key, .. } => {
-            tracing::debug!("[verify_sui_wallet_signature] ed25519 signature detected");
-            public_key.derive_address().to_string()
-        }
-        sui_sdk_types::SimpleSignature::Secp256k1 { public_key, .. } => {
-            tracing::debug!("[verify_sui_wallet_signature] secp256k1 signature detected");
-            public_key.derive_address().to_string()
-        }
-        sui_sdk_types::SimpleSignature::Secp256r1 { public_key, .. } => {
-            tracing::debug!("[verify_sui_wallet_signature] secp256r1 signature detected");
-            public_key.derive_address().to_string()
-        }
-        _ => unreachable!(),
-    };
-
-    let expected_normalized = normalize_address(expected_address);
-    if derived_address != expected_normalized {
-        tracing::warn!("[verify_sui_wallet_signature] address mismatch: derived={} expected={}", derived_address, expected_normalized);
-        return Err(format!("Address mismatch: derived {} but expected {}", derived_address, expected_normalized));
-    }
-
-    let pk_hex = match simple_sig {
-        sui_sdk_types::SimpleSignature::Secp256k1 { public_key, .. } => {
-            let pk_bytes = public_key.as_bytes();
-            let ecpoint: Option<EcPoint> = <EcPoint as CurvePoint>::from_compressed(pk_bytes);
-            match ecpoint {
-                Some(point) => hex::encode(point.compress().as_ref()),
-                None => {
-                    tracing::warn!("[verify_sui_wallet_signature] invalid EC point from secp256k1 public key");
-                    return Err("Invalid EC point from public key".to_string());
-                }
-            }
-        }
-        sui_sdk_types::SimpleSignature::Ed25519 { public_key, .. } => {
-            hex::encode(public_key.as_bytes())
-        }
-        sui_sdk_types::SimpleSignature::Secp256r1 { public_key, .. } => {
-            hex::encode(public_key.as_bytes())
-        }
-        _ => unreachable!(),
-    };
-
-    tracing::debug!("[verify_sui_wallet_signature] simple verification successful, address={}, pk_hex={}", derived_address, pk_hex);
-    Ok((derived_address, pk_hex))
-}
-
-async fn verify_zklogin_signature<'a, 'b>(
-    personal_msg: &'a sui_sdk_types::PersonalMessage<'b>,
-    zklogin: &'a sui_sdk_types::ZkLoginAuthenticator,
-    expected_address: &'a str,
-) -> Result<(String, String), String> {
-    tracing::debug!("[verify_sui_wallet_signature] zkLogin signature detected, iss={}", zklogin.inputs.iss());
-
-    // Build the zkLogin verifier with mainnet verifying key
-    let mut verifier = sui_sdk::sui_crypto::zklogin::ZkloginVerifier::new_mainnet();
-
-    // Fetch JWK from the OIDC provider and add to verifier
-    let jwk_id = zklogin.inputs.jwk_id();
-    let jwk = fetch_jwk(&jwk_id.iss, &jwk_id.kid).await?;
-    verifier.jwks_mut().insert(jwk_id.clone(), jwk);
-
-    // Verify the zkLogin signature
-    use sui_sdk::sui_crypto::Verifier;
-    let signing_digest = personal_msg.signing_digest();
-    verifier.verify(signing_digest.as_ref(), &sui_sdk_types::UserSignature::ZkLogin(Box::new(zklogin.clone())))
-        .map_err(|e| {
-            tracing::warn!("[verify_sui_wallet_signature] zkLogin verification failed: {}", e);
-            format!("zkLogin verification failed: {}", e)
-        })?;
-
-    // Derive address from the zkLogin public identifier
-    let derived_addresses: Vec<sui_sdk_types::Address> = zklogin.inputs.public_identifier().derive_address().collect();
-    let expected_normalized = normalize_address(expected_address);
-
-    let derived_address = derived_addresses.iter()
-        .find(|a| a.to_string() == expected_normalized)
-        .map(|a| a.to_string())
-        .ok_or_else(|| {
-            let derived_strs: Vec<String> = derived_addresses.iter().map(|a| a.to_string()).collect();
-            tracing::warn!("[verify_sui_wallet_signature] zkLogin address mismatch: derived={:?} expected={}", derived_strs, expected_normalized);
-            format!("Address mismatch: derived {:?} but expected {}", derived_strs, expected_normalized)
-        })?;
-
-    // For zkLogin, pk_hex is the ephemeral public key from the embedded simple signature
-    let pk_hex = match &zklogin.signature {
-        sui_sdk_types::SimpleSignature::Secp256k1 { public_key, .. } => {
-            let pk_bytes = public_key.as_bytes();
-            let ecpoint: Option<EcPoint> = <EcPoint as CurvePoint>::from_compressed(pk_bytes);
-            match ecpoint {
-                Some(point) => hex::encode(point.compress().as_ref()),
-                None => hex::encode(public_key.as_bytes()),
-            }
-        }
-        sui_sdk_types::SimpleSignature::Ed25519 { public_key, .. } => {
-            hex::encode(public_key.as_bytes())
-        }
-        sui_sdk_types::SimpleSignature::Secp256r1 { public_key, .. } => {
-            hex::encode(public_key.as_bytes())
-        }
-        _ => String::new(),
-    };
-
-    tracing::debug!("[verify_sui_wallet_signature] zkLogin verification successful, address={}, pk_hex={}", derived_address, pk_hex);
-    Ok((derived_address, pk_hex))
-}
-
-/// Fetch a JWK from the OIDC provider's JWKS endpoint
-async fn fetch_jwk<'a>(iss: &'a str, kid: &'a str) -> Result<sui_sdk_types::Jwk, String> {
-    // Map issuer to JWKS URL
-    let jwks_url = if iss.contains("google") {
-        "https://www.googleapis.com/oauth2/v3/certs".to_string()
-    } else if iss.contains("apple") {
-        "https://appleid.apple.com/auth/keys".to_string()
-    } else if iss.contains("facebook") {
-        "https://www.facebook.com/.well-known/oauth/openid/keys/".to_string()
-    } else if iss.contains("twitch") {
-        "https://id.twitch.tv/oauth2/keys".to_string()
-    } else if iss.contains("microsoft") || iss.contains("login.microsoftonline") {
-        // Microsoft uses tenant-specific endpoints; try common discovery
-        format!("{}/.well-known/openid-configuration", iss)
-    } else {
-        // Try OpenID discovery
-        format!("{}/.well-known/openid-configuration", iss)
-    };
-
-    tracing::debug!("[fetch_jwk] fetching JWK from iss={}, kid={}, url={}", iss, kid, jwks_url);
-
-    // Asynchronous HTTP request to fetch JWKS
-    let client = reqwest::Client::new();
-    let response = client
-        .get(&jwks_url)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch JWKS from {}: {}", jwks_url, e))?;
-
-    let body = response.text()
-        .await
-        .map_err(|e| format!("Failed to read JWKS response: {}", e))?;
-
-    // Parse the JWKS response to find the matching key
-    let jwks: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse JWKS JSON: {}", e))?;
-
-    // Try to find the key in "keys" array (standard JWKS format)
-    let keys = jwks.get("keys").and_then(|k| k.as_array())
-        .ok_or_else(|| format!("No 'keys' array found in JWKS response from {}", jwks_url))?;
-
-    for key in keys {
-        if key.get("kid").and_then(|v| v.as_str()) == Some(kid) {
-            let jwk = sui_sdk_types::Jwk {
-                kty: key.get("kty").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                e: key.get("e").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                n: key.get("n").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                alg: key.get("alg").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            };
-            tracing::debug!("[fetch_jwk] found matching JWK, kid={}", kid);
-            return Ok(jwk);
-        }
-    }
-
-    Err(format!("JWK with kid={} not found in JWKS from {}", kid, jwks_url))
-}
-
-fn normalize_address(addr: &str) -> String {
-    if addr.starts_with("0x") {
-        addr.to_lowercase()
-    } else {
-        format!("0x{}", addr).to_lowercase()
-    }
-}
-
 pub async fn wallet_login(
     Extension(state): Extension<Arc<AppState>>,
     req: Request<Body>,
@@ -867,7 +519,7 @@ pub async fn wallet_login(
         }
     };
 
-    let (address, pk_hex) = match verify_sui_wallet_signature(&body.message, &body.signature, &body.address).await {
+    let (address, pk_hex) = match wallet_auth::verify_sui_wallet_signature(&body.message, &body.signature, &body.address).await {
         Ok(result) => {
             tracing::debug!("[wallet_login] wallet signature verified, address={}", result.0);
             result
@@ -890,17 +542,16 @@ pub async fn wallet_login(
             chips_amount: state.config.initial_chips_amount,
             user_type: 1,
             created: chrono::Utc::now().to_rfc3339(),
-            // sk_hex: String::new(),
-            pk_hex: pk_hex.clone(),
+            address: address.clone(),
             last_free_chips_at: None,
         };
-        if state.db.save_user(&user).await.is_err() {
-            tracing::error!("[wallet_login] failed to save wallet user, user_id={}", user_id);
-            return err_resp(StatusCode::INTERNAL_SERVER_ERROR, "Failed to save wallet user");
+        if let Err(e) = state.db.save_user(&user).await {
+            tracing::error!("[wallet_login] failed to save wallet user, user_id={}, error={}", user_id, e);
+            return err_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to save wallet user: {}", e));
         }
         tracing::debug!("[wallet_login] wallet user saved, user_id={}, pk_hex={}", user_id, pk_hex.clone());
     } else {
-        if state.db.update_user_pk(&user_id, &pk_hex).await {
+        if state.db.update_address(&user_id, &address).await {
             tracing::debug!("[wallet_login] existing wallet user found, user_id={}, pk_hex={}", user_id, pk_hex.clone());
         } else {
             tracing::warn!("[wallet_login] failed to update wallet user pk, user_id={}", user_id);
@@ -1010,8 +661,7 @@ pub async fn register(
         chips_amount: state.config.initial_chips_amount,
         user_type: 0,
         created: chrono::Utc::now().to_rfc3339(),
-        // sk_hex,
-        pk_hex,
+        address: pk_hex,
         last_free_chips_at: None,
     };
 

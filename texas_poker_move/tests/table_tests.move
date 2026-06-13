@@ -77,7 +77,12 @@ fun start_hand_transitions_to_shuffling() {
 
     scenario.next_tx(ADMIN);
     table::start_hand(&mut t, scenario.ctx());
-    assert_eq!(table::round_state(&t), 1);
+    assert_eq!(table::round_state(&t), 1); // SHUFFLING
+
+    // 验证洗牌状态初始化
+    assert!(table::shuffle_current_shuffler(&t).is_some());
+    assert_eq!(table::shuffle_pending_players(&t).length(), 3);
+    assert_eq!(table::shuffle_completed_players(&t).length(), 0);
 
     table::destroy_table(t);
     scenario.end();
@@ -85,7 +90,6 @@ fun start_hand_transitions_to_shuffling() {
 
 #[test]
 fun start_hand_fails_with_fewer_than_3() {
-    // 验证2人时 round_state 不变（无法开始）
     let mut scenario = test_scenario::begin(ADMIN);
     let ctx = scenario.ctx();
     let mut t = table::create_table_for_test(string::utf8(b"Test"), 10, 20, 6, ctx);
@@ -104,35 +108,22 @@ fun start_hand_fails_with_fewer_than_3() {
 }
 
 #[test]
-fun submit_shuffle_commitment_transitions_to_preflop() {
-    let mut scenario = test_scenario::begin(ADMIN);
-    let ctx = scenario.ctx();
-    let mut t = table::create_table_for_test(string::utf8(b"Test"), 10, 20, 6, ctx);
-
-    scenario.next_tx(PLAYER1);
-    table::join_table(&mut t, 0, 1000, scenario.ctx());
-    scenario.next_tx(PLAYER2);
-    table::join_table(&mut t, 1, 1000, scenario.ctx());
-    scenario.next_tx(PLAYER3);
-    table::join_table(&mut t, 2, 1000, scenario.ctx());
-
-    scenario.next_tx(ADMIN);
-    table::start_hand(&mut t, scenario.ctx());
-
-    scenario.next_tx(PLAYER1);
-    table::submit_shuffle_commitment(&mut t, vector[1, 2, 3], scenario.ctx());
-    assert_eq!(table::round_state(&t), 1);
-
-    scenario.next_tx(PLAYER2);
-    table::submit_shuffle_commitment(&mut t, vector[4, 5, 6], scenario.ctx());
-    assert_eq!(table::round_state(&t), 1);
-
-    scenario.next_tx(PLAYER3);
-    table::submit_shuffle_commitment(&mut t, vector[7, 8, 9], scenario.ctx());
-    assert_eq!(table::round_state(&t), 2);
-
-    table::destroy_table(t);
-    scenario.end();
+fun round_state_constants_match() {
+    // 验证新的 Round State 常量
+    assert_eq!(table::round_waiting(), 0);
+    assert_eq!(table::round_shuffling(), 1);
+    assert_eq!(table::round_preflop(), 2);
+    assert_eq!(table::round_flop(), 3);
+    assert_eq!(table::round_turn(), 4);
+    assert_eq!(table::round_river(), 5);
+    assert_eq!(table::round_showdown(), 6);
+    assert_eq!(table::round_hand_complete(), 7);
+    assert_eq!(table::round_shuffle_complete(), 8);
+    assert_eq!(table::round_preflop_reveal(), 9);
+    assert_eq!(table::round_flop_reveal(), 10);
+    assert_eq!(table::round_turn_reveal(), 11);
+    assert_eq!(table::round_river_reveal(), 12);
+    assert_eq!(table::round_showdown_reveal(), 13);
 }
 
 #[test]
@@ -147,6 +138,56 @@ fun accessor_functions_work() {
     assert_eq!(table::round_waiting(), 0);
     assert_eq!(table::round_shuffling(), 1);
     assert_eq!(table::round_preflop(), 2);
+    table::destroy_table(t);
+    scenario.end();
+}
+
+#[test]
+fun seat_pk_accessor_works() {
+    let mut scenario = test_scenario::begin(ADMIN);
+    let ctx = scenario.ctx();
+    let mut t = table::create_table_for_test(string::utf8(b"Test"), 10, 20, 6, ctx);
+
+    scenario.next_tx(PLAYER1);
+    table::join_table(&mut t, 0, 1000, scenario.ctx());
+    // join_table 不设置 pk，pk 为空
+    assert_eq!(table::seat_pk(&t, 0).length(), 0);
+
+    table::destroy_table(t);
+    scenario.end();
+}
+
+#[test]
+fun deck_encrypted_initially_empty() {
+    let mut scenario = test_scenario::begin(ADMIN);
+    let ctx = scenario.ctx();
+    let t = table::create_table_for_test(string::utf8(b"Test"), 10, 20, 6, ctx);
+    assert_eq!(table::deck_encrypted(&t).length(), 0);
+    assert_eq!(table::aggregated_pk(&t).length(), 0);
+    table::destroy_table(t);
+    scenario.end();
+}
+
+#[test]
+fun reconstruct_state_initially_none() {
+    let mut scenario = test_scenario::begin(ADMIN);
+    let ctx = scenario.ctx();
+    let t = table::create_table_for_test(string::utf8(b"Test"), 10, 20, 6, ctx);
+    assert_eq!(table::reconstruct_phase(&t), 0); // RECONSTRUCT_PHASE_NONE
+    let (yes, no) = table::reconstruct_votes(&t);
+    assert_eq!(yes, 0);
+    assert_eq!(no, 0);
+    table::destroy_table(t);
+    scenario.end();
+}
+
+#[test]
+fun reveal_state_initially_none() {
+    let mut scenario = test_scenario::begin(ADMIN);
+    let ctx = scenario.ctx();
+    let t = table::create_table_for_test(string::utf8(b"Test"), 10, 20, 6, ctx);
+    assert_eq!(table::reveal_phase(&t), 0); // REVEAL_PHASE_NONE
+    assert_eq!(table::reveal_assignments(&t).length(), 0);
     table::destroy_table(t);
     scenario.end();
 }

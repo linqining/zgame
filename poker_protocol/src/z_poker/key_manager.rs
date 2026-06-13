@@ -5,6 +5,27 @@ use rand_core::{RngCore, CryptoRng};
 use std::collections::HashMap;
 use hex;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyManagerError {
+    PlayerAlreadyRegistered,
+    InvalidPKOwnershipProof,
+    PlayerNotFound,
+    SecretKeyMismatch,
+}
+
+impl std::fmt::Display for KeyManagerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeyManagerError::PlayerAlreadyRegistered => write!(f, "Player already registered"),
+            KeyManagerError::InvalidPKOwnershipProof => write!(f, "PK ownership proof verification failed"),
+            KeyManagerError::PlayerNotFound => write!(f, "Player not found"),
+            KeyManagerError::SecretKeyMismatch => write!(f, "Secret key does not match registered public key"),
+        }
+    }
+}
+
+impl std::error::Error for KeyManagerError {}
+
 fn pk_to_hex(pk: &EcPoint) -> String {
     hex::encode(pk.compress().as_ref())
 }
@@ -75,13 +96,13 @@ impl KeyManager {
         &mut self,
         pk: EcPoint,
         proof: PKOwnershipProof,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), KeyManagerError> {
         if self.entries.contains_key(&pk_to_hex(&pk)) {
-            return Err("Player already registered");
+            return Err(KeyManagerError::PlayerAlreadyRegistered);
         }
 
         if !proof.verify(&pk) {
-            return Err("PK ownership proof verification failed");
+            return Err(KeyManagerError::InvalidPKOwnershipProof);
         }
 
         let entry = PlayerKeyEntry {
@@ -99,13 +120,13 @@ impl KeyManager {
         &mut self,
         pk: EcPoint,
         sk: &Scalar,
-    ) -> Result<EcPoint, &'static str> {
+    ) -> Result<EcPoint, KeyManagerError> {
         let entry = self.entries.get(&pk_to_hex(&pk))
-            .ok_or("Player not found")?;
+            .ok_or(KeyManagerError::PlayerNotFound)?;
 
         let claimed_pk = *BASE_G * sk;
         if claimed_pk != entry.pk {
-            return Err("Secret key does not match registered public key");
+            return Err(KeyManagerError::SecretKeyMismatch);
         }
 
         let pk = entry.pk;

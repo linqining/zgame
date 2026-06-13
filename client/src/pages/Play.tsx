@@ -1,4 +1,4 @@
-import React, { useContext, useEffect, useState } from 'react';
+import React, { useContext, useEffect, useState, useRef } from 'react';
 import Container from '../components/layout/Container';
 import Button from '../components/buttons/Button';
 import gameContext from '../context/game/gameContext';
@@ -17,11 +17,13 @@ import { GameUI } from '../components/game/GameUI';
 import { GameStateInfo } from '../components/game/GameStateInfo';
 import PokerCard from '../components/game/PokerCard';
 import { useContentContext } from '../context/content/contentContext';
+import { PlayerContext } from '../context/player/PlayerContext';
 import Loader from '../components/loading/Loader';
+import { FETCH_LOBBY_INFO } from '../pokergame/actions';
 
 const Play: React.FC = () => {
   const navigate = useNavigate();
-  const { socket } = useContext(socketContext)!;
+  const { socket, isConnected } = useContext(socketContext)!;
   const { openModal } = useModalContext();
   const {
     messages,
@@ -38,26 +40,63 @@ const Play: React.FC = () => {
     raise,
   } = useContext(gameContext)!;
   const { getLocalizedString } = useContentContext();
+  const { pkHex } = useContext(PlayerContext)!;
 
   const [bet, setBet] = useState(0);
   const [hasJoined, setHasJoined] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const reconnectAttemptRef = useRef(0);
+  const hasShownLostModalRef = useRef(false);
+  const isUnmountingRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      isUnmountingRef.current = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!socket) return;
 
-    joinTable(1);
+    joinTable(1, pkHex || '');
     setHasJoined(true);
 
     return () => {
-      leaveTable(false);
+      if (isUnmountingRef.current) {
+        leaveTable(false, pkHex || undefined);
+      }
       setHasJoined(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socket]);
 
-  // Show connection lost modal only after we had a connection and lost it
+  // Handle reconnection when connection is lost after joining
   useEffect(() => {
-    if (hasJoined && !socket) {
+    if (!hasJoined) return;
+
+    if (isConnected) {
+      // Connection restored
+      setIsReconnecting(false);
+      reconnectAttemptRef.current = 0;
+      hasShownLostModalRef.current = false;
+      return;
+    }
+
+    // Connection lost - attempt manual reconnect via FETCH_LOBBY_INFO
+    if (socket && !isConnected && !isReconnecting && !hasShownLostModalRef.current) {
+      setIsReconnecting(true);
+      reconnectAttemptRef.current += 1;
+
+      const token = localStorage.token;
+      if (token) {
+        console.log(`[Reconnect] Attempt ${reconnectAttemptRef.current}, emitting FETCH_LOBBY_INFO`);
+        socket.emit(FETCH_LOBBY_INFO, token);
+      }
+    }
+
+    // If socket is completely gone (not just disconnected), show lost modal
+    if (!socket && !hasShownLostModalRef.current) {
+      hasShownLostModalRef.current = true;
       openModal(
         () => (
           <Text>{getLocalizedString('game_lost-connection-modal_text')}</Text>
@@ -67,7 +106,7 @@ const Play: React.FC = () => {
         () => navigate('/'),
       );
     }
-  }, [hasJoined, socket, openModal, navigate, getLocalizedString]);
+  }, [hasJoined, isConnected, socket, isReconnecting, openModal, navigate, getLocalizedString]);
 
   useEffect(() => {
     if (currentTable && seatId != null && currentTable.seats && currentTable.seats[seatId]) {
@@ -89,6 +128,18 @@ const Play: React.FC = () => {
     );
   }
 
+  // Socket exists but disconnected - show reconnecting overlay
+  if (!isConnected) {
+    return (
+      <Container fullHeight contentCenteredMobile>
+        <Loader />
+        <Text textAlign="center" style={{ marginTop: '1rem' }}>
+          Reconnecting...
+        </Text>
+      </Container>
+    );
+  }
+
   return (
     <>
       <RotateDevicePrompt />
@@ -101,7 +152,7 @@ const Play: React.FC = () => {
               scale="0.65"
               style={{ zIndex: '50' }}
             >
-              <Button small secondary onClick={() => leaveTable()}>
+              <Button small secondary onClick={() => leaveTable(true, pkHex || undefined)}>
                 {getLocalizedString('game_leave-table-btn')}
               </Button>
             </PositionedUISlot>

@@ -90,30 +90,43 @@ impl fmt::Display for PokerHand {
 pub struct HandEvaluator;
 
 impl HandEvaluator {
+    /// Evaluate a hand of 5, 6, or 7 cards and return the best hand rank with kickers.
     pub fn evaluate(cards: &[PlayingCard]) -> Option<(HandRank, Vec<Rank>)> {
         if cards.len() < 5 {
+            return None;
+        }
+        if cards.len() == 5 {
+            return Self::evaluate_five(cards);
+        }
+        // For 6 or 7 cards, enumerate all C(n,5) combinations and return the best
+        Self::best_five_from_n(cards)
+    }
+
+    /// Evaluate exactly 5 cards (must be pre-sorted by rank descending).
+    fn evaluate_five(cards: &[PlayingCard]) -> Option<(HandRank, Vec<Rank>)> {
+        if cards.len() != 5 {
             return None;
         }
         let ranks: Vec<Rank> = cards.iter().map(|c| c.rank).collect();
         let suits: Vec<Suit> = cards.iter().map(|c| c.suit).collect();
 
-        let is_flush = Self::is_flush(&suits);
-        let is_straight = Self::is_straight(&ranks);
+        let flush_result = Self::check_flush(&suits, &ranks);
+        let straight_high = Self::straight_high_card(&ranks);
 
-        if is_flush && is_straight {
-            let high = ranks[0];
+        if flush_result.is_some() && straight_high.is_some() {
+            let high = straight_high.unwrap();
             if high == Rank::Ace {
                 return Some((HandRank::RoyalFlush, vec![high]));
             }
             return Some((HandRank::StraightFlush, vec![high]));
         }
 
-        if is_flush {
-            return Some((HandRank::Flush, ranks[..5].to_vec()));
+        if let Some(flush_ranks) = flush_result {
+            return Some((HandRank::Flush, flush_ranks));
         }
 
-        if is_straight {
-            return Some((HandRank::Straight, vec![ranks[0]]));
+        if let Some(high) = straight_high {
+            return Some((HandRank::Straight, vec![high]));
         }
 
         let counts = Self::count_ranks(&ranks);
@@ -160,46 +173,73 @@ impl HandEvaluator {
                     ))
                 }
             }
-            _ => Some((
-                HandRank::HighCard,
-                ranks[..5.min(ranks.len())].to_vec(),
-            )),
+            _ => Some((HandRank::HighCard, ranks)),
         }
     }
 
-    fn is_flush(suits: &[Suit]) -> bool {
-        if suits.len() < 5 {
-            return false;
+    /// Enumerate all C(n,5) combinations from n cards and return the best hand.
+    fn best_five_from_n(cards: &[PlayingCard]) -> Option<(HandRank, Vec<Rank>)> {
+        let n = cards.len();
+        if n < 5 {
+            return None;
         }
-        let first = suits[0];
-        suits[..5].iter().all(|&s| s == first)
-    }
 
-    fn is_straight(ranks: &[Rank]) -> bool {
-        if ranks.len() < 5 {
-            return false;
-        }
-        let unique: Vec<Rank> = {
-            let mut seen = Vec::new();
-            for &r in &ranks[..5] {
-                if !seen.contains(&r) {
-                    seen.push(r);
+        let mut best: Option<(HandRank, Vec<Rank>)> = None;
+
+        // Generate all combinations of 5 cards from n using bitmask approach
+        // For n <= 7, at most C(7,5) = 21 combinations
+        let combo_count = choose(n, 5);
+        for mask in 0..combo_count {
+            let combo = nth_combination(cards, 5, mask);
+            let mut sorted = combo;
+            sorted.sort_by(|a, b| b.rank.cmp(&a.rank));
+            if let Some(result) = Self::evaluate_five(&sorted) {
+                if best.is_none() || compare_hands(&result, best.as_ref().unwrap()) == Ordering::Greater {
+                    best = Some(result);
                 }
             }
-            seen
-        };
-        if unique.len() != 5 {
-            return false;
         }
-        let high = unique[0].numeric_value();
-        let low = unique[4].numeric_value();
+
+        best
+    }
+
+    /// Check if all 5 cards share the same suit. Returns the ranks if flush.
+    fn check_flush(suits: &[Suit], ranks: &[Rank]) -> Option<Vec<Rank>> {
+        if suits.len() != 5 {
+            return None;
+        }
+        let first = suits[0];
+        if suits.iter().all(|&s| s == first) {
+            Some(ranks.to_vec())
+        } else {
+            None
+        }
+    }
+
+    /// Check if 5 cards form a straight. Returns the high card of the straight if so.
+    /// For a wheel (A-2-3-4-5), returns Five as the high card.
+    fn straight_high_card(ranks: &[Rank]) -> Option<Rank> {
+        if ranks.len() != 5 {
+            return None;
+        }
+        // Check for duplicates
+        for i in 0..5 {
+            for j in (i + 1)..5 {
+                if ranks[i] == ranks[j] {
+                    return None;
+                }
+            }
+        }
+        let high = ranks[0].numeric_value();
+        let low = ranks[4].numeric_value();
         if high - low == 4 {
-            return true;
+            return Some(ranks[0]);
         }
-        if unique[0] == Rank::Ace && unique[1] == Rank::Five {
-            return true;
+        // Wheel straight: A-2-3-4-5 (sorted descending: A,5,4,3,2)
+        if ranks[0] == Rank::Ace && ranks[1] == Rank::Five {
+            return Some(Rank::Five);
         }
-        false
+        None
     }
 
     fn count_ranks(ranks: &[Rank]) -> std::collections::HashMap<Rank, usize> {
@@ -211,10 +251,62 @@ impl HandEvaluator {
     }
 }
 
+/// Compare two (HandRank, Vec<Rank>) results, returning the Ordering.
+fn compare_hands(a: &(HandRank, Vec<Rank>), b: &(HandRank, Vec<Rank>)) -> Ordering {
+    match a.0.cmp(&b.0) {
+        Ordering::Equal => {
+            for (ra, rb) in a.1.iter().zip(b.1.iter()) {
+                match ra.cmp(rb) {
+                    Ordering::Equal => continue,
+                    ord => return ord,
+                }
+            }
+            Ordering::Equal
+        }
+        ord => ord,
+    }
+}
+
+/// Compute binomial coefficient C(n, k).
+fn choose(n: usize, k: usize) -> usize {
+    if k > n {
+        return 0;
+    }
+    if k == 0 || k == n {
+        return 1;
+    }
+    let k = k.min(n - k);
+    let mut result = 1usize;
+    for i in 0..k {
+        result = result * (n - i) / (i + 1);
+    }
+    result
+}
+
+/// Return the `mask`-th combination of `k` items from `items` (in lexicographic order).
+fn nth_combination<T: Clone>(items: &[T], k: usize, mask: usize) -> Vec<T> {
+    let n = items.len();
+    let mut result = Vec::with_capacity(k);
+    let mut remaining = mask;
+    let mut start = 0;
+    for i in 0..k {
+        // For position i, try each candidate starting from `start`
+        for j in start..=n - (k - i) {
+            let count = choose(n - j - 1, k - i - 1);
+            if remaining < count {
+                result.push(items[j].clone());
+                start = j + 1;
+                break;
+            }
+            remaining -= count;
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::z_poker::card::standard_deck;
 
     #[test]
     fn test_high_card() {
@@ -292,5 +384,200 @@ mod tests {
             PlayingCard::new(Rank::Jack, Suit::Spade),
         ];
         assert!(PokerHand::new(cards).is_none());
+    }
+
+    // === 7-card hand evaluation tests ===
+
+    #[test]
+    fn test_seven_card_flush() {
+        // 7 cards with 5 hearts forming a flush
+        let cards = vec![
+            PlayingCard::new(Rank::Ace, Suit::Heart),
+            PlayingCard::new(Rank::King, Suit::Heart),
+            PlayingCard::new(Rank::Queen, Suit::Heart),
+            PlayingCard::new(Rank::Jack, Suit::Heart),
+            PlayingCard::new(Rank::Nine, Suit::Heart),
+            PlayingCard::new(Rank::Two, Suit::Club),
+            PlayingCard::new(Rank::Three, Suit::Diamond),
+        ];
+        let hand = PokerHand::new(cards).unwrap();
+        assert_eq!(hand.rank, HandRank::Flush);
+        // Kickers should be the best 5 flush cards: A,K,Q,J,9
+        assert_eq!(hand.kickers, vec![Rank::Ace, Rank::King, Rank::Queen, Rank::Jack, Rank::Nine]);
+    }
+
+    #[test]
+    fn test_seven_card_straight() {
+        // 7 cards containing a straight 9-K
+        let cards = vec![
+            PlayingCard::new(Rank::King, Suit::Club),
+            PlayingCard::new(Rank::Queen, Suit::Diamond),
+            PlayingCard::new(Rank::Jack, Suit::Heart),
+            PlayingCard::new(Rank::Ten, Suit::Spade),
+            PlayingCard::new(Rank::Nine, Suit::Club),
+            PlayingCard::new(Rank::Two, Suit::Heart),
+            PlayingCard::new(Rank::Three, Suit::Diamond),
+        ];
+        let hand = PokerHand::new(cards).unwrap();
+        assert_eq!(hand.rank, HandRank::Straight);
+        assert_eq!(hand.kickers, vec![Rank::King]);
+    }
+
+    #[test]
+    fn test_seven_card_full_house() {
+        // 7 cards: three Aces and two Kings form a full house
+        let cards = vec![
+            PlayingCard::new(Rank::Ace, Suit::Club),
+            PlayingCard::new(Rank::Ace, Suit::Diamond),
+            PlayingCard::new(Rank::Ace, Suit::Heart),
+            PlayingCard::new(Rank::King, Suit::Club),
+            PlayingCard::new(Rank::King, Suit::Diamond),
+            PlayingCard::new(Rank::Two, Suit::Heart),
+            PlayingCard::new(Rank::Three, Suit::Spade),
+        ];
+        let hand = PokerHand::new(cards).unwrap();
+        assert_eq!(hand.rank, HandRank::FullHouse);
+        assert_eq!(hand.kickers, vec![Rank::Ace, Rank::King]);
+    }
+
+    #[test]
+    fn test_seven_card_full_house_over_trips() {
+        // 7 cards: three Aces, two Kings, two Queens -> best is full house Aces over Kings
+        let cards = vec![
+            PlayingCard::new(Rank::Ace, Suit::Club),
+            PlayingCard::new(Rank::Ace, Suit::Diamond),
+            PlayingCard::new(Rank::Ace, Suit::Heart),
+            PlayingCard::new(Rank::King, Suit::Club),
+            PlayingCard::new(Rank::King, Suit::Diamond),
+            PlayingCard::new(Rank::Queen, Suit::Heart),
+            PlayingCard::new(Rank::Queen, Suit::Spade),
+        ];
+        let hand = PokerHand::new(cards).unwrap();
+        assert_eq!(hand.rank, HandRank::FullHouse);
+        assert_eq!(hand.kickers, vec![Rank::Ace, Rank::King]);
+    }
+
+    #[test]
+    fn test_seven_card_straight_flush() {
+        // 7 cards with a straight flush in spades: 9-K of spades
+        let cards = vec![
+            PlayingCard::new(Rank::King, Suit::Spade),
+            PlayingCard::new(Rank::Queen, Suit::Spade),
+            PlayingCard::new(Rank::Jack, Suit::Spade),
+            PlayingCard::new(Rank::Ten, Suit::Spade),
+            PlayingCard::new(Rank::Nine, Suit::Spade),
+            PlayingCard::new(Rank::King, Suit::Heart),
+            PlayingCard::new(Rank::Two, Suit::Club),
+        ];
+        let hand = PokerHand::new(cards).unwrap();
+        assert_eq!(hand.rank, HandRank::StraightFlush);
+        assert_eq!(hand.kickers, vec![Rank::King]);
+    }
+
+    #[test]
+    fn test_seven_card_four_of_a_kind() {
+        // 7 cards with four Aces
+        let cards = vec![
+            PlayingCard::new(Rank::Ace, Suit::Club),
+            PlayingCard::new(Rank::Ace, Suit::Diamond),
+            PlayingCard::new(Rank::Ace, Suit::Heart),
+            PlayingCard::new(Rank::Ace, Suit::Spade),
+            PlayingCard::new(Rank::King, Suit::Club),
+            PlayingCard::new(Rank::Two, Suit::Heart),
+            PlayingCard::new(Rank::Three, Suit::Diamond),
+        ];
+        let hand = PokerHand::new(cards).unwrap();
+        assert_eq!(hand.rank, HandRank::FourOfAKind);
+        assert_eq!(hand.kickers, vec![Rank::Ace, Rank::King]);
+    }
+
+    #[test]
+    fn test_seven_card_two_pair() {
+        // 7 cards with two pairs but no better hand
+        let cards = vec![
+            PlayingCard::new(Rank::Ace, Suit::Club),
+            PlayingCard::new(Rank::Ace, Suit::Diamond),
+            PlayingCard::new(Rank::King, Suit::Club),
+            PlayingCard::new(Rank::King, Suit::Diamond),
+            PlayingCard::new(Rank::Nine, Suit::Heart),
+            PlayingCard::new(Rank::Two, Suit::Spade),
+            PlayingCard::new(Rank::Three, Suit::Club),
+        ];
+        let hand = PokerHand::new(cards).unwrap();
+        assert_eq!(hand.rank, HandRank::TwoPair);
+    }
+
+    #[test]
+    fn test_seven_card_wheel_straight() {
+        // 7 cards with A-2-3-4-5 straight (wheel)
+        let cards = vec![
+            PlayingCard::new(Rank::Ace, Suit::Club),
+            PlayingCard::new(Rank::Five, Suit::Diamond),
+            PlayingCard::new(Rank::Four, Suit::Heart),
+            PlayingCard::new(Rank::Three, Suit::Spade),
+            PlayingCard::new(Rank::Two, Suit::Club),
+            PlayingCard::new(Rank::King, Suit::Heart),
+            PlayingCard::new(Rank::Queen, Suit::Diamond),
+        ];
+        let hand = PokerHand::new(cards).unwrap();
+        assert_eq!(hand.rank, HandRank::Straight);
+        // Wheel straight: high card is 5 (Ace plays low)
+        assert_eq!(hand.kickers, vec![Rank::Five]);
+    }
+
+    #[test]
+    fn test_six_card_flush() {
+        // 6 cards with 5 hearts forming a flush
+        let cards = vec![
+            PlayingCard::new(Rank::Ace, Suit::Heart),
+            PlayingCard::new(Rank::King, Suit::Heart),
+            PlayingCard::new(Rank::Queen, Suit::Heart),
+            PlayingCard::new(Rank::Jack, Suit::Heart),
+            PlayingCard::new(Rank::Nine, Suit::Heart),
+            PlayingCard::new(Rank::Two, Suit::Club),
+        ];
+        let hand = PokerHand::new(cards).unwrap();
+        assert_eq!(hand.rank, HandRank::Flush);
+    }
+
+    #[test]
+    fn test_seven_card_best_flush_over_straight() {
+        // 7 cards where both a straight and flush are possible, flush wins
+        let cards = vec![
+            PlayingCard::new(Rank::Ace, Suit::Heart),
+            PlayingCard::new(Rank::King, Suit::Heart),
+            PlayingCard::new(Rank::Queen, Suit::Heart),
+            PlayingCard::new(Rank::Jack, Suit::Heart),
+            PlayingCard::new(Rank::Nine, Suit::Heart),
+            PlayingCard::new(Rank::Ten, Suit::Club),
+            PlayingCard::new(Rank::Eight, Suit::Diamond),
+        ];
+        let hand = PokerHand::new(cards).unwrap();
+        assert_eq!(hand.rank, HandRank::Flush);
+    }
+
+    #[test]
+    fn test_choose_function() {
+        assert_eq!(choose(7, 5), 21);
+        assert_eq!(choose(6, 5), 6);
+        assert_eq!(choose(5, 5), 1);
+        assert_eq!(choose(7, 3), 35);
+    }
+
+    #[test]
+    fn test_nth_combination_covers_all() {
+        let cards: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7];
+        let count = choose(7, 5);
+        let mut all_combos: Vec<Vec<u8>> = (0..count)
+            .map(|i| nth_combination(&cards, 5, i))
+            .collect();
+        // Sort for deterministic comparison
+        all_combos.sort();
+        // There should be exactly 21 unique combinations
+        assert_eq!(all_combos.len(), 21);
+        // First combo should be [1,2,3,4,5]
+        assert_eq!(all_combos[0], vec![1, 2, 3, 4, 5]);
+        // Last combo should be [3,4,5,6,7]
+        assert_eq!(all_combos[20], vec![3, 4, 5, 6, 7]);
     }
 }

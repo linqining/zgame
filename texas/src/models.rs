@@ -13,7 +13,7 @@ pub struct User {
     #[serde(rename = "type", default)]
     pub user_type: i32,
     pub created: String,
-    pub pk_hex:String,
+    pub address:String,
     #[serde(default)]
     pub last_free_chips_at: Option<String>,
 }
@@ -50,17 +50,17 @@ impl Database {
             .flatten()
     }
 
-    pub async fn update_user_pk(&self, id: &str, pk_hex: &str) -> bool {
+
+
+    pub async fn update_address(&self, id: &str, address: &str) -> bool {
         self.users
             .update_one(
                 mongodb::bson::doc! {"_id": id},
-                mongodb::bson::doc! {"$set": {"pk_hex": pk_hex}},
+                mongodb::bson::doc! {"$set": {"address": address}},
             )
             .await
             .is_ok()
     }
-
-
 
     pub async fn find_user_by_email(&self, email: &str) -> Option<User> {
         match self.users
@@ -83,13 +83,6 @@ impl Database {
             .flatten()
     }
 
-    pub async fn find_user_by_pk_hex(&self, pk_hex: &str) -> Option<User> {
-        self.users
-            .find_one(mongodb::bson::doc! {"pk_hex": pk_hex})
-            .await
-            .ok()
-            .flatten()
-    }
 
     pub async fn save_user(&self, user: &User) -> mongodb::error::Result<mongodb::results::InsertOneResult> {
         self.users.insert_one(user).await

@@ -1,3 +1,4 @@
+import { useContext } from 'react';
 import { useNavigate } from 'react-router-dom';
 import styled from 'styled-components';
 import jackImg from '../assets/img/jack-rounded-img@2x.png';
@@ -7,7 +8,10 @@ import queen2Img from '../assets/img/queen2-rounded-img@2x.png';
 import { useGlobalContext } from '../context/global/globalContext';
 import { useContentContext } from '../context/content/contentContext';
 import { useModalContext } from '../context/modal/modalContext';
+import authContext from '../context/auth/authContext';
+import { ConnectButton } from '@mysten/dapp-kit-react/ui';
 import Text from '../components/typography/Text';
+import { PlayerName } from '../components/game/PlayerName';
 
 /* ===== Styled Components ===== */
 
@@ -164,21 +168,35 @@ export default function Lobby() {
   const { userName } = useGlobalContext();
   const { getLocalizedString } = useContentContext();
   const { openModal } = useModalContext();
+  const { isLoggedIn, walletAddress } = useContext(authContext)!;
+  const hasWallet = !!walletAddress;
+
+  const requireAuthAndNavigate = () => {
+    if (!isLoggedIn && !hasWallet) {
+      openModal(
+        () => <ConnectButton />,
+        getLocalizedString('game_buyin-modal_header'),
+        getLocalizedString('game_buyin-modal_cancel'),
+      );
+      return;
+    }
+    navigate('/play');
+  };
 
   return (
     <PageWrapper>
       <WelcomeHeading>
         {getLocalizedString('main_page-salutation')}{' '}
-        <span>{userName}!</span>
+        <span><PlayerName name={userName} />!</span>
       </WelcomeHeading>
 
       <MenuGrid>
-        <MenuCard onClick={() => navigate('/play')}>
+        <MenuCard onClick={requireAuthAndNavigate}>
           <img src={kingImg} alt="Join Table" />
           <h3>{getLocalizedString('main_page-join_table').toUpperCase()}</h3>
         </MenuCard>
 
-        <MenuCard onClick={() => navigate('/play')}>
+        <MenuCard onClick={requireAuthAndNavigate}>
           <img src={queen2Img} alt="Quick Game" />
           <h3>{getLocalizedString('main_page-quick_game').toUpperCase()}</h3>
         </MenuCard>

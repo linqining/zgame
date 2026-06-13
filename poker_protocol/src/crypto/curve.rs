@@ -10,6 +10,7 @@ use std::fmt::Debug;
 use std::iter::Sum;
 use std::ops::{Add, Mul, Neg, Sub};
 use rand_core::{CryptoRng, RngCore};
+use rayon::prelude::*;
 
 use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_TABLE,
@@ -330,6 +331,8 @@ impl CurveScalar for BlsScalar {
 
         // Value >= modulus. Since max 32-byte value < 3 * modulus,
         // subtract modulus until the value is in range.
+        // Note: blstrs doesn't expose a native from_bytes_mod_order,
+        // so we implement manual modular reduction.
         const MODULUS_LE: [u8; 32] = [
             0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
             0xfe, 0x5b, 0xfe, 0xff, 0x02, 0xa4, 0xbd, 0x53,
@@ -439,9 +442,9 @@ impl Curve for Bls12381Curve {
     fn hash_to_scalar(digest: &[u8]) -> BlsScalar {
         let mut h = Sha3_256::new();
         h.update(digest);
-        let mut hash = h.finalize();
-        // Clear top 2 bits to ensure value < 2^254 < BLS12-381 curve order
-        hash[0] &= 0x3F;
+        let hash = h.finalize();
+        // from_bytes_mod_order handles modular reduction,
+        // so no need to manually clear bits.
         BlsScalar::from_bytes_mod_order(&hash)
     }
 
@@ -526,9 +529,13 @@ pub fn ec_encrypt_batch_generic<C: Curve>(
     pk: &C::Point,
     rng: &mut (impl CryptoRng + RngCore),
 ) -> Vec<ElGamalCiphertextGeneric<C>> {
+    let r_vec: Vec<C::Scalar> = (0..plaintexts.len())
+        .map(|_| C::Scalar::random(rng))
+        .collect();
     plaintexts
-        .iter()
-        .map(|pt| ElGamalCiphertextGeneric::encrypt(pt, pk, &C::Scalar::random(rng)))
+        .par_iter()
+        .zip(r_vec.par_iter())
+        .map(|(pt, r)| ElGamalCiphertextGeneric::encrypt(pt, pk, r))
         .collect()
 }
 

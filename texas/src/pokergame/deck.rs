@@ -1,5 +1,4 @@
 use rand::seq::SliceRandom;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use poker_protocol::z_poker::{PlayingCard};
@@ -40,14 +39,6 @@ impl Deck {
         Self { cards }
     }
 
-    pub fn draw(&mut self) -> Option<Card> {
-        if self.cards.is_empty() {
-            return None;
-        }
-        let count = self.cards.len();
-        let index = rand::thread_rng().gen_range(0..count);
-        Some(self.cards.remove(index))
-    }
 
 }
 
