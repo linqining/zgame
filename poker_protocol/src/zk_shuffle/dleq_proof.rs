@@ -1,6 +1,5 @@
 use crate::crypto::curve::{Curve, CurveScalar, ElGamalCiphertextGeneric};
-use crate::zk_shuffle::transcript_ext::TranscriptExtension;
-use merlin::Transcript;
+use crate::zk_shuffle::transcript_ext::CryptoTranscript;
 use rand_core::OsRng;
 use std::marker::PhantomData;
 
@@ -105,8 +104,6 @@ pub struct DLEqProof<C: Curve, K: DLEqProofKind<C>> {
 }
 
 impl<C: Curve, K: DLEqProofKind<C>> DLEqProof<C, K>
-where
-    Transcript: TranscriptExtension<C>,
 {
     /// Reconstruct a DLEqProof from its constituent parts.
     ///
@@ -133,7 +130,7 @@ where
         output_cts: &[ElGamalCiphertextGeneric<C>],
         player_sk: &C::Scalar,
         player_pk: &C::Point,
-        transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> Self {
         let n = input_cts.len().min(output_cts.len()).min(C::n_cards());
         let mut rng = OsRng;
@@ -158,24 +155,24 @@ where
 
         // Derive challenge using Merlin Transcript (properly hashes all inputs)
         let labels = K::labels();
-        transcript.append_point(labels.pk, player_pk);
+        transcript.append_point::<C>(labels.pk, player_pk);
         for ct in &input_cts[..n] {
-            transcript.append_point(labels.input_c1, &ct.c1);
-            transcript.append_point(labels.input_c2, &ct.c2);
+            transcript.append_point::<C>(labels.input_c1, &ct.c1);
+            transcript.append_point::<C>(labels.input_c2, &ct.c2);
         }
         for ct in &output_cts[..n] {
-            transcript.append_point(labels.output_c1, &ct.c1);
-            transcript.append_point(labels.output_c2, &ct.c2);
+            transcript.append_point::<C>(labels.output_c1, &ct.c1);
+            transcript.append_point::<C>(labels.output_c2, &ct.c2);
         }
         for a_i in &per_card_commitments {
-            transcript.append_point(labels.per_card_commitment, a_i);
+            transcript.append_point::<C>(labels.per_card_commitment, a_i);
         }
-        transcript.append_point(labels.commitment_pk, &commitment_pk);
+        transcript.append_point::<C>(labels.commitment_pk, &commitment_pk);
         for d2 in &d2_values {
-            transcript.append_point(labels.d2, d2);
+            transcript.append_point::<C>(labels.d2, d2);
         }
-        transcript.append_scalar(labels.nonce, &nonce);
-        let c = transcript.challenge(labels.challenge).scalar;
+        transcript.append_scalar::<C>(labels.nonce, &nonce);
+        let c = transcript.challenge::<C>(labels.challenge).scalar;
 
         let response = omega + c * *player_sk;
 
@@ -194,7 +191,7 @@ where
         input_cts: &[ElGamalCiphertextGeneric<C>],
         output_cts: &[ElGamalCiphertextGeneric<C>],
         player_pk: &C::Point,
-        transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> bool {
         let n = input_cts.len().min(output_cts.len()).min(C::n_cards());
 
@@ -217,24 +214,24 @@ where
 
         // Derive challenge using Merlin Transcript
         let labels = K::labels();
-        transcript.append_point(labels.pk, player_pk);
+        transcript.append_point::<C>(labels.pk, player_pk);
         for ct in &input_cts[..n] {
-            transcript.append_point(labels.input_c1, &ct.c1);
-            transcript.append_point(labels.input_c2, &ct.c2);
+            transcript.append_point::<C>(labels.input_c1, &ct.c1);
+            transcript.append_point::<C>(labels.input_c2, &ct.c2);
         }
         for ct in &output_cts[..n] {
-            transcript.append_point(labels.output_c1, &ct.c1);
-            transcript.append_point(labels.output_c2, &ct.c2);
+            transcript.append_point::<C>(labels.output_c1, &ct.c1);
+            transcript.append_point::<C>(labels.output_c2, &ct.c2);
         }
         for a_i in &self.per_card_commitments {
-            transcript.append_point(labels.per_card_commitment, a_i);
+            transcript.append_point::<C>(labels.per_card_commitment, a_i);
         }
-        transcript.append_point(labels.commitment_pk, &self.commitment_pk);
+        transcript.append_point::<C>(labels.commitment_pk, &self.commitment_pk);
         for d2 in &d2_values {
-            transcript.append_point(labels.d2, d2);
+            transcript.append_point::<C>(labels.d2, d2);
         }
-        transcript.append_scalar(labels.nonce, &self.nonce);
-        let c = transcript.challenge(labels.challenge).scalar;
+        transcript.append_scalar::<C>(labels.nonce, &self.nonce);
+        let c = transcript.challenge::<C>(labels.challenge).scalar;
 
         // Check pk DLEq: G * response == commitment_pk + pk * c
         if C::base_g() * self.response != self.commitment_pk + *player_pk * c {

@@ -90,35 +90,50 @@ fun update_best(
     if (compare(&current, best) == 2) { current } else { *best }
 }
 
+// 优化: 直接按索引评估，避免分配中间 vector
 fun eval5i(
     cards: &vector<Card>,
     i0: u64, i1: u64, i2: u64, i3: u64, i4: u64
 ): HandRank {
-    let five = vector[cards[i0], cards[i1], cards[i2], cards[i3], cards[i4]];
-    evaluate_five(&five)
+    evaluate_five_by_indices(cards, i0, i1, i2, i3, i4)
 }
 
-// ========== 评估5张牌 ==========
+// ========== 评估5张牌 (公共 API，保持兼容) ==========
 public fun evaluate_five(cards: &vector<Card>): HandRank {
     assert!(cards.length() == 5, EInvalidCardCount);
+    // 复用优化后的按索引评估逻辑
+    evaluate_five_impl(
+        cards[0], cards[1], cards[2], cards[3], cards[4]
+    )
+}
 
-    let is_flush = check_flush(cards);
-    let (is_straight_val, straight_high) = check_straight(cards);
+// 按索引评估，避免 vector 分配
+fun evaluate_five_by_indices(
+    cards: &vector<Card>,
+    i0: u64, i1: u64, i2: u64, i3: u64, i4: u64
+): HandRank {
+    evaluate_five_impl(cards[i0], cards[i1], cards[i2], cards[i3], cards[i4])
+}
 
-    // 统计各点数出现次数
-    let c2 = count_rank(cards, 2);
-    let c3 = count_rank(cards, 3);
-    let c4 = count_rank(cards, 4);
-    let c5 = count_rank(cards, 5);
-    let c6 = count_rank(cards, 6);
-    let c7 = count_rank(cards, 7);
-    let c8 = count_rank(cards, 8);
-    let c9 = count_rank(cards, 9);
-    let c10 = count_rank(cards, 10);
-    let c11 = count_rank(cards, 11);
-    let c12 = count_rank(cards, 12);
-    let c13 = count_rank(cards, 13);
-    let c14 = count_rank(cards, 14);
+// 核心评估逻辑：单次遍历计数 + 复用排序结果
+fun evaluate_five_impl(c0: Card, c1: Card, c2: Card, c3: Card, c4: Card): HandRank {
+    // 单次遍历：构建点数计数数组 (索引 0=点数2, 12=点数14)
+    let mut counts = vector[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8];
+    *(vector::borrow_mut(&mut counts, (c0.rank() - 2) as u64)) = counts[(c0.rank() - 2) as u64] + 1;
+    *(vector::borrow_mut(&mut counts, (c1.rank() - 2) as u64)) = counts[(c1.rank() - 2) as u64] + 1;
+    *(vector::borrow_mut(&mut counts, (c2.rank() - 2) as u64)) = counts[(c2.rank() - 2) as u64] + 1;
+    *(vector::borrow_mut(&mut counts, (c3.rank() - 2) as u64)) = counts[(c3.rank() - 2) as u64] + 1;
+    *(vector::borrow_mut(&mut counts, (c4.rank() - 2) as u64)) = counts[(c4.rank() - 2) as u64] + 1;
+
+    // 同花检测
+    let is_flush = c0.suit() == c1.suit()
+        && c1.suit() == c2.suit()
+        && c2.suit() == c3.suit()
+        && c3.suit() == c4.suit();
+
+    // 排序点数降序 (复用)
+    let sorted = sorted_ranks_from_cards(c0, c1, c2, c3, c4);
+    let (is_straight_val, straight_high) = check_straight_from_sorted(&sorted);
 
     // 同花顺 / 皇家同花顺
     if (is_flush && is_straight_val) {
@@ -130,22 +145,22 @@ public fun evaluate_five(cards: &vector<Card>): HandRank {
     };
 
     // 四条
-    let four_r = find_four(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14);
+    let four_r = find_in_counts(&counts, 4);
     if (four_r > 0) {
-        let kicker = find_highest_excluding(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, four_r);
+        let kicker = find_highest_excluding_in_counts(&counts, four_r);
         return new_hand_rank(FOUR_OF_A_KIND, vector[four_r, kicker])
     };
 
     // 葫芦
-    let three_r = find_three(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14);
-    let pair_r = find_pair(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, 0);
+    let three_r = find_in_counts(&counts, 3);
+    let pair_r = find_pair_in_counts(&counts, 0);
     if (three_r > 0 && pair_r > 0) {
         return new_hand_rank(FULL_HOUSE, vector[three_r, pair_r])
     };
 
     // 同花
     if (is_flush) {
-        return new_hand_rank(FLUSH, sorted_ranks_desc(cards))
+        return new_hand_rank(FLUSH, sorted)
     };
 
     // 顺子
@@ -155,159 +170,122 @@ public fun evaluate_five(cards: &vector<Card>): HandRank {
 
     // 三条
     if (three_r > 0) {
-        let k1 = find_highest_excluding(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, three_r);
-        let k2 = find_highest_excluding2(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, three_r, k1);
+        let k1 = find_highest_excluding_in_counts(&counts, three_r);
+        let k2 = find_highest_excluding2_in_counts(&counts, three_r, k1);
         return new_hand_rank(THREE_OF_A_KIND, vector[three_r, k1, k2])
     };
 
-    // 两对
-    let p1 = find_pair(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, 0);
-    let p2 = find_pair(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, p1);
+    // 两对 (复用 pair_r 作为 p1)
+    let p1 = pair_r;
+    let p2 = find_pair_in_counts(&counts, p1);
     if (p1 > 0 && p2 > 0) {
-        let kicker = find_highest_excluding2(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, p1, p2);
+        let kicker = find_highest_excluding2_in_counts(&counts, p1, p2);
         return new_hand_rank(TWO_PAIR, vector[p1, p2, kicker])
     };
 
     // 一对
     if (p1 > 0) {
-        let k1 = find_highest_excluding(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, p1);
-        let k2 = find_highest_excluding2(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, p1, k1);
-        let k3 = find_highest_excluding3(c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, p1, k1, k2);
+        let k1 = find_highest_excluding_in_counts(&counts, p1);
+        let k2 = find_highest_excluding2_in_counts(&counts, p1, k1);
+        let k3 = find_highest_excluding3_in_counts(&counts, p1, k1, k2);
         return new_hand_rank(ONE_PAIR, vector[p1, k1, k2, k3])
     };
 
     // 高牌
-    new_hand_rank(HIGH_CARD, sorted_ranks_desc(cards))
+    new_hand_rank(HIGH_CARD, sorted)
 }
 
-// ========== 统计某个点数出现次数 ==========
-fun count_rank(cards: &vector<Card>, target: u8): u8 {
-    let mut count = 0;
-    let mut i = 0;
-    while (i < 5) {
-        if (cards[i].rank() == target) { count = count + 1 };
-        i = i + 1;
+// ========== 基于计数数组的查找函数 ==========
+// counts 索引: 0=点数2, 1=点数3, ..., 12=点数14
+
+fun find_in_counts(counts: &vector<u8>, target_count: u8): u8 {
+    // 从高到低查找
+    let mut i = 12;
+    while (i < 13) {  // i 从 12 递减到 0
+        if (counts[i] == target_count) {
+            return (i + 2) as u8
+        };
+        if (i == 0) { break };
+        i = i - 1;
     };
-    count
+    0
 }
 
-// ========== 查找四条 ==========
-fun find_four(c2: u8, c3: u8, c4: u8, c5: u8, c6: u8, c7: u8, c8: u8, c9: u8, c10: u8, c11: u8, c12: u8, c13: u8, c14: u8): u8 {
-    if (c14 == 4) { 14 }
-    else if (c13 == 4) { 13 }
-    else if (c12 == 4) { 12 }
-    else if (c11 == 4) { 11 }
-    else if (c10 == 4) { 10 }
-    else if (c9 == 4) { 9 }
-    else if (c8 == 4) { 8 }
-    else if (c7 == 4) { 7 }
-    else if (c6 == 4) { 6 }
-    else if (c5 == 4) { 5 }
-    else if (c4 == 4) { 4 }
-    else if (c3 == 4) { 3 }
-    else if (c2 == 4) { 2 }
-    else { 0 }
-}
-
-fun find_three(c2: u8, c3: u8, c4: u8, c5: u8, c6: u8, c7: u8, c8: u8, c9: u8, c10: u8, c11: u8, c12: u8, c13: u8, c14: u8): u8 {
-    if (c14 == 3) { 14 }
-    else if (c13 == 3) { 13 }
-    else if (c12 == 3) { 12 }
-    else if (c11 == 3) { 11 }
-    else if (c10 == 3) { 10 }
-    else if (c9 == 3) { 9 }
-    else if (c8 == 3) { 8 }
-    else if (c7 == 3) { 7 }
-    else if (c6 == 3) { 6 }
-    else if (c5 == 3) { 5 }
-    else if (c4 == 3) { 4 }
-    else if (c3 == 3) { 3 }
-    else if (c2 == 3) { 2 }
-    else { 0 }
-}
-
-fun find_pair(c2: u8, c3: u8, c4: u8, c5: u8, c6: u8, c7: u8, c8: u8, c9: u8, c10: u8, c11: u8, c12: u8, c13: u8, c14: u8, exclude: u8): u8 {
-    if (c14 == 2 && 14 != exclude) { 14 }
-    else if (c13 == 2 && 13 != exclude) { 13 }
-    else if (c12 == 2 && 12 != exclude) { 12 }
-    else if (c11 == 2 && 11 != exclude) { 11 }
-    else if (c10 == 2 && 10 != exclude) { 10 }
-    else if (c9 == 2 && 9 != exclude) { 9 }
-    else if (c8 == 2 && 8 != exclude) { 8 }
-    else if (c7 == 2 && 7 != exclude) { 7 }
-    else if (c6 == 2 && 6 != exclude) { 6 }
-    else if (c5 == 2 && 5 != exclude) { 5 }
-    else if (c4 == 2 && 4 != exclude) { 4 }
-    else if (c3 == 2 && 3 != exclude) { 3 }
-    else if (c2 == 2 && 2 != exclude) { 2 }
-    else { 0 }
-}
-
-fun find_highest_excluding(c2: u8, c3: u8, c4: u8, c5: u8, c6: u8, c7: u8, c8: u8, c9: u8, c10: u8, c11: u8, c12: u8, c13: u8, c14: u8, e1: u8): u8 {
-    if (c14 > 0 && 14 != e1) { 14 }
-    else if (c13 > 0 && 13 != e1) { 13 }
-    else if (c12 > 0 && 12 != e1) { 12 }
-    else if (c11 > 0 && 11 != e1) { 11 }
-    else if (c10 > 0 && 10 != e1) { 10 }
-    else if (c9 > 0 && 9 != e1) { 9 }
-    else if (c8 > 0 && 8 != e1) { 8 }
-    else if (c7 > 0 && 7 != e1) { 7 }
-    else if (c6 > 0 && 6 != e1) { 6 }
-    else if (c5 > 0 && 5 != e1) { 5 }
-    else if (c4 > 0 && 4 != e1) { 4 }
-    else if (c3 > 0 && 3 != e1) { 3 }
-    else if (c2 > 0 && 2 != e1) { 2 }
-    else { 0 }
-}
-
-fun find_highest_excluding2(c2: u8, c3: u8, c4: u8, c5: u8, c6: u8, c7: u8, c8: u8, c9: u8, c10: u8, c11: u8, c12: u8, c13: u8, c14: u8, e1: u8, e2: u8): u8 {
-    if (c14 > 0 && 14 != e1 && 14 != e2) { 14 }
-    else if (c13 > 0 && 13 != e1 && 13 != e2) { 13 }
-    else if (c12 > 0 && 12 != e1 && 12 != e2) { 12 }
-    else if (c11 > 0 && 11 != e1 && 11 != e2) { 11 }
-    else if (c10 > 0 && 10 != e1 && 10 != e2) { 10 }
-    else if (c9 > 0 && 9 != e1 && 9 != e2) { 9 }
-    else if (c8 > 0 && 8 != e1 && 8 != e2) { 8 }
-    else if (c7 > 0 && 7 != e1 && 7 != e2) { 7 }
-    else if (c6 > 0 && 6 != e1 && 6 != e2) { 6 }
-    else if (c5 > 0 && 5 != e1 && 5 != e2) { 5 }
-    else if (c4 > 0 && 4 != e1 && 4 != e2) { 4 }
-    else if (c3 > 0 && 3 != e1 && 3 != e2) { 3 }
-    else if (c2 > 0 && 2 != e1 && 2 != e2) { 2 }
-    else { 0 }
-}
-
-fun find_highest_excluding3(c2: u8, c3: u8, c4: u8, c5: u8, c6: u8, c7: u8, c8: u8, c9: u8, c10: u8, c11: u8, c12: u8, c13: u8, c14: u8, e1: u8, e2: u8, e3: u8): u8 {
-    if (c14 > 0 && 14 != e1 && 14 != e2 && 14 != e3) { 14 }
-    else if (c13 > 0 && 13 != e1 && 13 != e2 && 13 != e3) { 13 }
-    else if (c12 > 0 && 12 != e1 && 12 != e2 && 12 != e3) { 12 }
-    else if (c11 > 0 && 11 != e1 && 11 != e2 && 11 != e3) { 11 }
-    else if (c10 > 0 && 10 != e1 && 10 != e2 && 10 != e3) { 10 }
-    else if (c9 > 0 && 9 != e1 && 9 != e2 && 9 != e3) { 9 }
-    else if (c8 > 0 && 8 != e1 && 8 != e2 && 8 != e3) { 8 }
-    else if (c7 > 0 && 7 != e1 && 7 != e2 && 7 != e3) { 7 }
-    else if (c6 > 0 && 6 != e1 && 6 != e2 && 6 != e3) { 6 }
-    else if (c5 > 0 && 5 != e1 && 5 != e2 && 5 != e3) { 5 }
-    else if (c4 > 0 && 4 != e1 && 4 != e2 && 4 != e3) { 4 }
-    else if (c3 > 0 && 3 != e1 && 3 != e2 && 3 != e3) { 3 }
-    else if (c2 > 0 && 2 != e1 && 2 != e2 && 2 != e3) { 2 }
-    else { 0 }
-}
-
-// ========== 同花检测 ==========
-fun check_flush(cards: &vector<Card>): bool {
-    let s = cards[0].suit();
-    let mut i = 1;
-    while (i < 5) {
-        if (cards[i].suit() != s) { return false };
-        i = i + 1;
+fun find_pair_in_counts(counts: &vector<u8>, exclude: u8): u8 {
+    let mut i = 12;
+    while (i < 13) {
+        let rank = (i + 2) as u8;
+        if (counts[i] == 2 && rank != exclude) {
+            return rank
+        };
+        if (i == 0) { break };
+        i = i - 1;
     };
-    true
+    0
 }
 
-// ========== 顺子检测 ==========
-fun check_straight(cards: &vector<Card>): (bool, u8) {
-    let ranks = sorted_ranks_desc(cards);
+fun find_highest_excluding_in_counts(counts: &vector<u8>, e1: u8): u8 {
+    let mut i = 12;
+    while (i < 13) {
+        let rank = (i + 2) as u8;
+        if (counts[i] > 0 && rank != e1) {
+            return rank
+        };
+        if (i == 0) { break };
+        i = i - 1;
+    };
+    0
+}
+
+fun find_highest_excluding2_in_counts(counts: &vector<u8>, e1: u8, e2: u8): u8 {
+    let mut i = 12;
+    while (i < 13) {
+        let rank = (i + 2) as u8;
+        if (counts[i] > 0 && rank != e1 && rank != e2) {
+            return rank
+        };
+        if (i == 0) { break };
+        i = i - 1;
+    };
+    0
+}
+
+fun find_highest_excluding3_in_counts(counts: &vector<u8>, e1: u8, e2: u8, e3: u8): u8 {
+    let mut i = 12;
+    while (i < 13) {
+        let rank = (i + 2) as u8;
+        if (counts[i] > 0 && rank != e1 && rank != e2 && rank != e3) {
+            return rank
+        };
+        if (i == 0) { break };
+        i = i - 1;
+    };
+    0
+}
+
+// ========== 排序和顺子检测 (基于 Card 参数，避免 vector 分配) ==========
+
+fun sorted_ranks_from_cards(c0: Card, c1: Card, c2: Card, c3: Card, c4: Card): vector<u8> {
+    let mut ranks = vector[c0.rank(), c1.rank(), c2.rank(), c3.rank(), c4.rank()];
+    // 冒泡排序降序 (5个元素，最多10次比较)
+    let mut j = 0;
+    while (j < 4) {
+        let mut k = 0;
+        while (k < 4 - j) {
+            if (ranks[k] < ranks[k + 1]) {
+                let tmp = ranks[k];
+                let next_val = ranks[k + 1];
+                *(vector::borrow_mut(&mut ranks, k)) = next_val;
+                *(vector::borrow_mut(&mut ranks, k + 1)) = tmp;
+            };
+            k = k + 1;
+        };
+        j = j + 1;
+    };
+    ranks
+}
+
+fun check_straight_from_sorted(ranks: &vector<u8>): (bool, u8) {
     let mut i = 0;
     while (i < 4) {
         let curr = ranks[i];
@@ -327,27 +305,6 @@ fun check_straight(cards: &vector<Card>): (bool, u8) {
         i = i + 1;
     };
     (true, ranks[0])
-}
-
-// ========== 排序点数降序 ==========
-fun sorted_ranks_desc(cards: &vector<Card>): vector<u8> {
-    let mut ranks = vector[cards[0].rank(), cards[1].rank(), cards[2].rank(), cards[3].rank(), cards[4].rank()];
-    // 冒泡排序降序
-    let mut j = 0;
-    while (j < 4) {
-        let mut k = 0;
-        while (k < 4 - j) {
-            if (ranks[k] < ranks[k + 1]) {
-                let tmp = ranks[k];
-                let next_val = ranks[k + 1];
-                *(vector::borrow_mut(&mut ranks, k)) = next_val;
-                *(vector::borrow_mut(&mut ranks, k + 1)) = tmp;
-            };
-            k = k + 1;
-        };
-        j = j + 1;
-    };
-    ranks
 }
 
 // ========== 类别名称 ==========

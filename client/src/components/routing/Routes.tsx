@@ -11,6 +11,7 @@ import NotFoundPage from '../../pages/NotFoundPage';
 import contentContext from '../../context/content/contentContext';
 import SecretPokerLobby from '../../pages/SecretPokerLobby';
 import SecretPokerGameTable from '../../pages/SecretPokerGameTable';
+import ZkLoginCallback from '../../pages/ZkLoginCallback';
 
 const RoutesComponent: React.FC = () => {
   const { staticPages } = useContext(contentContext)!;
@@ -20,6 +21,7 @@ const RoutesComponent: React.FC = () => {
       <Route path="/" element={<HomePage />} />
       <Route path="/register" element={<RegistrationPage />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/auth/callback" element={<ZkLoginCallback />} />
       <Route
         path="/dashboard"
         element={

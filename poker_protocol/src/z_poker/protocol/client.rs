@@ -6,6 +6,7 @@ use crate::z_poker::convert::{hex_to_scalar, scalar_to_hex, ecpoint_to_hex};
 use crate::zk_shuffle::error::VerificationError;
 use crate::zk_shuffle::reconstruction::{reconstruct_deck, ReconstructProof};
 use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use crate::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 use crate::crypto::curve::{CurveScalar, CurvePoint};
 use crate::z_poker::card::PlayingCard;
 use crate::z_poker::key_manager::PKOwnershipProof;
@@ -72,7 +73,7 @@ impl ClientPlayer {
 
     pub fn peek_card(&self, ct: &ElGamalCiphertext, tokens: &[RevealToken], plain_cards: &[Plaintext]) -> Result<(Plaintext, ElGamalCiphertext), VerificationError> {
         for token in tokens {
-            let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+            let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
             token.proof.verify(&token.encrypted_card, &token.reveal_token, &token.user_public_key, &mut transcript).map_err(|_| VerificationError::InvalidRevealToken)?;
         }
         let self_token = ct.gen_reveal_token(&self.sk);
@@ -88,7 +89,7 @@ impl ClientPlayer {
     }
 
     pub fn verify_and_reveal_from_token(token: &RevealToken) -> Result<Plaintext, VerificationError> {
-        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
         token.proof.verify(&token.encrypted_card, &token.reveal_token, &token.user_public_key, &mut transcript)
             .map_err(|_| VerificationError::InvalidRevealToken)?;
         Ok(token.encrypted_card.c2 - token.reveal_token)
@@ -96,7 +97,7 @@ impl ClientPlayer {
 
     pub fn generate_reveal_token(&self, ct: &ElGamalCiphertext) -> RevealToken {
         let reveal_token = ct.gen_reveal_token(&self.sk);
-        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
         let proof = RevealTokenProof::<DefaultCurve>::prove(&self.sk, &self.pk, ct, &reveal_token, &mut OsRng, &mut transcript);
         RevealToken {
             user_public_key: self.pk,
@@ -115,7 +116,7 @@ impl ClientPlayer {
     }
 
     pub fn shuffle(&self, deck_encrypted: &[ElGamalCiphertext], agg_pk: &EcPoint) -> ShuffleRound {
-        let mut transcript = merlin::Transcript::new(b"poker_protocol_player_shuffle");
+        let mut transcript = MerlinTranscript::new(b"poker_protocol_player_shuffle");
         ShuffleRound::execute(deck_encrypted, agg_pk, &mut transcript, &mut OsRng)
     }
 
@@ -148,7 +149,7 @@ impl ClientPlayer {
 
         let encrypted_card = hand_encrypted[hand_index].clone();
         let reveal_token = encrypted_card.gen_reveal_token(&self.sk);
-        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
         let proof = RevealTokenProof::<DefaultCurve>::prove(&self.sk, &self.pk, &encrypted_card, &reveal_token, &mut OsRng, &mut transcript);
 
         Ok(RevealToken {
@@ -165,7 +166,7 @@ impl ClientPlayer {
     ) -> RevealToken {
         let ct_for_self = ElGamalCiphertext::encrypt(&comm_plaintext, &self.pk, &Scalar::random(&mut OsRng));
         let reveal_token = ct_for_self.gen_reveal_token(&self.sk);
-        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
         let proof = RevealTokenProof::<DefaultCurve>::prove(&self.sk, &self.pk, &ct_for_self, &reveal_token, &mut OsRng, &mut transcript);
 
         RevealToken {
@@ -197,7 +198,7 @@ impl ClientPlayer {
         tokens: &[RevealToken],
     ) -> Result<Plaintext, VerificationError> {
         for token in tokens {
-            let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+            let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
             token.proof.verify(&token.encrypted_card, &token.reveal_token, &token.user_public_key, &mut transcript)
                 .map_err(|_| VerificationError::InvalidRevealToken)?;
         }
@@ -213,7 +214,7 @@ impl ClientPlayer {
 
     pub fn reconstruct(&self, origin_cards: &[Plaintext], user_readable_cards: &[ElGamalCiphertext], coefficient: &Scalar) -> Result<ReconstructDeck, VerificationError> {
         let (s_vec, output_cards, swap_out_cards) = reconstruct_deck(origin_cards, user_readable_cards, &self.sk, &self.pk, coefficient)?;
-        let mut transcript = merlin::Transcript::new(b"zk_poker_reconstruct");
+        let mut transcript = MerlinTranscript::new(b"zk_poker_reconstruct");
         let reconstruct_proof = ReconstructProof::<DefaultCurve>::prove(origin_cards.to_vec(), user_readable_cards.to_vec(), output_cards.clone(), swap_out_cards.clone(), &self.sk, &self.pk, s_vec, &mut transcript)?;
         Ok(ReconstructDeck {
             output_cards,

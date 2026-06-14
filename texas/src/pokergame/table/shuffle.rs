@@ -1,6 +1,6 @@
 use super::*;
 use crate::pokergame::player::truncate_name;
-use merlin::Transcript;
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 
 impl Table {
     pub fn is_all_players_shuffled(&self) -> bool {
@@ -191,7 +191,7 @@ impl Table {
 
         if is_join_before_start {
             let round = round_json.to_mask_and_shuffle_round().map_err(|e| JoinError::Crypto(e))?;
-            let mut transcript = Transcript::new(b"poker_protocol_mask_shuffle");
+            let mut transcript = MerlinTranscript::new(b"poker_protocol_mask_shuffle");
             let input_cards = self.mental_poker_game.deck_encrypted.iter().map(|c| c.clone()).collect::<Vec<_>>();
             if !round.remask_proof.verify( &input_cards,
             &round.mask_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
@@ -265,7 +265,7 @@ impl Table {
         let proof = shuffle_proof.to_proof()?;
         let current_agg_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
         let input_cards = self.mental_poker_game.deck_encrypted.clone();
-        let mut transcript = Transcript::new(b"poker_protocol_player_shuffle");
+        let mut transcript = MerlinTranscript::new(b"poker_protocol_player_shuffle");
         if proof.verify(
             &input_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
             &output_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),

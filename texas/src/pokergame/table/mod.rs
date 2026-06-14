@@ -13,7 +13,7 @@ use crate::pokergame::side_pot::SidePot;
 use poker_protocol::z_poker::{MentalPokerGame, GameConfig};
 use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Scalar};
 use poker_protocol::z_poker::convert::{ecpoint_to_hex, scalar_to_hex};
-use merlin::Transcript;
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 use poker_protocol::crypto::CurvePoint;
 use poker_protocol::crypto::CurveScalar;
 const MIN_START_NUM: u32 = 3;

@@ -53,6 +53,12 @@ public fun new_reconstruct_transcript(): Transcript {
     bls_transcript::new(&label)
 }
 
+/// 创建 remask + shuffle 共享 Transcript（与 Rust 端 poker_protocol_mask_shuffle 对应）
+public fun new_mask_shuffle_transcript(): Transcript {
+    let label = b"zk_mask_shuffle_proof_v1";
+    bls_transcript::new(&label)
+}
+
 // ========== 验证入口 ==========
 
 /// 验证洗牌证明
@@ -76,6 +82,28 @@ public fun verify_shuffle_or_abort(
     assert!(verify_shuffle(input_cts, output_cts, pk, proof), EShuffleProofFailed);
 }
 
+/// 验证洗牌证明（使用外部 Transcript，用于 remask+shuffle 共享 transcript 场景）
+public fun verify_shuffle_with_transcript(
+    input_cts: &vector<ElGamalCiphertext>,
+    output_cts: &vector<ElGamalCiphertext>,
+    pk: &group_ops::Element<G1>,
+    proof: &ShuffleProof,
+    transcript: &mut Transcript,
+): bool {
+    shuffle_proof::verify(proof, input_cts, output_cts, pk, transcript)
+}
+
+/// 验证洗牌证明（使用外部 Transcript，断言版本）
+public fun verify_shuffle_with_transcript_or_abort(
+    input_cts: &vector<ElGamalCiphertext>,
+    output_cts: &vector<ElGamalCiphertext>,
+    pk: &group_ops::Element<G1>,
+    proof: &ShuffleProof,
+    transcript: &mut Transcript,
+) {
+    assert!(verify_shuffle_with_transcript(input_cts, output_cts, pk, proof, transcript), EShuffleProofFailed);
+}
+
 /// 验证重掩码证明
 public fun verify_remask(
     input_cts: &vector<ElGamalCiphertext>,
@@ -95,6 +123,28 @@ public fun verify_remask_or_abort(
     proof: &RemaskProof,
 ) {
     assert!(verify_remask(input_cts, output_cts, player_pk, proof), ERemaskProofFailed);
+}
+
+/// 验证重掩码证明（使用外部 Transcript，用于 remask+shuffle 共享 transcript 场景）
+public fun verify_remask_with_transcript(
+    input_cts: &vector<ElGamalCiphertext>,
+    output_cts: &vector<ElGamalCiphertext>,
+    player_pk: &group_ops::Element<G1>,
+    proof: &RemaskProof,
+    transcript: &mut Transcript,
+): bool {
+    remask_proof::verify(proof, input_cts, output_cts, player_pk, transcript)
+}
+
+/// 验证重掩码证明（使用外部 Transcript，断言版本）
+public fun verify_remask_with_transcript_or_abort(
+    input_cts: &vector<ElGamalCiphertext>,
+    output_cts: &vector<ElGamalCiphertext>,
+    player_pk: &group_ops::Element<G1>,
+    proof: &RemaskProof,
+    transcript: &mut Transcript,
+) {
+    assert!(verify_remask_with_transcript(input_cts, output_cts, player_pk, proof, transcript), ERemaskProofFailed);
 }
 
 /// 验证离场证明

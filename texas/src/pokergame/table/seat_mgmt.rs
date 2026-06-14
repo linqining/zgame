@@ -1,6 +1,6 @@
 use super::*;
 use poker_protocol::crypto::EcPoint;
-use merlin::Transcript;
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 use crate::pokergame::game_state::LeaveGameRoundJson;
 
 impl Table {
@@ -56,7 +56,7 @@ impl Table {
         }
 
         // Verify the LeaveProof
-        let mut transcript = Transcript::new(b"poker_protocol_leave");
+        let mut transcript = MerlinTranscript::new(b"poker_protocol_leave");
         if !leave_round.leave_proof.verify(&leave_round.input_cards, &leave_round.output_cards, player_pk, &mut transcript) {
             return Err("Invalid leave proof".to_string());
         }

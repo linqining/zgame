@@ -3,7 +3,7 @@ import LogoWithText from '../logo/LogoWithText';
 import Logo from '../logo/LogoIcon';
 import Container from '../layout/Container';
 import styled from 'styled-components';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import Hider from '../layout/Hider';
 import Button from '../buttons/Button';
 import HamburgerButton from '../buttons/HamburgerButton';
@@ -65,6 +65,17 @@ const StyledHamburgerButton = styled(HamburgerButton)`
   }
 `;
 
+const LoginButton = styled(Button)`
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: white;
+  border: none;
+  box-shadow: 0 4px 20px rgba(102, 126, 234, 0.25);
+  &:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 12px 35px rgba(102, 126, 234, 0.45);
+  }
+`;
+
 const Navbar: React.FC<NavbarProps> = ({
   loggedIn,
   chipsAmount,
@@ -73,6 +84,7 @@ const Navbar: React.FC<NavbarProps> = ({
   className,
 }) => {
   const { getLocalizedString } = useContext(contentContext)!;
+  const navigate = useNavigate();
 
   const openShopModal = () =>
     openModal(
@@ -93,11 +105,14 @@ const Navbar: React.FC<NavbarProps> = ({
           <Link to="/">
             <LogoWithText />
           </Link>
-          <Hider hideOnMobile>
-            <Spacer>
+          <Spacer>
+            <Hider hideOnMobile>
               <ConnectButton />
-            </Spacer>
-          </Hider>
+            </Hider>
+            <LoginButton onClick={() => navigate('/login')}>
+              Sign In
+            </LoginButton>
+          </Spacer>
         </Container>
       </StyledNav>
     );

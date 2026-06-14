@@ -124,7 +124,7 @@ impl Table {
             return Err("Player not found in reconstruct state".to_string());
         }
         let user_readable_cards = user_readable_cards.unwrap();
-        let mut transcript = merlin::Transcript::new(b"zk_poker_reconstruct");
+        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::MerlinTranscript::new(b"zk_poker_reconstruct");
         if proof.verify(&self.reconstruct_state.cards, &output_cards,
         &swap_cards, &user_readable_cards.readable_cards,
         &player, &mut transcript).is_err(){

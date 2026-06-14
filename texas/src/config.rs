@@ -13,6 +13,17 @@ pub struct Config {
     pub free_chips_threshold: i64,
     pub free_chips_cooldown_secs: i64,
     pub max_players_per_table: u32,
+    // Sponsored transaction config
+    pub sponsor_private_key: String,
+    pub sponsor_gas_budget: u64,
+    pub fullnode_url: String,
+    // zkLogin salt secret
+    pub zklogin_salt_secret: String,
+    // Sui event listener config
+    pub inodra_webhook_secret: String,
+    pub sui_package_id: String,
+    pub sui_network: String,
+    pub sui_event_provider: String,
 }
 
 impl Config {
@@ -31,6 +42,14 @@ impl Config {
             free_chips_threshold: std::env::var("FREE_CHIPS_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(1000),
             free_chips_cooldown_secs: std::env::var("FREE_CHIPS_COOLDOWN_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3600),
             max_players_per_table: std::env::var("MAX_PLAYERS_PER_TABLE").ok().and_then(|s| s.parse().ok()).unwrap_or(5),
+            sponsor_private_key: std::env::var("SPONSOR_PRIVATE_KEY").unwrap_or_else(|_| "".to_string()),
+            sponsor_gas_budget: std::env::var("SPONSOR_GAS_BUDGET").ok().and_then(|s| s.parse().ok()).unwrap_or(100_000_000),
+            fullnode_url: std::env::var("FULLNODE_URL").unwrap_or_else(|_| "https://fullnode.testnet.sui.io:443".to_string()),
+            zklogin_salt_secret: std::env::var("ZKLOGIN_SALT_SECRET").unwrap_or_else(|_| "zklogin_salt_dev_secret".to_string()),
+            inodra_webhook_secret: std::env::var("INODRA_WEBHOOK_SECRET").unwrap_or_else(|_| "".to_string()),
+            sui_package_id: std::env::var("SUI_PACKAGE_ID").unwrap_or_else(|_| "".to_string()),
+            sui_network: std::env::var("SUI_NETWORK").unwrap_or_else(|_| "testnet".to_string()),
+            sui_event_provider: std::env::var("SUI_EVENT_PROVIDER").unwrap_or_else(|_| "grpc".to_string()),
         }
     }
 }

@@ -1,7 +1,6 @@
 use crate::crypto::curve::{Curve, CurvePoint, CurveScalar};
-use merlin::Transcript;
+use crate::zk_shuffle::transcript_ext::CryptoTranscript;
 use crate::zk_shuffle::error::VerificationError;
-use crate::zk_shuffle::transcript_ext::TranscriptExtension;
 
 /// Generalized Schnorr proof for proving that a point R is a linear combination
 /// of multiple base points G_1, G_2, ..., G_n.
@@ -30,9 +29,8 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
         base_points: &[C::Point],
         secrets: &[C::Scalar],
         R: &C::Point,
-        transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> Result<Self, VerificationError>
-    where Transcript: TranscriptExtension<C>,
     {
         if base_points.len() != secrets.len() {
             return Err(VerificationError::LengthMismatch);
@@ -53,9 +51,9 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
         // Append public values to transcript
         transcript.append_message(b"gen_schnorr_n", &(n as u64).to_le_bytes());
         for G_i in base_points {
-            TranscriptExtension::<C>::append_point(transcript, b"gen_schnorr_base", G_i);
+            transcript.append_point::<C>(b"gen_schnorr_base", G_i);
         }
-        TranscriptExtension::<C>::append_point(transcript, b"gen_schnorr_R", R);
+        transcript.append_point::<C>(b"gen_schnorr_R", R);
 
         // Generate n random scalars r_1, r_2, ..., r_n
         let r_vec: Vec<C::Scalar> = (0..n)
@@ -66,10 +64,10 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
         let commitment = C::Point::vartime_multiscalar_mul(&r_vec, base_points);
 
         // Append commitment to transcript
-        TranscriptExtension::<C>::append_point(transcript, b"gen_schnorr_commitment", &commitment);
+        transcript.append_point::<C>(b"gen_schnorr_commitment", &commitment);
 
         // Get challenge scalar c = H(G_1, ..., G_n, R, T)
-        let c = TranscriptExtension::<C>::challenge(transcript, b"gen_schnorr_challenge").scalar;
+        let c = transcript.challenge::<C>(b"gen_schnorr_challenge").scalar;
 
         // Compute responses: s_i = r_i + c * k_i
         let responses: Vec<C::Scalar> = r_vec
@@ -98,9 +96,8 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
         &self,
         base_points: &[C::Point],
         R: &C::Point,
-        transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> Result<(), VerificationError>
-    where Transcript: TranscriptExtension<C>,
     {
         if self.responses.len() != base_points.len() {
             return Err(VerificationError::InvalidDLEQProof);
@@ -122,15 +119,15 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
         // Append public values to transcript (same as in prove)
         transcript.append_message(b"gen_schnorr_n", &(n as u64).to_le_bytes());
         for G_i in base_points {
-            TranscriptExtension::<C>::append_point(transcript, b"gen_schnorr_base", G_i);
+            transcript.append_point::<C>(b"gen_schnorr_base", G_i);
         }
-        TranscriptExtension::<C>::append_point(transcript, b"gen_schnorr_R", R);
+        transcript.append_point::<C>(b"gen_schnorr_R", R);
 
         // Append commitment to transcript
-        TranscriptExtension::<C>::append_point(transcript, b"gen_schnorr_commitment", &self.commitment);
+        transcript.append_point::<C>(b"gen_schnorr_commitment", &self.commitment);
 
         // Get challenge scalar c
-        let c = TranscriptExtension::<C>::challenge(transcript, b"gen_schnorr_challenge").scalar;
+        let c = transcript.challenge::<C>(b"gen_schnorr_challenge").scalar;
 
         // Verify: sum(s_i * G_i) == T + c * R
         let lhs = C::Point::vartime_multiscalar_mul(&self.responses, base_points);

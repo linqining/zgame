@@ -3,8 +3,14 @@ mod models;
 mod auth;
 mod handlers;
 mod wallet_auth;
+mod sponsor;
 mod pokergame;
 mod socket;
+mod sui_events;
+mod sui_webhook;
+mod sui_listener;
+mod sui_grpc;
+mod sui_query;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,7 +32,7 @@ async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,tokio_runtime=info".into())
+                .unwrap_or_else(|_| "debug,tokio_runtime=info".into())
         )
         .with_target(true)
         .with_thread_ids(false)
@@ -72,13 +78,21 @@ async fn main() -> std::io::Result<()> {
         socket_state: socket_state.clone(),
     });
 
+    // 克隆用于 Sui 监听器后台任务
+    let listener_state = app_state.clone();
+
     let api_routes = Router::new()
         .route("/auth",routing::get(handlers::get_current_user).post(handlers::login))
         .route("/auth/wallet", routing::post(handlers::wallet_login))
         .route("/auth/wallet/logout", routing::post(handlers::wallet_logout))
+        .route("/auth/zklogin", routing::post(sponsor::zklogin_auth))
+        .route("/auth/zklogin/salt", routing::post(sponsor::get_zklogin_salt))
         .route("/users", routing::post(handlers::register))
         .route("/chips/free", routing::get(handlers::free_chips))
         .route("/tables/:table_id", routing::get(handlers::get_table))
+        .route("/sponsor/transaction", routing::post(sponsor::sponsor_transaction))
+        .route("/sponsor/gas-info", routing::get(sponsor::get_gas_info))
+        .route("/sui/webhook", routing::post(sui_webhook::inodra_webhook))
         .route("/games/:game_id/join", routing::post(handlers::join_game))
         .route("/games/:game_id/action", routing::post(handlers::player_action))
         .route("/games/:game_id/reveal-token", routing::post(handlers::submit_reveal_token));
@@ -107,6 +121,11 @@ async fn main() -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     tracing::info!("Vintage Poker Server (Rust) starting on port {}", port);
     tracing::info!("Connected to MongoDB: {}@{}", socket_state.config.mongodb_db_name, socket_state.config.mongodb_uri);
+
+    // 启动 Sui 事件监听器后台任务（历史回填）
+    tokio::spawn(async move {
+        sui_listener::start_sui_listener(listener_state).await;
+    });
 
     axum::serve(listener, app).await
 }

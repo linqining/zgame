@@ -22,6 +22,7 @@ pub type RistrettoRemaskProof = RemaskProof<crate::crypto::curve::RistrettoCurve
 mod tests {
     use super::*;
     use crate::crypto::curve::{RistrettoCurve, CurvePoint, CurveScalar};
+    use crate::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
     use rand_core::OsRng;
 
     type RistrettoElGamalCiphertext = ElGamalCiphertextGeneric<RistrettoCurve>;
@@ -50,8 +51,8 @@ mod tests {
         let output_cts: Vec<RistrettoElGamalCiphertext> = (0..RistrettoCurve::n_cards())
             .map(|i| remask_ciphertext(&input_cts[i], &sk, &pk, &mut rng).unwrap()).collect();
 
-        let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk, &mut merlin::Transcript::new(b"test_honest_prover_passes"));
-        assert!(proof.verify(&input_cts, &output_cts, &pk, &mut merlin::Transcript::new(b"test_honest_prover_passes")), "honest prover should pass");
+        let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk, &mut MerlinTranscript::new(b"test_honest_prover_passes"));
+        assert!(proof.verify(&input_cts, &output_cts, &pk, &mut MerlinTranscript::new(b"test_honest_prover_passes")), "honest prover should pass");
     }
 
     #[test]
@@ -75,8 +76,8 @@ mod tests {
             output_cts.push(mask_card);
         }
 
-        let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk, &mut merlin::Transcript::new(b"test_honest_prover_passes_2"));
-        assert!(proof.verify(&input_cts, &output_cts, &pk, &mut merlin::Transcript::new(b"test_honest_prover_passes_2")), "honest prover should pass");
+        let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk, &mut MerlinTranscript::new(b"test_honest_prover_passes_2"));
+        assert!(proof.verify(&input_cts, &output_cts, &pk, &mut MerlinTranscript::new(b"test_honest_prover_passes_2")), "honest prover should pass");
     }
 
     #[test]
@@ -97,9 +98,9 @@ mod tests {
             output_cts.push(mask_card);
         }
 
-        let mut transcript = merlin::Transcript::new(b"test_honest_prover_passes_3");
+        let mut transcript = MerlinTranscript::new(b"test_honest_prover_passes_3");
         let proof = RemaskProof::prove(&input_cts, &output_cts, &sk2, &pk2, &mut transcript);
-        let mut transcript = merlin::Transcript::new(b"test_honest_prover_passes_3");
+        let mut transcript = MerlinTranscript::new(b"test_honest_prover_passes_3");
         assert!(proof.verify(&input_cts, &output_cts, &pk2, &mut transcript), "honest prover should pass");
     }
 
@@ -132,9 +133,9 @@ mod tests {
         let output_cts: Vec<RistrettoElGamalCiphertext> = (0..RistrettoCurve::n_cards())
             .map(|i| make_remask_pair(&input_cts[i], &sk, &pk, &mut rng)).collect();
 
-        let mut transcript = merlin::Transcript::new(b"test_wrong_sk_fails");
+        let mut transcript = MerlinTranscript::new(b"test_wrong_sk_fails");
         let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk, &mut transcript);
-        let mut transcript = merlin::Transcript::new(b"test_wrong_sk_fails");
+        let mut transcript = MerlinTranscript::new(b"test_wrong_sk_fails");
         assert!(!proof.verify(&input_cts, &output_cts, &wrong_pk, &mut transcript), "wrong pk should fail");
     }
 
@@ -150,12 +151,12 @@ mod tests {
         let output_cts: Vec<RistrettoElGamalCiphertext> = (0..RistrettoCurve::n_cards())
             .map(|i| make_remask_pair(&input_cts[i], &sk, &pk, &mut rng)).collect();
 
-        let mut transcript = merlin::Transcript::new(b"test_tampered_output_fails");
+        let mut transcript = MerlinTranscript::new(b"test_tampered_output_fails");
         let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk, &mut transcript);
 
         let mut tampered = output_cts.clone();
         tampered[0] = make_remask_pair(&tampered[0], &sk, &pk, &mut rng);
-        let mut transcript = merlin::Transcript::new(b"test_tampered_output_fails");
+        let mut transcript = MerlinTranscript::new(b"test_tampered_output_fails");
         assert!(!proof.verify(&input_cts, &tampered, &pk, &mut transcript), "tampered output should fail");
     }
 
@@ -171,12 +172,12 @@ mod tests {
         let output_cts: Vec<RistrettoElGamalCiphertext> = (0..RistrettoCurve::n_cards())
             .map(|i| make_remask_pair(&input_cts[i], &sk, &pk, &mut rng)).collect();
 
-        let mut transcript = merlin::Transcript::new(b"test_tampered_input_fails");
+        let mut transcript = MerlinTranscript::new(b"test_tampered_input_fails");
         let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk, &mut transcript);
 
         let mut tampered = input_cts.clone();
         tampered[1] = RistrettoElGamalCiphertext::encrypt(&(RistrettoCurve::base_h() * <RistrettoCurve as Curve>::Scalar::from_u64(99u64)), &pk, &<RistrettoCurve as Curve>::Scalar::random(&mut rng));
-        let mut transcript = merlin::Transcript::new(b"test_tampered_input_fails");
+        let mut transcript = MerlinTranscript::new(b"test_tampered_input_fails");
         assert!(!proof.verify(&tampered, &output_cts, &pk, &mut transcript), "tampered input should fail");
     }
 
@@ -193,9 +194,9 @@ mod tests {
         let output_cts: Vec<RistrettoElGamalCiphertext> = (0..RistrettoCurve::n_cards())
             .map(|i| make_remask_pair(&input_cts[i], &sk, &pk, &mut rng)).collect();
 
-        let mut transcript = merlin::Transcript::new(b"test_wrong_prover_sk_fails");
+        let mut transcript = MerlinTranscript::new(b"test_wrong_prover_sk_fails");
         let proof = RemaskProof::prove(&input_cts, &output_cts, &wrong_sk, &pk, &mut transcript);
-        let mut transcript = merlin::Transcript::new(b"test_wrong_prover_sk_fails");
+        let mut transcript = MerlinTranscript::new(b"test_wrong_prover_sk_fails");
         assert!(!proof.verify(&input_cts, &output_cts, &pk, &mut transcript), "prover with wrong sk should fail");
     }
 
@@ -208,9 +209,9 @@ mod tests {
         let input = RistrettoElGamalCiphertext::encrypt(&pt, &pk, &r);
         let output = make_remask_pair(&input, &sk, &pk, &mut rng);
 
-        let mut transcript = merlin::Transcript::new(b"test_single_card");
+        let mut transcript = MerlinTranscript::new(b"test_single_card");
         let proof = RemaskProof::prove(&[input.clone()], &[output.clone()], &sk, &pk, &mut transcript);
-        let mut transcript = merlin::Transcript::new(b"test_single_card");
+        let mut transcript = MerlinTranscript::new(b"test_single_card");
         assert!(proof.verify(&[input], &[output], &pk, &mut transcript), "single card should pass");
     }
 
@@ -227,9 +228,9 @@ mod tests {
         let (sk2, pk2) = gen_keypair::<RistrettoCurve>(&mut rng);
         output.c2 = output.c2 + output.c1 * sk2; //user2 join
 
-        let mut transcript = merlin::Transcript::new(b"test_single_card_two_user");
+        let mut transcript = MerlinTranscript::new(b"test_single_card_two_user");
         let proof = RemaskProof::prove(&[enc_one.clone()], &[output.clone()], &sk2, &pk2, &mut transcript);
-        let mut transcript = merlin::Transcript::new(b"test_single_card_two_user");
+        let mut transcript = MerlinTranscript::new(b"test_single_card_two_user");
         assert!(proof.verify(&[enc_one.clone()], &[output.clone()], &pk2, &mut transcript), "single card should pass");
 
         let reveal_token1 = output.gen_reveal_token(&sk);
@@ -267,7 +268,7 @@ mod tests {
 
         for i in 0..(WARMUP + ITERATIONS) {
             let start = Instant::now();
-            let mut transcript = merlin::Transcript::new(b"test_benchmark_remask_proof_52_cards");
+            let mut transcript = MerlinTranscript::new(b"test_benchmark_remask_proof_52_cards");
             let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk, &mut transcript);
             let prove_dur = start.elapsed();
 
@@ -281,7 +282,7 @@ mod tests {
             }
 
             let start = Instant::now();
-            let mut transcript = merlin::Transcript::new(b"test_benchmark_remask_proof_52_cards");
+            let mut transcript = MerlinTranscript::new(b"test_benchmark_remask_proof_52_cards");
             let valid = proof.verify(&input_cts, &output_cts, &pk, &mut transcript);
             let verify_dur = start.elapsed();
 
@@ -368,7 +369,7 @@ mod tests {
 
         for i in 0..(WARMUP + ITERATIONS) {
             let start = Instant::now();
-            let mut transcript = merlin::Transcript::new(b"test_benchmark_remask_proof_52_cards_bls12381");
+            let mut transcript = MerlinTranscript::new(b"test_benchmark_remask_proof_52_cards_bls12381");
             let proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk, &mut transcript);
             let prove_dur = start.elapsed();
 
@@ -382,7 +383,7 @@ mod tests {
             }
 
             let start = Instant::now();
-            let mut transcript = merlin::Transcript::new(b"test_benchmark_remask_proof_52_cards_bls12381");
+            let mut transcript = MerlinTranscript::new(b"test_benchmark_remask_proof_52_cards_bls12381");
             let valid = proof.verify(&input_cts, &output_cts, &pk, &mut transcript);
             let verify_dur = start.elapsed();
 
@@ -485,7 +486,7 @@ mod tests {
 
             for i in 0..(WARMUP + ITERATIONS) {
                 let start = Instant::now();
-                let mut transcript = merlin::Transcript::new(b"test_benchmark_remask_proof_scaling");
+                let mut transcript = MerlinTranscript::new(b"test_benchmark_remask_proof_scaling");
                 let proof = RemaskProof::prove(input_cts, output_cts, &sk, &pk, &mut transcript);
                 let prove_dur = start.elapsed();
 
@@ -498,7 +499,7 @@ mod tests {
                 }
 
                 let start = Instant::now();
-                let mut transcript = merlin::Transcript::new(b"test_benchmark_remask_proof_scaling");
+                let mut transcript = MerlinTranscript::new(b"test_benchmark_remask_proof_scaling");
                 let valid = proof.verify(input_cts, output_cts, &pk, &mut transcript);
                 let verify_dur = start.elapsed();
 
@@ -565,9 +566,9 @@ mod tests {
             .collect();
 
         // Verify honest proof passes
-        let mut transcript = merlin::Transcript::new(b"test_forgery_remask_proof_individual_card_manipulation");
+        let mut transcript = MerlinTranscript::new(b"test_forgery_remask_proof_individual_card_manipulation");
         let honest_proof = RemaskProof::prove(&input_cts, &output_cts, &sk, &pk, &mut transcript);
-        let mut transcript = merlin::Transcript::new(b"test_forgery_remask_proof_individual_card_manipulation");
+        let mut transcript = MerlinTranscript::new(b"test_forgery_remask_proof_individual_card_manipulation");
         assert!(honest_proof.verify(&input_cts, &output_cts, &pk, &mut transcript), "honest proof should pass");
 
         // --- Attack attempt: manipulate output_cts ---
@@ -584,11 +585,11 @@ mod tests {
             "forged output_cts[0] should NOT be a valid remasking");
 
         // Create the RemaskProof using the forged output_cts
-        let mut transcript = merlin::Transcript::new(b"test_forgery_remask_proof_forged");
+        let mut transcript = MerlinTranscript::new(b"test_forgery_remask_proof_forged");
         let forged_proof = RemaskProof::prove(&input_cts, &forged_output_cts, &sk, &pk, &mut transcript);
 
         // With the per-card DLEq fix, the proof should FAIL verification
-        let mut transcript = merlin::Transcript::new(b"test_forgery_remask_proof_forged");
+        let mut transcript = MerlinTranscript::new(b"test_forgery_remask_proof_forged");
         assert!(!forged_proof.verify(&input_cts, &forged_output_cts, &pk, &mut transcript),
             "FIXED: per-card DLEq should REJECT manipulated output_cts");
     }
@@ -603,9 +604,9 @@ mod tests {
 
         output.c2 = output.c2 + output.c1 * sk; //user2 join
 
-        let mut transcript = merlin::Transcript::new(b"test_single_card_one_user");
+        let mut transcript = MerlinTranscript::new(b"test_single_card_one_user");
         let proof = RemaskProof::prove(&[input.clone()], &[output.clone()], &sk, &pk, &mut transcript);
-        let mut transcript = merlin::Transcript::new(b"test_single_card_one_user");
+        let mut transcript = MerlinTranscript::new(b"test_single_card_one_user");
         assert!(proof.verify(&[input.clone()], &[output.clone()], &pk, &mut transcript), "single card should pass");
 
         let reveal_token1 = output.clone().gen_reveal_token(&sk);
@@ -639,13 +640,13 @@ mod tests {
         assert_eq!(pt1, pt2, "Both outputs should decrypt to same plaintext");
 
         // Proof still passes for both
-        let mut transcript1 = merlin::Transcript::new(b"test_remask_output1");
+        let mut transcript1 = MerlinTranscript::new(b"test_remask_output1");
         let proof1 = RemaskProof::prove(&[input.clone()], &[output1.clone()], &sk, &pk, &mut transcript1);
-        let mut transcript1_v = merlin::Transcript::new(b"test_remask_output1");
+        let mut transcript1_v = MerlinTranscript::new(b"test_remask_output1");
         assert!(proof1.verify(&[input.clone()], &[output1.clone()], &pk, &mut transcript1_v), "Proof for output1 should pass");
-        let mut transcript2 = merlin::Transcript::new(b"test_remask_output2");
+        let mut transcript2 = MerlinTranscript::new(b"test_remask_output2");
         let proof2 = RemaskProof::prove(&[input.clone()], &[output2.clone()], &sk, &pk, &mut transcript2);
-        let mut transcript2_v = merlin::Transcript::new(b"test_remask_output2");
+        let mut transcript2_v = MerlinTranscript::new(b"test_remask_output2");
         assert!(proof2.verify(&[input.clone()], &[output2.clone()], &pk, &mut transcript2_v), "Proof for output2 should pass");
     }
 
@@ -674,18 +675,18 @@ mod tests {
         assert_eq!(manual_output.c2, input.c2,
             "c2 unchanged when c1 is identity");
 
-        let mut transcript = merlin::Transcript::new(b"test_identity_c1");
+        let mut transcript = MerlinTranscript::new(b"test_identity_c1");
         let proof = RemaskProof::prove(&[input.clone()], &[manual_output.clone()], &sk, &pk, &mut transcript);
-        let mut transcript_v = merlin::Transcript::new(b"test_identity_c1");
+        let mut transcript_v = MerlinTranscript::new(b"test_identity_c1");
         assert!(proof.verify(&[input.clone()], &[manual_output.clone()], &pk, &mut transcript_v),
             "Proof passes for identity c1, but per-card check is vacuous");
 
         // 关键：如果攻击者修改了 manual_output.c2，证明会失败
         let mut tampered_output = manual_output.clone();
         tampered_output.c2 = tampered_output.c2 + RistrettoCurve::base_g();
-        let mut transcript2 = merlin::Transcript::new(b"test_identity_c1_tampered");
+        let mut transcript2 = MerlinTranscript::new(b"test_identity_c1_tampered");
         let proof2 = RemaskProof::prove(&[input.clone()], &[tampered_output.clone()], &sk, &pk, &mut transcript2);
-        let mut transcript2_v = merlin::Transcript::new(b"test_identity_c1_tampered");
+        let mut transcript2_v = MerlinTranscript::new(b"test_identity_c1_tampered");
         assert!(!proof2.verify(&[input.clone()], &[tampered_output.clone()], &pk, &mut transcript2_v),
             "Tampered c2 should fail when c1 is identity");
     }

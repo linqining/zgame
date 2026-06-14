@@ -99,6 +99,38 @@ public fun c1_bytes(ct: &ElGamalCiphertext): vector<u8> { bls_scalar::g1_to_byte
 
 public fun c2_bytes(ct: &ElGamalCiphertext): vector<u8> { bls_scalar::g1_to_bytes(&ct.c2) }
 
+/// 序列化密文为 96 字节 (c1 48 bytes + c2 48 bytes)
+public fun ciphertext_to_bytes(ct: &ElGamalCiphertext): vector<u8> {
+    let mut bytes = c1_bytes(ct);
+    let c2_b = c2_bytes(ct);
+    let mut i = 0;
+    while (i < c2_b.length()) {
+        bytes.push_back(c2_b[i]);
+        i = i + 1;
+    };
+    bytes
+}
+
+/// 从 96 字节反序列化密文
+public fun ciphertext_from_bytes(bytes: &vector<u8>): ElGamalCiphertext {
+    assert!(bytes.length() == 96, 0);
+    let mut c1_bytes = vector[];
+    let mut c2_bytes = vector[];
+    let mut i = 0;
+    while (i < 48) {
+        c1_bytes.push_back(bytes[i]);
+        i = i + 1;
+    };
+    while (i < 96) {
+        c2_bytes.push_back(bytes[i]);
+        i = i + 1;
+    };
+    ElGamalCiphertext {
+        c1: bls12381::g1_from_bytes(&c1_bytes),
+        c2: bls12381::g1_from_bytes(&c2_bytes),
+    }
+}
+
 // ========== 批量操作 ==========
 
 /// 批量加密52张明文牌

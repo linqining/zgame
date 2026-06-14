@@ -1,7 +1,6 @@
-use merlin::Transcript;
+use crate::zk_shuffle::transcript_ext::CryptoTranscript;
 use rand_core::OsRng;
 use crate::crypto::curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
-use crate::zk_shuffle::transcript_ext::TranscriptExtension;
 pub use crate::zk_shuffle::error::VerificationError;
 use super::chaum_pedersen::ChaumPedersenDLEQProof;
 
@@ -17,8 +16,7 @@ pub struct SwapOutCardProof<C: Curve>{
 impl<C: Curve> SwapOutCardProof<C>{
     /// 证明swap_out_card 是由user_readable_card 一一 替换出来的
     /// swap_scalar 是 swap_out_card - user_readable_card 的系数
-    pub(crate) fn prove(user_readable_card: ElGamalCiphertextGeneric<C>, swap_out_card: ElGamalCiphertextGeneric<C>, user_sk: &C::Scalar, user_pk: &C::Point, transcript: &mut Transcript) -> Result<Self, VerificationError>
-    where Transcript: TranscriptExtension<C>,
+    pub(crate) fn prove(user_readable_card: ElGamalCiphertextGeneric<C>, swap_out_card: ElGamalCiphertextGeneric<C>, user_sk: &C::Scalar, user_pk: &C::Point, transcript: &mut impl CryptoTranscript) -> Result<Self, VerificationError>
     {
         let delta_c1 = swap_out_card.c1 - user_readable_card.c1;
         let delta_c2 = swap_out_card.c2 - user_readable_card.c2;
@@ -53,22 +51,21 @@ impl<C: Curve> ReconstructionDLEQProof<C> {
         points_in: &[C::Point],
         points_out: &[C::Point],
         a: C::Scalar,
-        transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> Result<Self, VerificationError>
-    where Transcript: TranscriptExtension<C>,
     {
         if a == C::Scalar::zero() {
             return Err(VerificationError::InvalidDLEQProof);
         }
         let nonce = C::Scalar::random(&mut OsRng);
-        TranscriptExtension::<C>::append_scalar(transcript, b"recon_dleq_nonce", &nonce);
+        transcript.append_scalar::<C>(b"recon_dleq_nonce", &nonce);
         for point in points_in {
-            TranscriptExtension::<C>::append_point(transcript,b"recon_dleq_point", point);
+            transcript.append_point::<C>(b"recon_dleq_point", point);
         }
         for point in points_out {
-            TranscriptExtension::<C>::append_point(transcript,b"recon_dleq_point", point);
+            transcript.append_point::<C>(b"recon_dleq_point", point);
         }
-        let base_coefficient = TranscriptExtension::<C>::challenge(transcript, b"recon_dleq_coefficient").scalar;
+        let base_coefficient = transcript.challenge::<C>(b"recon_dleq_coefficient").scalar;
 
         let mut sum_point_total = C::Point::identity();
         let mut coefficient = base_coefficient;
@@ -83,8 +80,8 @@ impl<C: Curve> ReconstructionDLEQProof<C> {
 
         let w = C::Scalar::random(&mut OsRng);
         let commitment = sum_point_total * w;
-        TranscriptExtension::<C>::append_point(transcript,b"recon_dleq_A", &commitment);
-        let c = TranscriptExtension::<C>::challenge(transcript, b"recon_dleq_challenge").scalar;
+        transcript.append_point::<C>(b"recon_dleq_A", &commitment);
+        let c = transcript.challenge::<C>(b"recon_dleq_challenge").scalar;
         let response = w + a * c;
         Ok(Self {
             commitment,
@@ -97,21 +94,20 @@ impl<C: Curve> ReconstructionDLEQProof<C> {
         &self,
         points_in: &[C::Point],
         points_out: &[C::Point],
-        transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> Result<(), VerificationError>
-    where Transcript: TranscriptExtension<C>,
     {
         if self.commitment.is_identity() {
             return Err(VerificationError::InvalidDLEQProof);
         }
-        TranscriptExtension::<C>::append_scalar(transcript,b"recon_dleq_nonce", &self.nonce);
+        transcript.append_scalar::<C>(b"recon_dleq_nonce", &self.nonce);
         for point in points_in {
-            TranscriptExtension::<C>::append_point(transcript,b"recon_dleq_point", point);
+            transcript.append_point::<C>(b"recon_dleq_point", point);
         }
         for point in points_out {
-            TranscriptExtension::<C>::append_point(transcript,b"recon_dleq_point", point);
+            transcript.append_point::<C>(b"recon_dleq_point", point);
         }
-        let base_coefficient = TranscriptExtension::<C>::challenge(transcript, b"recon_dleq_coefficient").scalar;
+        let base_coefficient = transcript.challenge::<C>(b"recon_dleq_coefficient").scalar;
 
         let mut sum_point_in_total = C::Point::identity();
         let mut sum_point_out_total = C::Point::identity();
@@ -122,8 +118,8 @@ impl<C: Curve> ReconstructionDLEQProof<C> {
             sum_point_out_total = sum_point_out_total + *point_out * coefficient;
             coefficient = coefficient * base_coefficient;
         }
-        TranscriptExtension::<C>::append_point(transcript,b"recon_dleq_A", &self.commitment);
-        let c = TranscriptExtension::<C>::challenge(transcript, b"recon_dleq_challenge").scalar;
+        transcript.append_point::<C>(b"recon_dleq_A", &self.commitment);
+        let c = transcript.challenge::<C>(b"recon_dleq_challenge").scalar;
         let lhs1 = sum_point_in_total * self.response;
         let rhs1 = self.commitment + sum_point_out_total * c;
         if lhs1 == rhs1 {

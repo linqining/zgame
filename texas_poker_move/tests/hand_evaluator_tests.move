@@ -107,3 +107,67 @@ fun best_hand_selects_best_5_from_7() {
     let hr = hand_evaluator::best_hand(&cards);
     assert_eq!(hand_evaluator::category(&hr), 6);
 }
+
+// ========== 补充: 平局和比较测试 ==========
+
+#[test]
+fun compare_equal_hands_returns_tie() {
+    let cards1 = make7(0,14, 1,14, 2,10, 3,10, 0,5, 1,6, 2,7);
+    let cards2 = make7(0,14, 1,14, 2,10, 3,10, 0,5, 1,6, 2,7);
+    let h1 = hand_evaluator::best_hand(&cards1);
+    let h2 = hand_evaluator::best_hand(&cards2);
+    assert_eq!(hand_evaluator::compare(&h1, &h2), 1);
+}
+
+#[test]
+fun straight_flush_beats_four_of_a_kind() {
+    let sf = make7(0,9, 0,10, 0,11, 0,12, 0,13, 1,2, 1,3);
+    let quads = make7(0,14, 1,14, 2,14, 3,14, 0,5, 1,6, 2,7);
+    let h1 = hand_evaluator::best_hand(&sf);
+    let h2 = hand_evaluator::best_hand(&quads);
+    assert_eq!(hand_evaluator::category(&h1), 8);
+    assert_eq!(hand_evaluator::category(&h2), 7);
+    assert_eq!(hand_evaluator::compare(&h1, &h2), 2);
+}
+
+#[test]
+fun higher_pair_beats_lower_pair() {
+    let high_pair = make7(0,14, 1,14, 2,10, 3,5, 0,3, 1,7, 2,9);
+    let low_pair = make7(0,13, 1,13, 2,10, 3,5, 0,3, 1,7, 2,9);
+    let h1 = hand_evaluator::best_hand(&high_pair);
+    let h2 = hand_evaluator::best_hand(&low_pair);
+    assert_eq!(hand_evaluator::compare(&h1, &h2), 2);
+}
+
+#[test]
+fun flush_beats_straight() {
+    let flush = make7(0,2, 0,5, 0,8, 0,11, 0,14, 1,3, 2,4);
+    let straight = make7(0,2, 1,3, 2,4, 3,5, 0,6, 1,14, 2,13);
+    let h1 = hand_evaluator::best_hand(&flush);
+    let h2 = hand_evaluator::best_hand(&straight);
+    assert_eq!(hand_evaluator::category(&h1), 5);
+    assert_eq!(hand_evaluator::category(&h2), 4);
+    assert_eq!(hand_evaluator::compare(&h1, &h2), 2);
+}
+
+#[test]
+fun full_house_beats_flush() {
+    let fh = make7(0,14, 1,14, 2,14, 0,10, 1,10, 2,3, 3,5);
+    let flush = make7(0,2, 0,5, 0,8, 0,11, 0,14, 1,3, 2,4);
+    let h1 = hand_evaluator::best_hand(&fh);
+    let h2 = hand_evaluator::best_hand(&flush);
+    assert_eq!(hand_evaluator::category(&h1), 6);
+    assert_eq!(hand_evaluator::category(&h2), 5);
+    assert_eq!(hand_evaluator::compare(&h1, &h2), 2);
+}
+
+#[test]
+fun two_pair_beats_one_pair() {
+    let two_pair = make7(0,14, 1,14, 2,10, 3,10, 0,5, 1,6, 2,7);
+    let one_pair = make7(0,14, 1,14, 2,10, 3,5, 0,6, 1,7, 2,9);
+    let h1 = hand_evaluator::best_hand(&two_pair);
+    let h2 = hand_evaluator::best_hand(&one_pair);
+    assert_eq!(hand_evaluator::category(&h1), 2);
+    assert_eq!(hand_evaluator::category(&h2), 1);
+    assert_eq!(hand_evaluator::compare(&h1, &h2), 2);
+}

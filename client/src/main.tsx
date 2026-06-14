@@ -4,6 +4,46 @@ import App from './App';
 import logoWithText from './assets/img/logo_with_text.svg';
 import Providers from './context/Providers';
 
+// Capture OAuth id_token from URL hash BEFORE React renders.
+// Google OAuth implicit flow returns id_token in hash fragment (#id_token=xxx).
+// Some browsers/routers may strip the hash before React components can read it.
+(function captureOAuthCallback() {
+  console.log('[OAuth] Page loaded, full URL:', window.location.href);
+  console.log('[OAuth] Hash:', window.location.hash);
+  console.log('[OAuth] Search:', window.location.search);
+  console.log('[OAuth] Pathname:', window.location.pathname);
+
+  const hash = window.location.hash;
+  if (hash) {
+    const params = new URLSearchParams(hash.slice(1));
+    const idToken = params.get('id_token');
+    const error = params.get('error');
+    if (idToken) {
+      sessionStorage.setItem('oauth_id_token', idToken);
+      console.log('[OAuth] Captured id_token from hash');
+    } else {
+      console.log('[OAuth] Hash exists but no id_token found. Hash params:', Object.fromEntries(params));
+    }
+    if (error) {
+      sessionStorage.setItem('oauth_error', error);
+      const errorDesc = params.get('error_description');
+      if (errorDesc) sessionStorage.setItem('oauth_error_desc', errorDesc);
+    }
+  } else {
+    console.log('[OAuth] No hash fragment in URL');
+  }
+  // Also check search params (some providers use query string)
+  const search = window.location.search;
+  if (search) {
+    const params = new URLSearchParams(search);
+    const idToken = params.get('id_token');
+    if (idToken && !sessionStorage.getItem('oauth_id_token')) {
+      sessionStorage.setItem('oauth_id_token', idToken);
+      console.log('[OAuth] Captured id_token from search params');
+    }
+  }
+})();
+
 const rootElement = document.getElementById('root');
 const cookieBannerRoot = document.getElementById('cookie-banner');
 const loadingScreen = document.getElementById('loading-screen');

@@ -42,7 +42,7 @@ struct RegisterRequest {
     password: String,
 }
 
-fn get_token_from_headers(headers: &HeaderMap) -> Option<String> {
+pub fn get_token_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-auth-token")
         .and_then(|t| t.to_str().ok())
@@ -121,7 +121,7 @@ fn parse_id(id: &str) -> Option<u32> {
     id.parse::<u32>().ok()
 }
 
-fn err_resp(code: StatusCode, msg: &str) -> Response {
+pub fn err_resp(code: StatusCode, msg: &str) -> Response {
     (code, Json(serde_json::json!({"error": msg}))).into_response()
 }
 

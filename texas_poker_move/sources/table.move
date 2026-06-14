@@ -1,56 +1,21 @@
 module texas_poker::table;
 
-use sui::event;
 use sui::clock::Clock;
 use sui::bls12381;
+use sui::bls12381::Scalar;
+use sui::group_ops;
 use std::string::String;
-use texas_poker::card::Card;
+use texas_poker::card::{Self, Card};
 use texas_poker::hand_evaluator::{Self, HandRank};
 use texas_poker::betting::{Self, BettingRound};
 use texas_poker::side_pot::{Self, SidePot};
-use texas_poker::bls_elgamal::ElGamalCiphertext;
+use texas_poker::bls_elgamal::{Self, ElGamalCiphertext};
 use texas_poker::bls_scalar;
 use texas_poker::zk_verifier;
-use texas_poker::shuffle_proof::ShuffleProof;
-use texas_poker::schnorr_proof::GeneralizedSchnorrProof;
-use texas_poker::remask_proof::RemaskProof;
-use texas_poker::leave_proof::LeaveProof;
-use texas_poker::reveal_token_proof::RevealTokenProof;
-use texas_poker::reconstruct_proof::ReconstructProof;
-
-// ========== 常量 ==========
-const MIN_PLAYERS_TO_START: u64 = 3;
-const MAX_PLAYERS: u64 = 9;
-const CARDS_PER_PLAYER: u64 = 2;
-
-// ========== Round State 常量 ==========
-const ROUND_WAITING: u8 = 0;
-const ROUND_SHUFFLING: u8 = 1;
-const ROUND_PREFLOP: u8 = 2;
-const ROUND_FLOP: u8 = 3;
-const ROUND_TURN: u8 = 4;
-const ROUND_RIVER: u8 = 5;
-const ROUND_SHOWDOWN: u8 = 6;
-const ROUND_HAND_COMPLETE: u8 = 7;
-const ROUND_SHUFFLE_COMPLETE: u8 = 8;
-const ROUND_PREFLOP_REVEAL: u8 = 9;
-const ROUND_FLOP_REVEAL: u8 = 10;
-const ROUND_TURN_REVEAL: u8 = 11;
-const ROUND_RIVER_REVEAL: u8 = 12;
-const ROUND_SHOWDOWN_REVEAL: u8 = 13;
-
-// ========== Reveal Phase 常量 ==========
-const REVEAL_PHASE_NONE: u8 = 0;
-const REVEAL_PHASE_HAND: u8 = 1;
-const REVEAL_PHASE_COMMUNITY: u8 = 2;
-const REVEAL_PHASE_SHOWDOWN: u8 = 3;
-const REVEAL_PHASE_REDEAL: u8 = 4;
-
-// ========== Reconstruct Phase 常量 ==========
-const RECONSTRUCT_PHASE_NONE: u8 = 0;
-const RECONSTRUCT_PHASE_VOTING: u8 = 1;
-const RECONSTRUCT_PHASE_COLLECTING: u8 = 2;
-const RECONSTRUCT_PHASE_COMPLETE: u8 = 3;
+use texas_poker::bls_scalar::hash_to_scalar;
+use texas_poker::table_events;
+use texas_poker::table_constants;
+use texas_poker::table_serialization;
 
 // ========== 错误码 ==========
 #[error]
@@ -59,6 +24,11 @@ const ETableFull: vector<u8> = b"Table is full";
 const ENotPlayerTurn: vector<u8> = b"Not this player's turn";
 #[error]
 const EInvalidRoundState: vector<u8> = b"Invalid round state for this action";
+#[error]
+const EInvalidShufflePhase: vector<u8> = b"Invalid shuffle phase state for this action";
+#[error]
+const EInvalidReconstructPhase: vector<u8> = b"Invalid reconstruct phase state for this action";
+
 #[error]
 const EPlayerAlreadySeated: vector<u8> = b"Player already seated";
 #[error]
@@ -84,6 +54,8 @@ const ENotCurrentShuffler: vector<u8> = b"Not the current shuffler";
 #[error]
 const EShuffleAlreadyCompleted: vector<u8> = b"Player already completed shuffle";
 #[error]
+const EInvalidRevealPhaseState: vector<u8> = b"Invalid reveal phase state for this action";
+#[error]
 const ENotPendingRevealer: vector<u8> = b"Player is not pending to reveal this card";
 #[error]
 const ECardAlreadyDecrypted: vector<u8> = b"Card already decrypted";
@@ -98,11 +70,23 @@ const EReconstructNotCollecting: vector<u8> = b"Reconstruct is not in collecting
 #[error]
 const EReconstructAlreadySubmitted: vector<u8> = b"Player already submitted reconstruct deck";
 #[error]
+const EInvalidReconstructDeckSize: vector<u8> = b"Invalid reconstruct deck size";
+#[error]
 const EPkAlreadyRegistered: vector<u8> = b"Player PK already registered";
 #[error]
-const ENotAdmin: vector<u8> = b"Only admin can perform this action";
-#[error]
 const ENotTimedOut: vector<u8> = b"Player has not timed out yet";
+#[error]
+const ETablePlaying: vector<u8> = b"Table is playing";
+#[error]
+const ENotShuffling: vector<u8> = b"Player has not completed shuffle";
+#[error]
+const ENotLeaveable: vector<u8> = b"Not in leaveable state";
+#[error]
+const ENotJoinable: vector<u8> = b"Not in join state";
+#[error]
+const ELeaveProofMissing: vector<u8> = b"Leave proof is missing";
+
+
 
 // ========== 座位 ==========
 public struct Seat has store, drop {
@@ -115,11 +99,14 @@ public struct Seat has store, drop {
     folded: bool,
     all_in: bool,
     acted_this_round: bool,
+    is_waiting: bool,                   // 本局不参与，等下一局开始
+    left_during_hand: bool,             // 本局中途离开（被踢），total_bet 保留供 side pot 计算
     pk: vector<u8>,                     // 玩家 ElGamal 公钥 (G1 compressed bytes)
 }
 
 // ========== 洗牌状态 ==========
 public struct ShuffleState has store, drop {
+    phase: u8,                          // None / Shuffling
     current_shuffler: Option<u64>,      // 当前洗牌者 seat_index
     pending_players: vector<u64>,       // 等待洗牌的玩家列表
     completed_players: vector<u64>,     // 已完成洗牌的玩家列表
@@ -146,166 +133,113 @@ public struct RevealTokenState has store, drop {
 }
 
 // ========== Reconstruct 状态 ==========
+/// 存储单个玩家提交的 reconstruct 输出
+public struct ReconstructPlayerDeck has store, drop {
+    seat_index: u64,
+    output_cts: vector<ElGamalCiphertext>,  // 该玩家重建后的牌组
+}
+
 public struct ReconstructState has store, drop {
     phase: u8,                          // None / Voting / Collecting / Complete
-    votes_yes: u64,
-    votes_no: u64,
-    voted_players: vector<u64>,         // 已投票的玩家 seat_index
     pending_players: vector<u64>,       // 待提交 reconstruct deck 的玩家
-    completed_players: vector<u64>,     // 已提交的玩家
-    coefficient: vector<u8>,            // 随机系数 (scalar bytes)
-    readable_cards: vector<vector<u8>>, // 玩家可读牌 (G1 compressed bytes each)
-    cards: vector<vector<u8>>,          // 明文牌点 (G1 compressed bytes each, 用于 verify)
+    coefficient: group_ops::Element<Scalar>, // 随机系数 (scalar bytes)
+
+    player_decks: vector<ReconstructPlayerDeck>, // 所有玩家提交的重建牌组
 }
 
-// ========== 事件 ==========
-public struct TableCreated has copy, drop {
-    table_id: ID,
-    name: String,
-    admin: address,
+// ========== 超时配置 ==========
+public struct TimeoutConfig has store, drop {
+    shuffle_timeout_ms: u64,            // 洗牌超时 (默认 10000)
+    reveal_timeout_ms: u64,             // 揭牌超时 (默认 10000)
+    betting_timeout_ms: u64,            // 下注超时 (默认 30000)
+    reconstruct_timeout_ms: u64,        // 重构投票超时 (默认 10000)
+    showdown_display_ms: u64,           // 摊牌展示时间 (默认 3000)
+    hand_complete_wait_ms: u64,         // 一手结束后等待时间 (默认 5000)
+    ready_wait_ms: u64,                 // 开始倒计时 (默认 5000)
 }
 
-public struct PlayerJoined has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-    player: address,
-    buy_in: u64,
+// ========== 时间戳 ==========
+public struct Timestamps has store, drop {
+    ready_at: u64,                      // 准备好开始的时间戳 (0=未设置)
+    shuffle_started_at: u64,            // 当前洗牌者开始时间
+    reveal_started_at: u64,             // 当前 reveal 阶段开始时间
+    betting_started_at: u64,            // 当前下注者开始时间
+    reconstruct_started_at: u64,        // reconstruct 投票开始时间
+    showdown_at: u64,                   // 摊牌展示结束时间
+    hand_complete_at: u64,              // 一手结束时间
 }
 
-public struct PlayerLeft has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-    player: address,
+// ========== 牌组状态 ==========
+// ========== 已解密牌 ==========
+/// 存储链上解密结果
+/// 手牌(preflop): 其他玩家提交 reveal token 后得到部分解密密文(ciphertext_bytes)，牌主尚未提交
+/// 公共牌: 所有玩家提交后得到明文(plaintext_bytes)
+/// 手牌(showdown): 牌主提交后从部分解密密文得到明文(plaintext_bytes)
+public struct DecryptedCard has store, drop {
+    encrypted_card_index: u64,          // 原始加密牌组中的索引
+    owner_seat_index: u64,              // 牌主 seat_index (公共牌为 MAX_U64)
+    ciphertext_bytes: vector<u8>,       // 部分解密密文 (96 bytes: c1+c2)，空=已完全解密
+    plaintext_bytes: vector<u8>,        // 完全解密明文 (48 bytes G1 compressed)，空=仅部分解密
 }
 
-public struct HandStarted has copy, drop {
-    table_id: ID,
-    button: u64,
+// ========== 牌组状态 ==========
+public struct DeckState has store, drop {
+    encrypted: vector<ElGamalCiphertext>,
+    aggregated_pk: vector<u8>,          // 聚合公钥 (G1 compressed bytes)
+    plaintext: vector<vector<u8>>,      // 52 张明文牌 (G1 compressed bytes)，由合约生成
+    cards_dealt: u64,                   // 已从牌组发出的牌数量
+    decrypted_cards: vector<DecryptedCard>, // 已解密的合法牌
 }
 
-public struct ShuffleVerified has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-    player: address,
+// ========== 扑克牌 ==========
+/// 扑克牌，对应 Rust 端 PlayingCard
+public struct PlayingCard has copy, drop, store {
+    rank: u8,   // 2-14 (2=Two, ..., 14=Ace)
+    suit: u8,   // 0=Club, 1=Diamond, 2=Heart, 3=Spade
 }
 
-public struct ShuffleCompleteEvt has copy, drop {
-    table_id: ID,
+/// 根据 index (0-51) 获取标准扑克牌
+/// 对应 Rust 端 PlayingCard::from_id(index)
+public fun playing_card_from_index(index: u64): PlayingCard {
+    assert!(index < table_constants::n_cards(), EInvalidCardIndex);
+    let rank_idx = index % 13;
+    let suit_idx = index / 13;
+    PlayingCard { rank: (rank_idx + 2) as u8, suit: suit_idx as u8 }
 }
 
-public struct RevealTokenSubmitted has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-    card_index: u64,
-    phase: u8,
+/// 根据明文 G1 点查找对应的 PlayingCard
+/// 在 deck_plaintext 中查找匹配的 index，再映射到 PlayingCard
+public fun plaintext_to_playing_card(plaintext: &vector<vector<u8>>, point_bytes: &vector<u8>): PlayingCard {
+    let mut i = 0;
+    while (i < plaintext.length()) {
+        if (plaintext[i] == *point_bytes) {
+            return playing_card_from_index(i)
+        };
+        i = i + 1;
+    };
+    abort EInvalidCardIndex
 }
 
-public struct RevealPhaseComplete has copy, drop {
-    table_id: ID,
-    phase: u8,
-}
+/// 获取牌的 rank (2-14)
+public fun card_rank(card: &PlayingCard): u8 { card.rank }
 
-public struct PlayerFolded has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-}
+/// 获取牌的 suit (0-3)
+public fun card_suit(card: &PlayingCard): u8 { card.suit }
 
-public struct PlayerChecked has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-}
-
-public struct PlayerCalled has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-    amount: u64,
-}
-
-public struct PlayerRaised has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-    total_bet: u64,
-}
-
-public struct HandSettled has copy, drop {
-    table_id: ID,
-    pot: u64,
-}
-
-public struct ReconstructInitiated has copy, drop {
-    table_id: ID,
-}
-
-public struct ReconstructVote has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-    vote: bool,
-}
-
-public struct ReconstructDeckSubmitted has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-}
-
-public struct ReconstructCompleteEvt has copy, drop {
-    table_id: ID,
-}
-
-public struct RedealRequested has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-    card_indices: vector<u64>,
-}
-
-public struct PlayerKicked has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-}
-
-public struct AutoFolded has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-}
-
-public struct ForceFolded has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-}
-
-public struct ShuffleTimeout has copy, drop {
-    table_id: ID,
-    seat_index: u64,
-}
-
-public struct RevealTimeout has copy, drop {
-    table_id: ID,
-    phase: u8,
-}
-
-public struct HandReset has copy, drop {
-    table_id: ID,
-}
-
-public struct ReadyToStart has copy, drop {
-    table_id: ID,
-    ready_at: u64,
-}
-
-public struct HandCleanedUp has copy, drop {
-    table_id: ID,
+// ========== 管理员能力对象 ==========
+public struct AdminCap has key, store {
+    id: UID,
 }
 
 // ========== 牌桌（共享对象） ==========
 public struct Table has key {
     id: UID,
     name: String,
-    admin: address,
     max_players: u64,
     small_blind: u64,
     big_blind: u64,
 
     seats: vector<Seat>,
-    active_count: u64,
     button: u64,
 
     pot: u64,
@@ -317,30 +251,222 @@ public struct Table has key {
     current_turn: Option<u64>,
 
     // 加密牌组
-    deck_encrypted: vector<ElGamalCiphertext>,
-    aggregated_pk: vector<u8>,          // 聚合公钥 (G1 compressed bytes)
+    deck_state: DeckState,
 
     // 协议状态
     shuffle_state: ShuffleState,
     reveal_token_state: RevealTokenState,
     reconstruct_state: ReconstructState,
 
-    // 超时控制
-    shuffle_timeout_ms: u64,            // 洗牌超时 (默认 10000)
-    reveal_timeout_ms: u64,             // 揭牌超时 (默认 10000)
-    betting_timeout_ms: u64,            // 下注超时 (默认 30000)
-    reconstruct_timeout_ms: u64,        // 重构投票超时 (默认 10000)
-    showdown_display_ms: u64,           // 摊牌展示时间 (默认 3000)
-    hand_complete_wait_ms: u64,         // 一手结束后等待时间 (默认 5000)
-    ready_wait_ms: u64,                 // 开始倒计时 (默认 5000)
-    ready_at: u64,                      // 准备好开始的时间戳 (0=未设置)
-    shuffle_started_at: u64,            // 当前洗牌者开始时间
-    reveal_started_at: u64,             // 当前 reveal 阶段开始时间
-    betting_started_at: u64,            // 当前下注者开始时间
-    reconstruct_started_at: u64,        // reconstruct 投票开始时间
-    showdown_at: u64,                   // 摊牌展示结束时间
-    hand_complete_at: u64,              // 一手结束时间
+    // 超时配置
+    timeout_config: TimeoutConfig,
+
+    // 时间戳
+    timestamps: Timestamps,
 }
+
+// ========== Table 快照（供客户端查询） ==========
+public struct TableSummary has drop {
+    // 元数据
+    table_id: ID,
+    name: String,
+    max_players: u64,
+    small_blind: u64,
+    big_blind: u64,
+    // 活跃座位信息
+    active_count: u64,
+    button: u64,
+    // 底池
+    pot: u64,
+    side_pots_count: u64,
+    community_cards_count: u64,
+    // 阶段
+    round_state: u8,
+    // 下注轮信息（展开 BettingRound）
+    betting_round_exists: bool,
+    betting_round_current_bet: u64,
+    betting_round_min_raise: u64,
+    betting_round_big_blind: u64,
+    betting_round_last_raiser_seat: Option<u64>,
+    betting_round_actions_taken: u64,
+    // 当前行动玩家
+    current_turn: Option<u64>,
+    // 座位快照（每个座位的公开信息）
+    seats_occupied: vector<bool>,
+    seat_players: vector<address>,
+    seat_stacks: vector<u64>,
+    seat_bets: vector<u64>,
+    seat_total_bets: vector<u64>,
+    seat_folded: vector<bool>,
+    seat_all_in: vector<bool>,
+    seat_is_waiting: vector<bool>,
+    // 洗牌状态
+    shuffle_current_shuffler: Option<u64>,
+    shuffle_pending_count: u64,
+    shuffle_completed_count: u64,
+    // Reveal 阶段
+    reveal_phase: u8,
+    reveal_assignment_count: u64,
+    // Reconstruct 阶段
+    reconstruct_phase: u8,
+    // 牌组大小
+    deck_size: u64,
+    // 已发牌数量
+    cards_dealt: u64,
+    // 明文牌组（52 张 G1 compressed bytes）
+    deck_plaintext: vector<vector<u8>>,
+    // 超时配置
+    shuffle_timeout_ms: u64,
+    reveal_timeout_ms: u64,
+    betting_timeout_ms: u64,
+    reconstruct_timeout_ms: u64,
+    showdown_display_ms: u64,
+    hand_complete_wait_ms: u64,
+    ready_wait_ms: u64,
+    // 时间戳
+    ready_at: u64,
+    shuffle_started_at: u64,
+    reveal_started_at: u64,
+    betting_started_at: u64,
+    reconstruct_started_at: u64,
+    showdown_at: u64,
+    hand_complete_at: u64,
+    // 一致性保证
+    epoch: u64,
+}
+
+// ========== 获取 Table 快照 ==========
+public fun get_table_summary(table: &Table, ctx: &TxContext): TableSummary {
+    let len = table.seats.length();
+    let mut seats_occupied = vector::empty<bool>();
+    let mut seat_players = vector::empty<address>();
+    let mut seat_stacks = vector::empty<u64>();
+    let mut seat_bets = vector::empty<u64>();
+    let mut seat_total_bets = vector::empty<u64>();
+    let mut seat_folded = vector::empty<bool>();
+    let mut seat_all_in = vector::empty<bool>();
+    let mut seat_is_waiting = vector::empty<bool>();
+
+    let mut i = 0;
+    while (i < len) {
+        let seat = &table.seats[i];
+        seats_occupied.push_back(seat.occupied);
+        seat_players.push_back(seat.player);
+        seat_stacks.push_back(seat.stack);
+        seat_bets.push_back(seat.bet);
+        seat_total_bets.push_back(seat.total_bet);
+        seat_folded.push_back(seat.folded);
+        seat_all_in.push_back(seat.all_in);
+        seat_is_waiting.push_back(seat.is_waiting);
+        i = i + 1;
+    };
+
+
+    TableSummary {
+        table_id: object::id(table),
+        name: table.name,
+        max_players: table.max_players,
+        small_blind: table.small_blind,
+        big_blind: table.big_blind,
+        active_count: count_active_occupied(&table.seats),
+        button: table.button,
+        pot: table.pot,
+        side_pots_count: table.side_pots.length(),
+        community_cards_count: table.community_cards.length(),
+        round_state: table.round_state,
+        betting_round_exists: table.betting_round.is_some(),
+        betting_round_current_bet: if (table.betting_round.is_some()) { table.betting_round.borrow().current_bet() } else { 0 },
+        betting_round_min_raise: if (table.betting_round.is_some()) { table.betting_round.borrow().min_raise() } else { 0 },
+        betting_round_big_blind: if (table.betting_round.is_some()) { table.betting_round.borrow().big_blind() } else { 0 },
+        betting_round_last_raiser_seat: if (table.betting_round.is_some()) { table.betting_round.borrow().last_raiser_seat() } else { option::none() },
+        betting_round_actions_taken: if (table.betting_round.is_some()) { table.betting_round.borrow().actions_taken() } else { 0 },
+        current_turn: table.current_turn,
+        seats_occupied,
+        seat_players,
+        seat_stacks,
+        seat_bets,
+        seat_total_bets,
+        seat_folded,
+        seat_all_in,
+        seat_is_waiting,
+        shuffle_current_shuffler: table.shuffle_state.current_shuffler,
+        shuffle_pending_count: table.shuffle_state.pending_players.length(),
+        shuffle_completed_count: table.shuffle_state.completed_players.length(),
+        reveal_phase: table.reveal_token_state.reveal_phase,
+        reveal_assignment_count: table.reveal_token_state.assignments.length(),
+        reconstruct_phase: table.reconstruct_state.phase,
+        deck_size: table.deck_state.encrypted.length(),
+        cards_dealt: table.deck_state.cards_dealt,
+        deck_plaintext: table.deck_state.plaintext,
+        shuffle_timeout_ms: table.timeout_config.shuffle_timeout_ms,
+        reveal_timeout_ms: table.timeout_config.reveal_timeout_ms,
+        betting_timeout_ms: table.timeout_config.betting_timeout_ms,
+        reconstruct_timeout_ms: table.timeout_config.reconstruct_timeout_ms,
+        showdown_display_ms: table.timeout_config.showdown_display_ms,
+        hand_complete_wait_ms: table.timeout_config.hand_complete_wait_ms,
+        ready_wait_ms: table.timeout_config.ready_wait_ms,
+        ready_at: table.timestamps.ready_at,
+        shuffle_started_at: table.timestamps.shuffle_started_at,
+        reveal_started_at: table.timestamps.reveal_started_at,
+        betting_started_at: table.timestamps.betting_started_at,
+        reconstruct_started_at: table.timestamps.reconstruct_started_at,
+        showdown_at: table.timestamps.showdown_at,
+        hand_complete_at: table.timestamps.hand_complete_at,
+        epoch: ctx.epoch(),
+    }
+}
+
+// ========== TableSummary 访问器（供后端查询） ==========
+public fun summary_table_id(s: &TableSummary): ID { s.table_id }
+public fun summary_name(s: &TableSummary): &String { &s.name }
+public fun summary_max_players(s: &TableSummary): u64 { s.max_players }
+public fun summary_small_blind(s: &TableSummary): u64 { s.small_blind }
+public fun summary_big_blind(s: &TableSummary): u64 { s.big_blind }
+public fun summary_active_count(s: &TableSummary): u64 { s.active_count }
+public fun summary_button(s: &TableSummary): u64 { s.button }
+public fun summary_pot(s: &TableSummary): u64 { s.pot }
+public fun summary_side_pots_count(s: &TableSummary): u64 { s.side_pots_count }
+public fun summary_community_cards_count(s: &TableSummary): u64 { s.community_cards_count }
+public fun summary_round_state(s: &TableSummary): u8 { s.round_state }
+public fun summary_betting_round_exists(s: &TableSummary): bool { s.betting_round_exists }
+public fun summary_betting_round_current_bet(s: &TableSummary): u64 { s.betting_round_current_bet }
+public fun summary_betting_round_min_raise(s: &TableSummary): u64 { s.betting_round_min_raise }
+public fun summary_betting_round_big_blind(s: &TableSummary): u64 { s.betting_round_big_blind }
+public fun summary_betting_round_last_raiser_seat(s: &TableSummary): Option<u64> { s.betting_round_last_raiser_seat }
+public fun summary_betting_round_actions_taken(s: &TableSummary): u64 { s.betting_round_actions_taken }
+public fun summary_current_turn(s: &TableSummary): Option<u64> { s.current_turn }
+public fun summary_seats_occupied(s: &TableSummary): &vector<bool> { &s.seats_occupied }
+public fun summary_seat_players(s: &TableSummary): &vector<address> { &s.seat_players }
+public fun summary_seat_stacks(s: &TableSummary): &vector<u64> { &s.seat_stacks }
+public fun summary_seat_bets(s: &TableSummary): &vector<u64> { &s.seat_bets }
+public fun summary_seat_total_bets(s: &TableSummary): &vector<u64> { &s.seat_total_bets }
+public fun summary_seat_folded(s: &TableSummary): &vector<bool> { &s.seat_folded }
+public fun summary_seat_all_in(s: &TableSummary): &vector<bool> { &s.seat_all_in }
+public fun summary_seat_is_waiting(s: &TableSummary): &vector<bool> { &s.seat_is_waiting }
+public fun summary_shuffle_current_shuffler(s: &TableSummary): Option<u64> { s.shuffle_current_shuffler }
+public fun summary_shuffle_pending_count(s: &TableSummary): u64 { s.shuffle_pending_count }
+public fun summary_shuffle_completed_count(s: &TableSummary): u64 { s.shuffle_completed_count }
+public fun summary_reveal_phase(s: &TableSummary): u8 { s.reveal_phase }
+public fun summary_reveal_assignment_count(s: &TableSummary): u64 { s.reveal_assignment_count }
+public fun summary_reconstruct_phase(s: &TableSummary): u8 { s.reconstruct_phase }
+public fun summary_deck_size(s: &TableSummary): u64 { s.deck_size }
+public fun summary_cards_dealt(s: &TableSummary): u64 { s.cards_dealt }
+public fun summary_deck_plaintext(s: &TableSummary): &vector<vector<u8>> { &s.deck_plaintext }
+public fun summary_shuffle_timeout_ms(s: &TableSummary): u64 { s.shuffle_timeout_ms }
+public fun summary_reveal_timeout_ms(s: &TableSummary): u64 { s.reveal_timeout_ms }
+public fun summary_betting_timeout_ms(s: &TableSummary): u64 { s.betting_timeout_ms }
+public fun summary_reconstruct_timeout_ms(s: &TableSummary): u64 { s.reconstruct_timeout_ms }
+public fun summary_showdown_display_ms(s: &TableSummary): u64 { s.showdown_display_ms }
+public fun summary_hand_complete_wait_ms(s: &TableSummary): u64 { s.hand_complete_wait_ms }
+public fun summary_ready_wait_ms(s: &TableSummary): u64 { s.ready_wait_ms }
+public fun summary_ready_at(s: &TableSummary): u64 { s.ready_at }
+public fun summary_shuffle_started_at(s: &TableSummary): u64 { s.shuffle_started_at }
+public fun summary_reveal_started_at(s: &TableSummary): u64 { s.reveal_started_at }
+public fun summary_betting_started_at(s: &TableSummary): u64 { s.betting_started_at }
+public fun summary_reconstruct_started_at(s: &TableSummary): u64 { s.reconstruct_started_at }
+public fun summary_showdown_at(s: &TableSummary): u64 { s.showdown_at }
+public fun summary_hand_complete_at(s: &TableSummary): u64 { s.hand_complete_at }
+public fun summary_epoch(s: &TableSummary): u64 { s.epoch }
 
 // ========== 创建空座位 ==========
 fun empty_seat(): Seat {
@@ -354,11 +480,13 @@ fun empty_seat(): Seat {
         folded: false,
         all_in: false,
         acted_this_round: false,
+        is_waiting: false,
+        left_during_hand: false,
         pk: vector[],
     }
 }
 
-fun init_seat(seat: &mut Seat, player: address, stack: u64, pk: vector<u8>) {
+fun init_seat(seat: &mut Seat, player: address, stack: u64, pk: vector<u8>, is_waiting: bool) {
     seat.occupied = true;
     seat.player = player;
     seat.stack = stack;
@@ -368,6 +496,7 @@ fun init_seat(seat: &mut Seat, player: address, stack: u64, pk: vector<u8>) {
     seat.folded = false;
     seat.all_in = false;
     seat.acted_this_round = false;
+    seat.is_waiting = is_waiting;
     seat.pk = pk;
 }
 
@@ -381,12 +510,14 @@ fun reset_seat(seat: &mut Seat) {
     seat.folded = false;
     seat.all_in = false;
     seat.acted_this_round = false;
+    seat.left_during_hand = false;
     seat.pk = vector[];
 }
 
 // ========== 创建空协议状态 ==========
 fun empty_shuffle_state(): ShuffleState {
     ShuffleState {
+        phase: table_constants::shuffle_phase_none(),
         current_shuffler: option::none(),
         pending_players: vector[],
         completed_players: vector[],
@@ -395,34 +526,37 @@ fun empty_shuffle_state(): ShuffleState {
 
 fun empty_reveal_token_state(): RevealTokenState {
     RevealTokenState {
-        reveal_phase: REVEAL_PHASE_NONE,
+        reveal_phase: table_constants::reveal_phase_none(),
         assignments: vector[],
     }
 }
 
 fun empty_reconstruct_state(): ReconstructState {
     ReconstructState {
-        phase: RECONSTRUCT_PHASE_NONE,
-        votes_yes: 0,
-        votes_no: 0,
-        voted_players: vector[],
+        phase: table_constants::reconstruct_phase_none(),
         pending_players: vector[],
-        completed_players: vector[],
-        coefficient: vector[],
-        readable_cards: vector[],
-        cards: vector[],
+        coefficient: bls_scalar::scalar_one(),
+        player_decks: vector[],
     }
 }
 
+// ========== 初始化（发布时自动执行） ==========
+fun init(ctx: &mut TxContext) {
+    // 创建 AdminCap 并转移给发布者
+    let admin_cap = AdminCap { id: object::new(ctx) };
+    transfer::transfer(admin_cap, ctx.sender());
+}
+
 // ========== 创建牌桌 ==========
-public entry fun create_table(
+public  fun create_table(
     name: String,
     small_blind: u64,
     big_blind: u64,
     max_players: u64,
+    _admin_cap: &AdminCap,
     ctx: &mut TxContext,
 ) {
-    assert!(max_players <= MAX_PLAYERS, ETableFull);
+    assert!(max_players <= table_constants::max_players(), ETableFull);
     assert!(big_blind >= small_blind * 2, EInvalidBetAmount);
 
     let mut seats = vector[];
@@ -436,46 +570,53 @@ public entry fun create_table(
     let table = Table {
         id,
         name,
-        admin: ctx.sender(),
         max_players,
         small_blind,
         big_blind,
         seats,
-        active_count: 0,
         button: 0,
         pot: 0,
         side_pots: vector[],
         community_cards: vector[],
-        round_state: ROUND_WAITING,
+        round_state: table_constants::round_waiting(),
         betting_round: option::none(),
         current_turn: option::none(),
-        deck_encrypted: vector[],
-        aggregated_pk: vector[],
+        deck_state: DeckState {
+            encrypted: vector[],
+            aggregated_pk: vector[],
+            plaintext: vector[],
+            cards_dealt: 0,
+            decrypted_cards: vector[],
+        },
         shuffle_state: empty_shuffle_state(),
         reveal_token_state: empty_reveal_token_state(),
         reconstruct_state: empty_reconstruct_state(),
-        shuffle_timeout_ms: 10000,
-        reveal_timeout_ms: 10000,
-        betting_timeout_ms: 30000,
-        reconstruct_timeout_ms: 10000,
-        showdown_display_ms: 3000,
-        hand_complete_wait_ms: 5000,
-        ready_wait_ms: 5000,
-        ready_at: 0,
-        shuffle_started_at: 0,
-        reveal_started_at: 0,
-        betting_started_at: 0,
-        reconstruct_started_at: 0,
-        showdown_at: 0,
-        hand_complete_at: 0,
+        timeout_config: TimeoutConfig {
+            shuffle_timeout_ms: 10000,
+            reveal_timeout_ms: 10000,
+            betting_timeout_ms: 30000,
+            reconstruct_timeout_ms: 10000,
+            showdown_display_ms: 3000,
+            hand_complete_wait_ms: 5000,
+            ready_wait_ms: 5000,
+        },
+        timestamps: Timestamps {
+            ready_at: 0,
+            shuffle_started_at: 0,
+            reveal_started_at: 0,
+            betting_started_at: 0,
+            reconstruct_started_at: 0,
+            showdown_at: 0,
+            hand_complete_at: 0,
+        },
     };
     let table_id = object::id(&table);
     transfer::share_object(table);
-    event::emit(TableCreated { table_id, name, admin: ctx.sender() })
+    table_events::emit_table_created(table_id, name)
 }
 
 // ========== 玩家加入（带密码学验证） ==========
-public entry fun join_and_shuffle(
+public  fun join_and_shuffle(
     table: &mut Table,
     seat_index: u64,
     buy_in: u64,
@@ -484,6 +625,116 @@ public entry fun join_and_shuffle(
     output_cards: vector<u8>,           // remask + shuffle 后的牌组 (serialized ciphertexts, flat bytes)
     remask_proof_bytes: vector<u8>,     // RemaskProof (serialized)
     shuffle_proof_bytes: vector<u8>,    // ShuffleProof (serialized)
+    ctx: &mut TxContext,
+) {
+    assert!(seat_index < table.max_players, EInvalidSeatIndex);
+    assert!(buy_in > 0, EInvalidBetAmount);
+    assert!(!table.seats[seat_index].occupied, ESeatOccupied);
+    assert!(table.can_join_state(), ENotJoinable);
+
+    let sender = ctx.sender();
+    assert!(!is_player_seated(&table.seats, sender), EPlayerAlreadySeated);
+
+    // 验证 PK 未被注册
+    assert!(!is_pk_registered(&table.seats, &pk), EPkAlreadyRegistered);
+
+    // 验证 PK 所有权证明（证明玩家拥有 pk 对应的私钥 sk）
+    let pk_point = zk_verifier::deserialize_pk(&pk);
+    zk_verifier::verify_pk_ownership_or_abort(&pk_point, &_pk_ownership_proof);
+
+    // 洗牌/等待阶段：验证 remask + shuffle 并参与本局
+    // 反序列化牌组
+    let output_cts = zk_verifier::deserialize_ciphertexts(&output_cards);
+    // 如果已有加密牌组，验证 remask + shuffle
+    if (table.deck_state.encrypted.length() > 0) {
+        // 后续玩家：验证 remask + shuffle
+        let remask_proof = table_serialization::deserialize_remask_proof(&remask_proof_bytes);
+        let shuffle_proof = table_serialization::deserialize_shuffle_proof(&shuffle_proof_bytes);
+
+        // 计算新的聚合公钥
+        let new_aggregated_pk = table_serialization::add_pk_to_aggregated(&table.deck_state.aggregated_pk, &pk);
+
+        // 使用共享 Transcript 验证 remask + shuffle
+        let mut transcript = zk_verifier::new_mask_shuffle_transcript();
+        let pk_point = zk_verifier::deserialize_pk(&pk);
+        zk_verifier::verify_remask_with_transcript_or_abort(&table.deck_state.encrypted, &output_cts, &pk_point, &remask_proof, &mut transcript);
+
+        // 验证 shuffle proof（使用同一个 transcript）
+        let new_pk_point = zk_verifier::deserialize_pk(&new_aggregated_pk);
+        zk_verifier::verify_shuffle_with_transcript_or_abort(&table.deck_state.encrypted, &output_cts, &new_pk_point, &shuffle_proof, &mut transcript);
+
+        // 更新聚合公钥
+        table.deck_state.aggregated_pk = new_aggregated_pk;
+    } else {
+        // 首玩家或 reset_for_next_hand 后的首位洗牌者：将 pk 加入聚合公钥
+        // fresh table 时 aggregated_pk 为空，add 后等于 pk；
+        // reset 后 aggregated_pk 含其他活跃玩家 pk，add 后正确累加
+        table.deck_state.aggregated_pk = table_serialization::add_pk_to_aggregated(&table.deck_state.aggregated_pk, &pk);
+    };
+
+    // 初始化座位（参与本局）
+    init_seat(&mut table.seats[seat_index], sender, buy_in, pk, false);
+
+    // 更新牌组
+    table.deck_state.encrypted = output_cts;
+
+    // 标记为已完成洗牌
+    table.shuffle_state.completed_players.push_back(seat_index);
+    remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
+
+    table_events::emit_player_joined(object::id(table), seat_index, sender, buy_in, false, count_active_occupied(&table.seats))
+}
+
+
+// ========== 玩家离开（带密码学验证） ==========
+// 玩家洗过牌
+public  fun leave_with_proof(
+    table: &mut Table,
+    seat_index: u64,
+    output_cards: vector<u8>,           // leave 后的牌组 (serialized ciphertexts, flat bytes)
+    leave_proof_bytes: vector<u8>,      // LeaveProof (serialized)
+    ctx: &mut TxContext,
+) {
+    assert!(seat_index < table.max_players, EInvalidSeatIndex);
+    assert!(table.seats[seat_index].occupied, ESeatEmpty);
+    assert!(table.seats[seat_index].player == ctx.sender(), ENotOwner);
+    assert!(table.can_leave_state(), ENotLeaveable);
+    assert!(table.shuffle_state.completed_players.contains(&seat_index), ENotShuffling);
+
+    let player_pk = table.seats[seat_index].pk;
+
+    // 反序列化
+    let output_cts = zk_verifier::deserialize_ciphertexts(&output_cards);
+    let leave_proof = table_serialization::deserialize_leave_proof(&leave_proof_bytes);
+
+    // 验证 leave proof
+    zk_verifier::verify_leave_or_abort(
+        &table.deck_state.encrypted,
+        &output_cts,
+        &zk_verifier::deserialize_pk(&player_pk),
+        &leave_proof,
+    );
+
+    // 更新聚合公钥（移除该玩家 pk）
+    table.deck_state.aggregated_pk = table_serialization::remove_pk_from_aggregated(&table.deck_state.aggregated_pk, &player_pk);
+
+    // 更新牌组
+    table.deck_state.encrypted = output_cts;
+
+    // 从协议状态中移除该玩家
+    remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
+    remove_from_pending(&mut table.shuffle_state.completed_players, seat_index);
+    let player = table.seats[seat_index].player;
+    reset_seat(&mut table.seats[seat_index]);
+    table_events::emit_player_left(object::id(table), seat_index, player)
+}
+
+public  fun join_table(
+    table: &mut Table,
+    seat_index: u64,
+    buy_in: u64,
+    pk: vector<u8>,                     // 玩家 ElGamal 公钥 (G1 compressed bytes)
+    _pk_ownership_proof: vector<u8>,    // PK ownership Schnorr proof (serialized, 80 bytes: 48 commitment + 32 response)
     ctx: &mut TxContext,
 ) {
     assert!(seat_index < table.max_players, EInvalidSeatIndex);
@@ -499,152 +750,13 @@ public entry fun join_and_shuffle(
     // 验证 PK 所有权证明（证明玩家拥有 pk 对应的私钥 sk）
     let pk_point = zk_verifier::deserialize_pk(&pk);
     zk_verifier::verify_pk_ownership_or_abort(&pk_point, &_pk_ownership_proof);
-
-    // 反序列化牌组
-    let output_cts = zk_verifier::deserialize_ciphertexts(&output_cards);
-
-    // 如果已有加密牌组，验证 remask + shuffle
-    if (table.deck_encrypted.length() > 0) {
-        // 反序列化 proof
-        let remask_proof = deserialize_remask_proof(&remask_proof_bytes);
-        let shuffle_proof = deserialize_shuffle_proof(&shuffle_proof_bytes);
-
-        // 计算新的聚合公钥
-        let new_aggregated_pk = add_pk_to_aggregated(&table.aggregated_pk, &pk);
-
-        // 验证 remask proof（同一 sk 用于所有牌）
-        // 注意：remask 后的中间牌组由客户端计算并验证，链上只验证最终结果
-        let pk_point = zk_verifier::deserialize_pk(&pk);
-        zk_verifier::verify_remask_or_abort(&table.deck_encrypted, &output_cts, &pk_point, &remask_proof);
-
-        // 验证 shuffle proof
-        let new_pk_point = zk_verifier::deserialize_pk(&new_aggregated_pk);
-        zk_verifier::verify_shuffle_or_abort(&table.deck_encrypted, &output_cts, &new_pk_point, &shuffle_proof);
-
-        // 更新聚合公钥
-        table.aggregated_pk = new_aggregated_pk;
-    } else {
-        // 第一个玩家，直接设置牌组
-        table.aggregated_pk = pk;
-    };
-
-    // 初始化座位
-    init_seat(&mut table.seats[seat_index], sender, buy_in, pk);
-    table.active_count = table.active_count + 1;
-
-    // 更新牌组
-    table.deck_encrypted = output_cts;
-
-    // 如果在洗牌阶段，标记为已完成
-    if (table.round_state == ROUND_SHUFFLING) {
-        table.shuffle_state.completed_players.push_back(seat_index);
-        remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
-        advance_shuffle(table);
-    };
-
-    event::emit(PlayerJoined { table_id: object::id(table), seat_index, player: sender, buy_in })
-}
-
-// ========== 玩家离开（带密码学验证） ==========
-public entry fun leave_with_proof(
-    table: &mut Table,
-    seat_index: u64,
-    output_cards: vector<u8>,           // leave 后的牌组 (serialized ciphertexts, flat bytes)
-    leave_proof_bytes: vector<u8>,      // LeaveProof (serialized)
-    ctx: &mut TxContext,
-) {
-    assert!(seat_index < table.max_players, EInvalidSeatIndex);
-    assert!(table.seats[seat_index].occupied, ESeatEmpty);
-    assert!(table.seats[seat_index].player == ctx.sender(), ENotOwner);
-
-    let player_pk = table.seats[seat_index].pk;
-
-    // 反序列化
-    let output_cts = zk_verifier::deserialize_ciphertexts(&output_cards);
-    let leave_proof = deserialize_leave_proof(&leave_proof_bytes);
-
-    // 验证 leave proof
-    zk_verifier::verify_leave_or_abort(
-        &table.deck_encrypted,
-        &output_cts,
-        &zk_verifier::deserialize_pk(&player_pk),
-        &leave_proof,
-    );
-
-    // 更新聚合公钥（移除该玩家 pk）
-    table.aggregated_pk = remove_pk_from_aggregated(&table.aggregated_pk, &player_pk);
-
-    // 更新牌组
-    table.deck_encrypted = output_cts;
-
-    // 从协议状态中移除该玩家
-    remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
-    remove_from_pending(&mut table.shuffle_state.completed_players, seat_index);
-    // 如果离开的是当前洗牌者，推进到下一个
-    if (table.shuffle_state.current_shuffler.is_some() &&
-        *table.shuffle_state.current_shuffler.borrow() == seat_index) {
-        table.shuffle_state.current_shuffler = option::none();
-        advance_shuffle(table);
-    };
-    // 从 reveal assignments 中移除
-    let mut a = 0;
-    while (a < table.reveal_token_state.assignments.length()) {
-        remove_from_pending(&mut table.reveal_token_state.assignments[a].pending_players, seat_index);
-        a = a + 1;
-    };
-    // 从 reconstruct state 中移除
-    remove_from_pending(&mut table.reconstruct_state.pending_players, seat_index);
-    remove_from_pending(&mut table.reconstruct_state.voted_players, seat_index);
-    remove_from_pending(&mut table.reconstruct_state.completed_players, seat_index);
-
-    let player = table.seats[seat_index].player;
-    let seat_folded = table.seats[seat_index].folded;
-    let seat_bet = table.seats[seat_index].bet;
-    let is_betting = is_betting_round(table);
-
-    if (is_betting && !seat_folded) {
-        table.pot = table.pot + seat_bet;
-    };
-
-    reset_seat(&mut table.seats[seat_index]);
-    table.active_count = table.active_count - 1;
-
-    if (is_betting) {
-        let active = count_active_players(&table.seats);
-        if (active <= 1) {
-            end_without_showdown(table);
-        };
-    };
-
-    // 如果离开后活跃人数不足，重置牌桌
-    if (count_active_occupied(&table.seats) < MIN_PLAYERS_TO_START) {
-        reset_for_next_hand(table);
-    };
-
-    event::emit(PlayerLeft { table_id: object::id(table), seat_index, player })
-}
-
-// ========== 简单加入（无密码学验证，用于测试或初始阶段） ==========
-public entry fun join_table(
-    table: &mut Table,
-    seat_index: u64,
-    buy_in: u64,
-    ctx: &mut TxContext,
-) {
-    assert!(seat_index < table.max_players, EInvalidSeatIndex);
-    assert!(buy_in > 0, EInvalidBetAmount);
-    assert!(!table.seats[seat_index].occupied, ESeatOccupied);
-
-    let sender = ctx.sender();
-    assert!(!is_player_seated(&table.seats, sender), EPlayerAlreadySeated);
-
-    init_seat(&mut table.seats[seat_index], sender, buy_in, vector[]);
-    table.active_count = table.active_count + 1;
-    event::emit(PlayerJoined { table_id: object::id(table), seat_index, player: sender, buy_in })
+    let is_waiting = is_playing(table);
+    init_seat(&mut table.seats[seat_index], sender, buy_in, pk, is_waiting);
+    table_events::emit_player_joined(object::id(table), seat_index, sender, buy_in, is_waiting, count_active_occupied(&table.seats))
 }
 
 // ========== 简单离开 ==========
-public entry fun leave_table(
+public  fun leave_table(
     table: &mut Table,
     seat_index: u64,
     ctx: &mut TxContext,
@@ -652,188 +764,509 @@ public entry fun leave_table(
     assert!(seat_index < table.max_players, EInvalidSeatIndex);
     assert!(table.seats[seat_index].occupied, ESeatEmpty);
     assert!(table.seats[seat_index].player == ctx.sender(), ENotOwner);
-
+    
+    assert!(!table.shuffle_state.completed_players.contains(&seat_index), ELeaveProofMissing);
     let player = table.seats[seat_index].player;
-    let seat_folded = table.seats[seat_index].folded;
-    let seat_bet = table.seats[seat_index].bet;
-    let is_betting = is_betting_round(table);
-
-    if (is_betting && !seat_folded) {
-        table.pot = table.pot + seat_bet;
-    };
+    assert!(!is_playing(table) ||(is_playing(table) && table.seats[seat_index].is_waiting),ENotLeaveable );
 
     reset_seat(&mut table.seats[seat_index]);
-    table.active_count = table.active_count - 1;
-
-    if (is_betting) {
-        let active = count_active_players(&table.seats);
-        if (active <= 1) {
-            end_without_showdown(table);
-        };
-    };
-    event::emit(PlayerLeft { table_id: object::id(table), seat_index, player })
+    table_events::emit_player_left(object::id(table), seat_index, player)
 }
 
 // ========== 开始新一手 ==========
-public entry fun start_hand(table: &mut Table, _ctx: &mut TxContext) {
+public  fun start_hand(table: &mut Table, _ctx: &mut TxContext) {
     do_start_hand(table);
+}
+
+fun clear_waiting_players(table: &mut Table) {
+    let mut i = 0;
+    while (i < table.seats.length()) {
+        let seat = &mut table.seats[i];
+        if (seat.occupied) {
+            seat.is_waiting = false;
+        };
+        i = i + 1;
+    };
+}
+fun start_preflop_shuffle(table: &mut Table) {
+    table.shuffle_state.pending_players = get_pending_seat_indices(&table.shuffle_state.completed_players,&table.seats);
+    table.shuffle_state.phase = table_constants::shuffle_phase_before_preflop();
 }
 
 fun do_start_hand(table: &mut Table) {
     assert!(
-        table.round_state == ROUND_WAITING || table.round_state == ROUND_HAND_COMPLETE,
+        table.round_state == table_constants::round_waiting() ,
         EInvalidRoundState
     );
-    assert!(table.active_count >= MIN_PLAYERS_TO_START, ENotEnoughPlayers);
+    assert!(table.seats.length() >= table_constants::min_players_to_start(), ENotEnoughPlayers);
+    clear_waiting_players(table);
 
-    reset_hand_state(table);
     move_button(table);
+    table_events::emit_hand_started(
+        object::id(table),
+        table.button,
+        table.small_blind,
+        table.big_blind,
+        get_active_seat_indices(&table.seats),
+    );
 
     // 初始化洗牌状态
-    table.round_state = ROUND_SHUFFLING;
-    table.shuffle_started_at = 0;  // will be set when first shuffler starts
+    table.timestamps.shuffle_started_at = 0;  // will be set when first shuffler starts
+    start_preflop_shuffle(table);
+    advance_shuffle(table);
+}
+
+fun rebuild_deck_and_shuffle_on_timeout(table: &mut Table, phase: u8){
+    table.deck_state.encrypted = vector[];
     table.shuffle_state = ShuffleState {
+        phase: phase,
         current_shuffler: option::none(),
         pending_players: get_active_seat_indices(&table.seats),
         completed_players: vector[],
     };
-
-    // 设置第一个洗牌者
-    if (table.shuffle_state.pending_players.length() > 0) {
-        table.shuffle_state.current_shuffler = option::some(table.shuffle_state.pending_players[0]);
-    };
-
-    event::emit(HandStarted { table_id: object::id(table), button: table.button })
 }
 
+fun rebuild_deck_from_reconstruct_deck(table: &mut Table){
+    // reconstruct 完成：根据所有玩家提交的 output_cts 构建新牌组
+    // 算法（与 Rust 端一致）：
+    //   1. 初始化：每张牌为 (identity, plaintext_i)
+    //   2. 对每个玩家提交的 deck：c1 += card.c1, c2 += card.c2 - plaintext_i
+    //   3. 最终结果即为新牌组
+
+    let deck_len = table.deck_state.plaintext.length();
+    let mut new_deck = vector[];
+
+    // Step 1: 初始化 (identity, plaintext_i)
+    let mut i = 0;
+    while (i < deck_len) {
+        let plaintext_point = bls12381::g1_from_bytes(&table.deck_state.plaintext[i]);
+        new_deck.push_back(bls_elgamal::new_ciphertext(
+            bls12381::g1_identity(),
+            plaintext_point,
+        ));
+        i = i + 1;
+    };
+
+    // Step 2: 累加每个玩家提交的 deck (原地更新，避免分配新 vector)
+    let mut p = 0;
+    while (p < table.reconstruct_state.player_decks.length()) {
+        let player_deck = &table.reconstruct_state.player_decks[p].output_cts;
+        let mut j = 0;
+        while (j < deck_len) {
+            if (j < player_deck.length()) {
+                let plaintext_point = bls12381::g1_from_bytes(&table.deck_state.plaintext[j]);
+                // 读取当前值（copy 出来避免借用冲突）
+                let curr = new_deck[j];
+                // c1 += card.c1
+                let new_c1 = bls12381::g1_add(bls_elgamal::c1(&curr), bls_elgamal::c1(&player_deck[j]));
+                // c2 += card.c2 - plaintext_i
+                let c2_diff = bls12381::g1_sub(bls_elgamal::c2(&player_deck[j]), &plaintext_point);
+                let new_c2 = bls12381::g1_add(bls_elgamal::c2(&curr), &c2_diff);
+                // 原地更新
+                *(vector::borrow_mut(&mut new_deck, j)) = bls_elgamal::new_ciphertext(new_c1, new_c2);
+            };
+            j = j + 1;
+        };
+        p = p + 1;
+    };
+
+    // 更新牌组
+    table.deck_state.encrypted = new_deck;
+    // reconstruct 后牌组已重建，需要重新发牌
+    table.deck_state.cards_dealt = 0;
+}
+
+fun on_complete_reconstruct(table: &mut Table) {
+    rebuild_deck_from_reconstruct_deck(table);
+    table.reconstruct_state.phase = table_constants::reconstruct_phase_none();
+    table_events::emit_reconstruct_complete(object::id(table));
+    // 进入洗牌阶段
+    table.shuffle_state = ShuffleState {
+        phase: table_constants::shuffle_phase_reconstruct(),
+        current_shuffler: option::none(),
+        pending_players: get_active_seat_indices(&table.seats),
+        completed_players: vector[],
+    };
+    advance_shuffle(table);
+}
+
+fun on_reconstruct_shuffle_failed(table: &mut Table) {
+    rebuild_deck_from_reconstruct_deck(table);
+    // 进入洗牌阶段
+    table.shuffle_state = ShuffleState {
+        phase: table_constants::shuffle_phase_reconstruct(),
+        current_shuffler: option::none(),
+        pending_players: get_active_seat_indices(&table.seats),
+        completed_players: vector[],
+    };
+    advance_shuffle(table);
+}
+
+/// 将所有用户在本手牌中的下注原路退还到 stack
+fun refund_all_bets(table: &mut Table) {
+    let table_id = object::id(table);
+    let mut i = 0;
+    while (i < table.seats.length()) {
+        let seat = &mut table.seats[i];
+        if (seat.occupied) {
+            seat.stack = seat.stack + seat.total_bet;
+        } else if (seat.left_during_hand && seat.total_bet > 0) {
+            // 已踢出的玩家退还 total_bet（stack 已在 kick 时退还）
+            table_events::emit_player_refund(
+                table_id,
+                i,
+                seat.player,
+                seat.total_bet,
+                table_events::refund_type_bet_only(),
+            );
+        };
+        seat.bet = 0;
+        seat.total_bet = 0;
+        i = i + 1;
+    };
+    table.pot = 0;
+    table.side_pots = vector[];
+}
+
+/// 清除 reveal token 阶段超时的玩家：所有 pending_players 踢出桌子
+/// kick_player_internal 会发 PlayerRefund 事件（只退 stack，total_bet 保留供 side pot 计算）
+fun clear_reveal_timeout_player(table: &mut Table) {
+    // 收集所有 assignment 的 pending_players 的并集
+    let mut to_kick = vector[];
+    let mut a = 0;
+    while (a < table.reveal_token_state.assignments.length()) {
+        let pending = &table.reveal_token_state.assignments[a].pending_players;
+        let mut p = 0;
+        while (p < pending.length()) {
+            if (!is_in_list(&to_kick, pending[p])) {
+                to_kick.push_back(pending[p]);
+            };
+            p = p + 1;
+        };
+        a = a + 1;
+    };
+
+    // 踢出所有超时玩家（kick_player_internal 会发 PlayerKicked + PlayerRefund 事件）
+    let mut k = 0;
+    while (k < to_kick.length()) {
+        let seat_index = to_kick[k];
+        if (seat_index < table.seats.length() && table.seats[seat_index].occupied) {
+            kick_player_internal(table, seat_index, table_events::kick_reason_timeout());
+        };
+        k = k + 1;
+    };
+}
+
+fun on_reconstruct_timeout(table: &mut Table) {
+    assert!(table.reconstruct_state.phase == table_constants::reconstruct_phase_collecting(),EInvalidReconstructPhase);
+    table_events::emit_reconstruct_timeout(object::id(table), table.reconstruct_state.pending_players);
+
+    // 踢掉未提交 reconstruct 的玩家（kick_player_internal 会发 PlayerRefund 事件）
+    let pending = table.reconstruct_state.pending_players;
+    let mut k = 0;
+    while (k < pending.length()) {
+        let seat_index = pending[k];
+        if (seat_index < table.seats.length() && table.seats[seat_index].occupied) {
+            kick_player_internal(table, seat_index, table_events::kick_reason_reconstruct_timeout());
+        };
+        k = k + 1;
+    };
+    // 如果没有活跃玩家了，退还剩余筹码并重置
+    if (get_active_seat_indices(&table.seats).length() == 0) {
+        refund_all_bets(table);
+        reset_for_next_hand(table);
+        table_events::emit_hand_reset(object::id(table), table_events::reset_reason_reconstruct_fail(), table.round_state);
+        return
+    };
+    
+    // 检查是否只有一个人，一个人可以结束游戏
+    let active = count_active_players(&table.seats);
+    if (active == 1) {
+        end_without_showdown(table);
+        return
+    };
+
+    // 重置 reconstruct 状态
+    table.reconstruct_state = empty_reconstruct_state();
+    on_complete_reconstruct(table);
+}
+
+fun on_shuffle_complete(table: &mut Table) {
+    table_events::emit_shuffle_complete(
+        object::id(table),
+        table.shuffle_state.phase,
+        table.shuffle_state.completed_players.length(),
+        table.deck_state.encrypted.length(),
+    );
+    // shuffle 完成：重置 shuffle，进入 reveal
+    table.shuffle_state = empty_shuffle_state();
+}
+
+fun on_reveal_complete(table: &mut Table) {
+    // reveal 完成：重置 reveal，进入 reconstruct
+    table.reveal_token_state = empty_reveal_token_state();
+}
+
+fun start_reconstruct(table: &mut Table, clock: &Clock){
+    // 其他阶段超时：启动 reconstruct
+    // 使用 table_id + 时间戳生成唯一标量，确保每次 reconstruct 的 coefficient 不同
+    let mut seed = b"reconstruct_coefficient/";
+    // 将 ID 的 bytes 追加到 seed
+    let id_bytes = object::id(table).to_bytes();
+    let mut i = 0;
+    while (i < id_bytes.length()) {
+        seed.push_back(*(vector::borrow(&id_bytes, i)));
+        i = i + 1;
+    };
+    // 追加时间戳确保每次调用产生不同标量
+    let now_bytes = bls_scalar::u64_to_ascii(clock.timestamp_ms());
+    i = 0;
+    while (i < now_bytes.length()) {
+        seed.push_back(*(vector::borrow(&now_bytes, i)));
+        i = i + 1;
+    };
+    table.reconstruct_state = ReconstructState {
+        phase: table_constants::reconstruct_phase_collecting(),
+        pending_players: get_active_seat_indices(&table.seats),
+        coefficient: hash_to_scalar(&seed),
+        player_decks: vector[],
+    };
+    
+    let now = clock.timestamp_ms();
+    table.timestamps.reconstruct_started_at = now;
+    table_events::emit_reconstruct_initiated(
+        object::id(table),
+        table.reconstruct_state.pending_players,
+        table.round_state,
+    );
+}
+    
+
+fun on_reveal_timeout(table: &mut Table,clock: &Clock) {
+    // 收集所有 assignment 的 pending_players 的并集
+    let mut pending_players = vector[];
+    let mut a = 0;
+    while (a < table.reveal_token_state.assignments.length()) {
+        let pending = &table.reveal_token_state.assignments[a].pending_players;
+        let mut p = 0;
+        while (p < pending.length()) {
+            if (!is_in_list(&pending_players, pending[p])) {
+                pending_players.push_back(pending[p]);
+            };
+            p = p + 1;
+        };
+        a = a + 1;
+    };
+    table_events::emit_reveal_timeout(object::id(table), table.round_state, pending_players);
+    // PreFlop reveal 超时: 因为所有玩家手牌未知，可以重开整手
+    if (table.round_state == table_constants::round_preflop()) {
+        // 先踢超时玩家（kick_player_internal 会发 PlayerRefund 事件，只退 stack）
+        clear_reveal_timeout_player(table);
+        let active = count_active_players(&table.seats);
+        if (active == 0) {
+            refund_all_bets(table);
+            reset_for_next_hand(table);
+            table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
+            return
+        };
+        if (active == 1) {
+            end_without_showdown(table);
+            return
+        };
+        // 重新洗牌
+        rebuild_deck_and_shuffle_on_timeout(table,table_constants::shuffle_phase_before_preflop());
+        advance_shuffle(table);
+
+        // 再退还未被踢的玩家的筹码
+        refund_all_bets(table);
+        // 只能退回waiting状态，重新洗牌，因为解不出来了
+        reset_for_next_hand(table);
+        //发个事件，通知玩家重新开一手
+        table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
+    }else{
+        // 其他阶段超时：启动 reconstruct
+        start_reconstruct(table,clock);
+    };
+}
+
+fun on_shuffle_timeout(table: &mut Table) {
+    if (table.shuffle_state.current_shuffler.is_some()) {
+        let shuffler = *table.shuffle_state.current_shuffler.borrow();
+        table_events::emit_shuffle_timeout(
+            object::id(table),
+            shuffler,
+            table.shuffle_state.phase,
+            table.timestamps.shuffle_started_at,
+            table.timeout_config.shuffle_timeout_ms,
+        );
+
+        if (table.shuffle_state.phase == table_constants::shuffle_phase_before_preflop()) {
+            // Preflop 洗牌超时：踢掉当前洗牌者并推进
+            kick_player_internal(table, shuffler, table_events::kick_reason_timeout());
+            let active = count_active_players(&table.seats);
+            if (active == 0) {
+                refund_all_bets(table);
+                reset_for_next_hand(table);
+                table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
+                return
+            };
+            if (active == 1) {
+                end_without_showdown(table);
+                return
+            };
+            // 重新洗牌
+            rebuild_deck_and_shuffle_on_timeout(table,table_constants::shuffle_phase_before_preflop());
+            advance_shuffle(table);
+        } else if (table.shuffle_state.phase == table_constants::shuffle_phase_reconstruct()) {
+            // Reconstruct 洗牌超时：踢掉当前洗牌者，移除其提交的 player_deck，然后推进
+            kick_player_internal(table, shuffler, table_events::kick_reason_timeout());
+            let active = count_active_players(&table.seats);
+            if (active == 0) {
+                refund_all_bets(table);
+                reset_for_next_hand(table);
+                table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
+                return
+            };
+            if (active == 1) {
+                end_without_showdown(table);
+                return
+            };
+            // 从 reconstruct_state.player_decks 中移除该玩家提交的 deck
+            let mut d = 0;
+            while (d < table.reconstruct_state.player_decks.length()) {
+                if (table.reconstruct_state.player_decks[d].seat_index == shuffler) {
+                    table.reconstruct_state.player_decks.remove(d);
+                    break
+                };
+                d = d + 1;
+            };
+            // 重新构建牌组
+            on_reconstruct_shuffle_failed(table);
+        };
+    };
+}
+
+fun on_betting_timeout(table: &mut Table) {
+    // 检查下注超时
+    if (table.current_turn.is_none()) {
+        return
+    };
+    let seat_index = *table.current_turn.borrow();
+    table_events::emit_player_folded(object::id(table), seat_index, table_events::fold_reason_auto_timeout(), table.round_state);
+    do_fold(table, seat_index);
+}
+
+
 // ========== Tick 函数（链下 relayer 定期调用） ==========
-public entry fun tick(table: &mut Table, clock: &Clock) {
+public  fun tick(table: &mut Table, clock: &Clock) {
     let now = clock.timestamp_ms();
 
-    if (table.round_state == ROUND_WAITING) {
-        // 检查是否可以开始
-        if (table.ready_at > 0 && now >= table.ready_at) {
-            do_start_hand(table);
-        } else if (table.ready_at == 0 && count_active_occupied(&table.seats) >= MIN_PLAYERS_TO_START) {
-            // 设置开始倒计时
-            table.ready_at = now + table.ready_wait_ms;
-            event::emit(ReadyToStart { table_id: object::id(table), ready_at: table.ready_at });
+    // ===== 优先处理 interrupt（reconstruct） =====
+    if (table.reconstruct_state.phase != table_constants::reconstruct_phase_none()) {
+        // 先检查 reconstruct 是否完成
+         if (table.timestamps.reconstruct_started_at > 0 && now >= table.timestamps.reconstruct_started_at + table.timeout_config.reconstruct_timeout_ms) {
+            on_reconstruct_timeout(table);
         };
-    } else if (table.round_state == ROUND_SHUFFLING) {
-        // 设置洗牌开始时间（如果还没设置）
-        if (table.shuffle_started_at == 0) {
-            table.shuffle_started_at = now;
+        // reconstruct 进行中，不处理其他状态
+        return
+    };
+
+    if(table.shuffle_state.phase == table_constants::shuffle_phase_reconstruct() || table.shuffle_state.phase == table_constants::shuffle_phase_before_preflop()) {
+        if (table.shuffle_state.pending_players.length() == 0) {
+            // advance_shuffle 内部会在 pending_players == 0 时调用 on_shuffle_complete 并推进到 reveal phase
+            advance_shuffle(table);
+            return
         };
         // 检查洗牌超时
-        if (table.shuffle_state.current_shuffler.is_some()) {
-            let shuffler = *table.shuffle_state.current_shuffler.borrow();
-            if (now >= table.shuffle_started_at + table.shuffle_timeout_ms) {
-                event::emit(ShuffleTimeout { table_id: object::id(table), seat_index: shuffler });
-                kick_player_internal(table, shuffler);
+        if (table.timestamps.shuffle_started_at > 0 && now >= table.timestamps.shuffle_started_at + table.timeout_config.shuffle_timeout_ms) {
+            on_shuffle_timeout(table);
+        };
+        return
+    };
+
+    if (table.reveal_token_state.reveal_phase != table_constants::reveal_phase_none()) {
+        // 遍历检查是否所有 assignment 的 pending_players 都已为空
+        //todo 这里实现很别扭，后续优化
+        let mut all_completed = true;
+        let mut j = 0;
+        while (j < table.reveal_token_state.assignments.length()) {
+            if (table.reveal_token_state.assignments[j].pending_players.length() > 0) {
+                all_completed = false;
+                break
             };
+            j = j + 1;
         };
-    } else if (table.round_state == ROUND_SHUFFLE_COMPLETE) {
-        // 自动推进到 PreFlopReveal
-        table.round_state = ROUND_PREFLOP_REVEAL;
-        table.reveal_started_at = now;
-        start_preflop_reveal_phase(table);
-    } else if (is_reveal_phase(table)) {
-        // 设置 reveal 开始时间
-        if (table.reveal_started_at == 0) {
-            table.reveal_started_at = now;
+        if (all_completed) {
+            on_reveal_complete(table);
+            return 
         };
-        // 检查 reveal 超时
-        if (now >= table.reveal_started_at + table.reveal_timeout_ms) {
-            event::emit(RevealTimeout { table_id: object::id(table), phase: table.round_state });
-            if (table.round_state == ROUND_PREFLOP_REVEAL) {
-                // PreFlop reveal 超时：重开整手
-                reset_for_next_hand(table);
-                event::emit(HandReset { table_id: object::id(table) });
-            } else {
-                // 其他阶段超时：启动 reconstruct
-                // 先检查是否已经在 reconstruct
-                if (table.reconstruct_state.phase == RECONSTRUCT_PHASE_NONE) {
-                    table.reconstruct_state = ReconstructState {
-                        phase: RECONSTRUCT_PHASE_VOTING,
-                        votes_yes: 0,
-                        votes_no: 0,
-                        voted_players: vector[],
-                        pending_players: get_active_seat_indices(&table.seats),
-                        completed_players: vector[],
-                        coefficient: vector[],
-                        readable_cards: vector[],
-                        cards: vector[],
-                    };
-                    table.reconstruct_started_at = now;
-                    event::emit(ReconstructInitiated { table_id: object::id(table) });
-                };
-            };
+
+        // 揭牌超时
+        if (table.timestamps.reveal_started_at > 0 && now >= table.timestamps.reveal_started_at + table.timeout_config.reveal_timeout_ms) {
+            on_reveal_timeout(table,clock);
         };
-    } else if (is_betting_round(table)) {
+
+        return 
+    };
+
+    // ===== 正常 tick 逻辑 =====
+    if (table.round_state == table_constants::round_waiting()) {
+        if (table.seats.length() >= table_constants::min_players_to_start()){
+            // 检查是否可以开始
+            do_start_hand(table);
+        };
+    }   else if (is_betting_round(table)) {
         // 设置下注开始时间
-        if (table.betting_started_at == 0 && table.current_turn.is_some()) {
-            table.betting_started_at = now;
+        if (table.timestamps.betting_started_at == 0 && table.current_turn.is_some()) {
+            table.timestamps.betting_started_at = now;
         };
-        // 检查下注超时
-        if (table.betting_started_at > 0 && now >= table.betting_started_at + table.betting_timeout_ms) {
-            if (table.current_turn.is_some()) {
-                let seat_index = *table.current_turn.borrow();
-                event::emit(AutoFolded { table_id: object::id(table), seat_index });
-                do_fold(table, seat_index);
-            };
+        if (table.timestamps.betting_started_at > 0 && now >= table.timestamps.betting_started_at + table.timeout_config.betting_timeout_ms) {
+            on_betting_timeout(table);
         };
-    } else if (table.round_state == ROUND_SHOWDOWN) {
+    } else if (table.round_state == table_constants::round_showdown()) {
         // 设置 showdown 开始时间
-        if (table.showdown_at == 0) {
-            table.showdown_at = now + table.showdown_display_ms;
+        if (table.timestamps.showdown_at == 0) {
+            table.timestamps.showdown_at = now + table.timeout_config.showdown_display_ms;
         };
-        if (now >= table.showdown_at) {
+        if (now >= table.timestamps.showdown_at) {
             settle_hand(table);
-        };
-    } else if (table.round_state == ROUND_HAND_COMPLETE) {
-        // 设置 hand_complete 时间
-        if (table.hand_complete_at == 0) {
-            table.hand_complete_at = now + table.hand_complete_wait_ms;
-        };
-        if (now >= table.hand_complete_at) {
-            cleanup_hand(table);
         };
     };
 }
 
 // ========== Phase 3: auto_fold / force_fold / kick_player ==========
 
-public entry fun auto_fold(table: &mut Table, seat_index: u64, clock: &Clock) {
+public  fun auto_fold(table: &mut Table, seat_index: u64, clock: &Clock) {
     assert!(is_betting_round(table), EInvalidRoundState);
     assert!(is_player_turn(table, seat_index), ENotPlayerTurn);
-    assert!(clock.timestamp_ms() >= table.betting_started_at + table.betting_timeout_ms, ENotTimedOut);
+    assert!(clock.timestamp_ms() >= table.timestamps.betting_started_at + table.timeout_config.betting_timeout_ms, ENotTimedOut);
 
-    event::emit(AutoFolded { table_id: object::id(table), seat_index });
+    table_events::emit_player_folded(object::id(table), seat_index, table_events::fold_reason_auto_timeout(), table.round_state);
     do_fold(table, seat_index);
 }
 
-public entry fun force_fold(table: &mut Table, seat_index: u64) {
+public  fun force_fold(table: &mut Table, seat_index: u64) {
     assert!(is_betting_round(table), EInvalidRoundState);
     let seat = &table.seats[seat_index];
     assert!(seat.occupied, ESeatEmpty);
     assert!(!seat.folded, EAlreadyFolded);
 
-    event::emit(ForceFolded { table_id: object::id(table), seat_index });
+    table_events::emit_player_folded(object::id(table), seat_index, table_events::fold_reason_force_admin(), table.round_state);
     do_fold(table, seat_index);
 }
 
-public entry fun kick_player(table: &mut Table, seat_index: u64) {
-    kick_player_internal(table, seat_index);
+public  fun kick_player(table: &mut Table, _admin_cap: &AdminCap, seat_index: u64) {
+    kick_player_internal(table, seat_index, table_events::kick_reason_admin());
 }
 
 // ========== 提交洗牌结果（ZK Proof 验证） ==========
-public entry fun submit_shuffle(
+public  fun submit_shuffle(
     table: &mut Table,
     output_cards: vector<u8>,           // 序列化的 ElGamalCiphertext 数组 (flat bytes)
     shuffle_proof_bytes: vector<u8>,    // 序列化的 ShuffleProof
     ctx: &mut TxContext,
 ) {
-    assert!(table.round_state == ROUND_SHUFFLING, EInvalidRoundState);
+    assert!(table.shuffle_state.phase != table_constants::shuffle_phase_none(), EInvalidShufflePhase);
 
     let sender = ctx.sender();
     assert!(is_player_seated(&table.seats, sender), EPlayerNotSeated);
@@ -852,157 +1285,215 @@ public entry fun submit_shuffle(
 
     // 反序列化
     let output_cts = zk_verifier::deserialize_ciphertexts(&output_cards);
-    let shuffle_proof = deserialize_shuffle_proof(&shuffle_proof_bytes);
+    let shuffle_proof = table_serialization::deserialize_shuffle_proof(&shuffle_proof_bytes);
 
     // 验证 shuffle proof
-    let pk = zk_verifier::deserialize_pk(&table.aggregated_pk);
-    zk_verifier::verify_shuffle_or_abort(&table.deck_encrypted, &output_cts, &pk, &shuffle_proof);
+    let pk = zk_verifier::deserialize_pk(&table.deck_state.aggregated_pk);
+    zk_verifier::verify_shuffle_or_abort(&table.deck_state.encrypted, &output_cts, &pk, &shuffle_proof);
 
     // 更新牌组
-    table.deck_encrypted = output_cts;
+    table.deck_state.encrypted = output_cts;
 
     // 标记为已完成
     table.shuffle_state.completed_players.push_back(seat_index);
     remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
 
-    event::emit(ShuffleVerified { table_id: object::id(table), seat_index, player: sender });
+    table_events::emit_shuffle_verified(object::id(table), seat_index, sender);
 
     // 推进洗牌流程
     advance_shuffle(table);
 }
 
-// ========== 提交 Reveal Token ==========
-public entry fun submit_reveal_token(
+
+// ========== 批量提交 Reveal Token ==========
+/// 玩家一次性提交当前 phase 下所有需要揭牌的 reveal tokens
+/// 对应 Rust 端 submit_player_reveal_tokens
+public  fun submit_player_reveal_tokens(
     table: &mut Table,
-    assignment_index: u64,              // reveal_token_state.assignments 中的索引
-    reveal_token: vector<u8>,           // c1 * sk (G1 compressed bytes)
-    proof_bytes: vector<u8>,            // RevealTokenProof (serialized)
+    assignment_indices: vector<u64>,    // 该玩家需要提交的 assignment 索引列表
+    reveal_tokens: vector<vector<u8>>,  // 对应每个 assignment 的 c1 * sk (G1 compressed bytes)
+    proof_bytes_list: vector<vector<u8>>, // 对应每个 assignment 的 RevealTokenProof (serialized)
     ctx: &mut TxContext,
 ) {
-    assert!(is_reveal_phase(table), EInvalidRoundState);
-
-    table.reveal_started_at = 0;  // reset on each token submission
+    assert!(table.reveal_token_state.reveal_phase != table_constants::reveal_phase_none(), EInvalidRevealPhaseState);
+    assert!(assignment_indices.length() == reveal_tokens.length(), EInvalidCardIndex);
+    assert!(assignment_indices.length() == proof_bytes_list.length(), EInvalidCardIndex);
 
     let sender = ctx.sender();
     assert!(is_player_seated(&table.seats, sender), EPlayerNotSeated);
-
     let seat_index = find_seat_index(&table.seats, sender);
-    assert!(assignment_index < table.reveal_token_state.assignments.length(), EInvalidCardIndex);
 
-    // 读取 assignment 信息（不可变借用）
-    let card_index = table.reveal_token_state.assignments[assignment_index].encrypted_card_index;
-    let is_decrypted = table.reveal_token_state.assignments[assignment_index].decrypted;
-    let is_pending = is_in_list(&table.reveal_token_state.assignments[assignment_index].pending_players, seat_index);
-
-    assert!(!is_decrypted, ECardAlreadyDecrypted);
-    assert!(is_pending, ENotPendingRevealer);
-    assert!(card_index < table.deck_encrypted.length(), EInvalidCardIndex);
-
-    // 验证 reveal token proof
-    let encrypted_card = &table.deck_encrypted[card_index];
-    let token_point = bls12381::g1_from_bytes(&reveal_token);
-    let expected_pk = zk_verifier::deserialize_pk(&table.seats[seat_index].pk);
-    let proof = deserialize_reveal_token_proof(&proof_bytes);
-
-    zk_verifier::verify_reveal_token_or_abort(encrypted_card, &token_point, &expected_pk, &proof);
-
-    // 记录当前 phase 用于事件
     let current_phase = table.reveal_token_state.reveal_phase;
 
-    // 存储 reveal token（可变借用）
-    let assignment = &mut table.reveal_token_state.assignments[assignment_index];
-    assignment.reveal_tokens.push_back(RevealTokenData {
-        seat_index,
-        token: reveal_token,
-    });
+    // 收集 identity 牌的 card_index，循环结束后统一处理 redeal
+    let mut identity_card_indices = vector[];
 
-    // 从 pending 中移除
-    remove_from_pending(&mut assignment.pending_players, seat_index);
+    let mut idx = 0;
+    while (idx < assignment_indices.length()) {
+        let assignment_index = assignment_indices[idx];
+        assert!(assignment_index < table.reveal_token_state.assignments.length(), EInvalidCardIndex);
 
-    // 如果所有玩家都已提交，标记为已解密
-    if (assignment.pending_players.length() == 0) {
-        assignment.decrypted = true;
+        // 读取 assignment 信息
+        let card_index = table.reveal_token_state.assignments[assignment_index].encrypted_card_index;
+        let is_decrypted = table.reveal_token_state.assignments[assignment_index].decrypted;
+        let is_pending = is_in_list(&table.reveal_token_state.assignments[assignment_index].pending_players, seat_index);
+
+        assert!(!is_decrypted, ECardAlreadyDecrypted);
+        assert!(is_pending, ENotPendingRevealer);
+        assert!(card_index < table.deck_state.encrypted.length(), EInvalidCardIndex);
+
+        // 提前计算手牌牌主（preflop 阶段需要）
+        let owner_seat_index = if (current_phase == table_constants::reveal_phase_preflop()) {
+            find_hand_card_owner(table, card_index)
+        } else {
+            0xFFFFFFFFFFFFFFFF
+        };
+
+        let reveal_token = reveal_tokens[idx];
+        let proof_bytes = proof_bytes_list[idx];
+
+        // ========== 按 phase 验证 reveal token proof ==========
+        if (current_phase == table_constants::reveal_phase_showdown()) {
+            let partial_ct_bytes = find_partial_ciphertext(&table.deck_state.decrypted_cards, card_index);
+            let partial_ct = bls_elgamal::ciphertext_from_bytes(&partial_ct_bytes);
+            let token_point = bls12381::g1_from_bytes(&reveal_token);
+            let expected_pk = zk_verifier::deserialize_pk(&table.seats[seat_index].pk);
+            let proof = table_serialization::deserialize_reveal_token_proof(&proof_bytes);
+            zk_verifier::verify_reveal_token_or_abort(&partial_ct, &token_point, &expected_pk, &proof);
+        } else {
+            let encrypted_card = &table.deck_state.encrypted[card_index];
+            let token_point = bls12381::g1_from_bytes(&reveal_token);
+            let expected_pk = zk_verifier::deserialize_pk(&table.seats[seat_index].pk);
+            let proof = table_serialization::deserialize_reveal_token_proof(&proof_bytes);
+            zk_verifier::verify_reveal_token_or_abort(encrypted_card, &token_point, &expected_pk, &proof);
+        };
+
+        // 存储 reveal token
+        let assignment = &mut table.reveal_token_state.assignments[assignment_index];
+        assignment.reveal_tokens.push_back(RevealTokenData {
+            seat_index,
+            token: reveal_token,
+        });
+
+        // 从 pending 中移除
+        remove_from_pending(&mut assignment.pending_players, seat_index);
+
+        // 如果所有玩家都已提交，链上解密
+        if (assignment.pending_players.length() == 0) {
+            if (current_phase == table_constants::reveal_phase_preflop()) {
+                // ========== PREFLOP: 部分解密 ==========
+                let encrypted_card = &table.deck_state.encrypted[card_index];
+                let c1_bytes = bls_elgamal::c1_bytes(encrypted_card);
+                let mut result = *bls_elgamal::c2(encrypted_card);
+                let mut t = 0;
+                while (t < assignment.reveal_tokens.length()) {
+                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
+                    result = bls12381::g1_sub(&result, &token_point);
+                    t = t + 1;
+                };
+                let mut ct_bytes = c1_bytes;
+                let result_bytes = bls_scalar::g1_to_bytes(&result);
+                let mut r = 0;
+                while (r < result_bytes.length()) {
+                    ct_bytes.push_back(result_bytes[r]);
+                    r = r + 1;
+                };
+                table.deck_state.decrypted_cards.push_back(DecryptedCard {
+                    encrypted_card_index: card_index,
+                    owner_seat_index,
+                    ciphertext_bytes: ct_bytes,
+                    plaintext_bytes: vector[],
+                });
+                assignment.decrypted = true;
+            } else if (current_phase == table_constants::reveal_phase_showdown()) {
+                // ========== SHOWDOWN: 从部分解密密文得到明文 ==========
+                let partial_ct_bytes = find_partial_ciphertext(&table.deck_state.decrypted_cards, card_index);
+                let partial_ct = bls_elgamal::ciphertext_from_bytes(&partial_ct_bytes);
+                let mut result = *bls_elgamal::c2(&partial_ct);
+                let mut t = 0;
+                while (t < assignment.reveal_tokens.length()) {
+                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
+                    result = bls12381::g1_sub(&result, &token_point);
+                    t = t + 1;
+                };
+                let plaintext_bytes = bls_scalar::g1_to_bytes(&result);
+                update_decrypted_card_to_plaintext(&mut table.deck_state.decrypted_cards, card_index, plaintext_bytes);
+                assignment.decrypted = true;
+            } else {
+                // ========== COMMUNITY / REDEAL: 全部解密 ==========
+                let encrypted_card = &table.deck_state.encrypted[card_index];
+                let mut result = *bls_elgamal::c2(encrypted_card);
+                let mut t = 0;
+                while (t < assignment.reveal_tokens.length()) {
+                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
+                    result = bls12381::g1_sub(&result, &token_point);
+                    t = t + 1;
+                };
+                if (bls_scalar::g1_is_identity(&result)) {
+                    assignment.decrypted = true;
+                    identity_card_indices.push_back(card_index);
+                    table_events::emit_card_is_identity(
+                        object::id(table),
+                        card_index,
+                        assignment_index,
+                        current_phase,
+                    );
+                } else {
+                    assignment.decrypted = true;
+                    let plaintext_bytes = bls_scalar::g1_to_bytes(&result);
+                    table.deck_state.decrypted_cards.push_back(DecryptedCard {
+                        encrypted_card_index: card_index,
+                        owner_seat_index: 0xFFFFFFFFFFFFFFFF,
+                        ciphertext_bytes: vector[],
+                        plaintext_bytes,
+                    });
+                };
+            };
+        };
+
+        table_events::emit_reveal_token_submitted(
+            object::id(table),
+            seat_index,
+            card_index,
+            current_phase,
+        );
+
+        idx = idx + 1;
     };
 
-    event::emit(RevealTokenSubmitted {
-        table_id: object::id(table),
-        seat_index,
-        card_index,
-        phase: current_phase,
-    });
+    // 统一处理 identity redeal
+    if (identity_card_indices.length() > 0) {
+        // 从后往前移除 identity 的 assignments（用 remove 保持顺序）
+        let mut i = table.reveal_token_state.assignments.length();
+        while (i > 0) {
+            i = i - 1;
+            let ci = table.reveal_token_state.assignments[i].encrypted_card_index;
+            if (is_in_list(&identity_card_indices, ci)) {
+                table.reveal_token_state.assignments.remove(i);
+            };
+        };
 
-    // 检查是否所有牌都已解密
+        // 为 identity 牌创建 redeal assignments（从 cards_dealt 开始分配新牌）
+        let redeal_count = identity_card_indices.length();
+        let mut redeal_assignments = create_reveal_assignments_for_cards(table, redeal_count);
+        while (redeal_assignments.length() > 0) {
+            table.reveal_token_state.assignments.push_back(redeal_assignments.pop_back());
+        };
+
+        table_events::emit_identity_redeal(
+            object::id(table),
+            identity_card_indices,
+            redeal_count,
+            current_phase,
+        );
+    };
+
+    // 批量提交完成后，检查是否所有牌都已解密
     check_reveal_phase_complete(table);
 }
 
-// ========== 发起 Reconstruct 投票 ==========
-public entry fun initiate_reconstruct(
-    table: &mut Table,
-    coefficient: vector<u8>,            // 随机系数 (scalar bytes)
-    readable_cards: vector<vector<u8>>, // 玩家可读牌 (G1 compressed bytes each)
-    cards: vector<vector<u8>>,          // 明文牌点 (G1 compressed bytes each)
-    ctx: &mut TxContext,
-) {
-    let sender = ctx.sender();
-    assert!(is_player_seated(&table.seats, sender), EPlayerNotSeated);
-
-    table.reconstruct_state = ReconstructState {
-        phase: RECONSTRUCT_PHASE_VOTING,
-        votes_yes: 0,
-        votes_no: 0,
-        voted_players: vector[],
-        pending_players: get_active_seat_indices(&table.seats),
-        completed_players: vector[],
-        coefficient,
-        readable_cards,
-        cards,
-    };
-
-    table.reconstruct_started_at = 0;
-
-    event::emit(ReconstructInitiated { table_id: object::id(table) })
-}
-
-// ========== Reconstruct 投票 ==========
-public entry fun vote_reconstruct(
-    table: &mut Table,
-    vote: bool,                         // true = 同意, false = 反对
-    ctx: &mut TxContext,
-) {
-    assert!(table.reconstruct_state.phase == RECONSTRUCT_PHASE_VOTING, EReconstructNotVoting);
-
-    let sender = ctx.sender();
-    assert!(is_player_seated(&table.seats, sender), EPlayerNotSeated);
-
-    let seat_index = find_seat_index(&table.seats, sender);
-    assert!(!is_in_list(&table.reconstruct_state.voted_players, seat_index), EAlreadyVoted);
-
-    // 记录投票
-    if (vote) {
-        table.reconstruct_state.votes_yes = table.reconstruct_state.votes_yes + 1;
-    } else {
-        table.reconstruct_state.votes_no = table.reconstruct_state.votes_no + 1;
-    };
-    table.reconstruct_state.voted_players.push_back(seat_index);
-
-    event::emit(ReconstructVote { table_id: object::id(table), seat_index, vote });
-
-    // 检查投票结果
-    let active_count = count_active_occupied(&table.seats);
-    if (table.reconstruct_state.voted_players.length() >= active_count) {
-        if (table.reconstruct_state.votes_no == 0) {
-            // 全部同意，进入 Collecting 阶段
-            table.reconstruct_state.phase = RECONSTRUCT_PHASE_COLLECTING;
-            table.reconstruct_state.pending_players = get_active_seat_indices(&table.seats);
-        } else {
-            // 有人反对，重置
-            table.reconstruct_state = empty_reconstruct_state();
-        };
-    };
-}
-
 // ========== 提交 Reconstruct Deck ==========
-public entry fun submit_reconstruct_deck(
+public  fun submit_reconstruct_deck(
     table: &mut Table,
     output_cards: vector<u8>,           // 重建后的牌组 (serialized ciphertexts, flat bytes)
     swap_cards: vector<u8>,             // swap-out 牌 (serialized ciphertexts, flat bytes)
@@ -1010,25 +1501,26 @@ public entry fun submit_reconstruct_deck(
     proof_bytes: vector<u8>,            // ReconstructProof (serialized)
     ctx: &mut TxContext,
 ) {
-    assert!(table.reconstruct_state.phase == RECONSTRUCT_PHASE_COLLECTING, EReconstructNotCollecting);
+    assert!(table.reconstruct_state.phase == table_constants::reconstruct_phase_collecting(), EReconstructNotCollecting);
 
     let sender = ctx.sender();
     assert!(is_player_seated(&table.seats, sender), EPlayerNotSeated);
 
     let seat_index = find_seat_index(&table.seats, sender);
-    assert!(!is_in_list(&table.reconstruct_state.completed_players, seat_index), EReconstructAlreadySubmitted);
+    assert!(is_in_list(&table.reconstruct_state.pending_players, seat_index), EReconstructAlreadySubmitted);
+    assert!(output_cards.length() == table.deck_state.plaintext.length(), EInvalidReconstructDeckSize);
 
     // 反序列化
     let output_cts = zk_verifier::deserialize_ciphertexts(&output_cards);
     let swap_cts = zk_verifier::deserialize_ciphertexts(&swap_cards);
     let readable_cts = zk_verifier::deserialize_ciphertexts(&user_readable_cards);
-    let reconstruct_proof = deserialize_reconstruct_proof(&proof_bytes);
+    let reconstruct_proof = table_serialization::deserialize_reconstruct_proof(&proof_bytes);
 
     // 从 ReconstructState 读取明文牌点
     let mut card_points = vector[];
     let mut i = 0;
-    while (i < table.reconstruct_state.cards.length()) {
-        card_points.push_back(bls12381::g1_from_bytes(&table.reconstruct_state.cards[i]));
+    while (i < table.deck_plaintext().length()) {
+        card_points.push_back(bls12381::g1_from_bytes(&table.deck_plaintext()[i]));
         i = i + 1;
     };
 
@@ -1045,34 +1537,22 @@ public entry fun submit_reconstruct_deck(
         &reconstruct_proof,
     );
 
-    // 标记为已完成
-    table.reconstruct_state.completed_players.push_back(seat_index);
+    // 标记为已完成，存储该玩家的 output_cts
     remove_from_pending(&mut table.reconstruct_state.pending_players, seat_index);
+    table.reconstruct_state.player_decks.push_back(ReconstructPlayerDeck {
+        seat_index,
+        output_cts,
+    });
 
-    event::emit(ReconstructDeckSubmitted { table_id: object::id(table), seat_index });
-
-    // 所有玩家提交后，重新开始洗牌
-    let active_count = count_active_occupied(&table.seats);
-    if (table.reconstruct_state.completed_players.length() >= active_count) {
-        table.reconstruct_state.phase = RECONSTRUCT_PHASE_COMPLETE;
-        event::emit(ReconstructCompleteEvt { table_id: object::id(table) });
-
-        // 重新开始洗牌
-        table.round_state = ROUND_SHUFFLING;
-        table.shuffle_state = ShuffleState {
-            current_shuffler: option::none(),
-            pending_players: get_active_seat_indices(&table.seats),
-            completed_players: vector[],
-        };
-        if (table.shuffle_state.pending_players.length() > 0) {
-            table.shuffle_state.current_shuffler = option::some(table.shuffle_state.pending_players[0]);
-        };
-        table.reconstruct_state = empty_reconstruct_state();
+    table_events::emit_reconstruct_deck_submitted(object::id(table), seat_index);
+    // 所有玩家提交后，标记为完成，由 tick 处理状态转换
+    if (table.reconstruct_state.pending_players.length()==0) {
+        on_complete_reconstruct(table);
     };
 }
 
 // ========== 请求 Redeal ==========
-public entry fun request_redeal(
+public  fun request_redeal(
     table: &mut Table,
     card_indices: vector<u64>,          // 需要重新发的牌索引
     ctx: &mut TxContext,
@@ -1084,27 +1564,35 @@ public entry fun request_redeal(
 
     // 设置 redeal reveal phase
     // redeal reveal 的 pending_players 排除请求者自身（请求者不需要提交 reveal token）
-    let mut assignments = create_reveal_assignments_for_cards(&card_indices, &table.seats);
+    let active_seats = get_active_seat_indices(&table.seats);
+    let mut assignments = vector[];
     let mut a = 0;
-    while (a < assignments.length()) {
-        remove_from_pending(&mut assignments[a].pending_players, seat_index);
+    while (a < card_indices.length()) {
+        let mut pending = active_seats;
+        remove_from_pending(&mut pending, seat_index);
+        assignments.push_back(RevealAssignment {
+            encrypted_card_index: card_indices[a],
+            pending_players: pending,
+            reveal_tokens: vector[],
+            decrypted: false,
+        });
         a = a + 1;
     };
 
     table.reveal_token_state = RevealTokenState {
-        reveal_phase: REVEAL_PHASE_REDEAL,
+        reveal_phase: table_constants::reveal_phase_redeal(),
         assignments,
     };
 
-    event::emit(RedealRequested { table_id: object::id(table), seat_index, card_indices })
+    table_events::emit_redeal_requested(object::id(table), seat_index, card_indices)
 }
 
 // ========== 下注操作 ==========
-public entry fun fold(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
+public  fun fold(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     assert!(is_betting_round(table), EInvalidRoundState);
     assert!(is_player_turn(table, seat_index), ENotPlayerTurn);
 
-    table.betting_started_at = 0;  // will be set by tick for next player
+    table.timestamps.betting_started_at = 0;  // will be set by tick for next player
 
     let seat = &mut table.seats[seat_index];
     assert!(seat.occupied, ESeatEmpty);
@@ -1124,14 +1612,14 @@ public entry fun fold(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     } else {
         advance_turn(table);
     };
-    event::emit(PlayerFolded { table_id: object::id(table), seat_index })
+    table_events::emit_player_folded(object::id(table), seat_index, table_events::fold_reason_manual(), table.round_state)
 }
 
-public entry fun check(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
+public  fun check(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     assert!(is_betting_round(table), EInvalidRoundState);
     assert!(is_player_turn(table, seat_index), ENotPlayerTurn);
 
-    table.betting_started_at = 0;  // will be set by tick for next player
+    table.timestamps.betting_started_at = 0;  // will be set by tick for next player
 
     let seat = &mut table.seats[seat_index];
     assert!(seat.occupied, ESeatEmpty);
@@ -1145,90 +1633,104 @@ public entry fun check(table: &mut Table, seat_index: u64, ctx: &mut TxContext) 
 
     seat.acted_this_round = true;
     advance_turn(table);
-    event::emit(PlayerChecked { table_id: object::id(table), seat_index })
+    table_events::emit_player_checked(object::id(table), seat_index, table.round_state)
 }
 
-public entry fun call(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
+public  fun call(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     assert!(is_betting_round(table), EInvalidRoundState);
     assert!(is_player_turn(table, seat_index), ENotPlayerTurn);
 
-    table.betting_started_at = 0;  // will be set by tick for next player
+    table.timestamps.betting_started_at = 0;  // will be set by tick for next player
 
     let seat = &mut table.seats[seat_index];
     assert!(seat.occupied, ESeatEmpty);
     assert!(seat.player == ctx.sender(), ENotOwner);
 
+    let mut call_amount = 0;
     if (table.betting_round.is_some()) {
         let round = table.betting_round.borrow_mut();
-        let call_amount = round.process_call(seat.bet, seat.stack);
+        call_amount = round.process_call(seat.bet, seat.stack);
         seat.stack = seat.stack - call_amount;
         seat.bet = seat.bet + call_amount;
         seat.total_bet = seat.total_bet + call_amount;
         if (seat.stack == 0) { seat.all_in = true };
     };
 
+    let is_all_in = seat.stack == 0;
     seat.acted_this_round = true;
     advance_turn(table);
-    event::emit(PlayerCalled { table_id: object::id(table), seat_index, amount: table.seats[seat_index].bet })
+    table_events::emit_player_called(object::id(table), seat_index, call_amount, table.round_state);
+    if (is_all_in && call_amount > 0) {
+        table_events::emit_player_all_in(object::id(table), seat_index, 0, call_amount, table.round_state);
+    };
 }
 
-public entry fun raise(table: &mut Table, seat_index: u64, total_bet: u64, ctx: &mut TxContext) {
+public  fun raise(table: &mut Table, seat_index: u64, total_bet: u64, ctx: &mut TxContext) {
     assert!(is_betting_round(table), EInvalidRoundState);
     assert!(is_player_turn(table, seat_index), ENotPlayerTurn);
 
-    table.betting_started_at = 0;  // will be set by tick for next player
+    table.timestamps.betting_started_at = 0;  // will be set by tick for next player
 
     let seat = &mut table.seats[seat_index];
     assert!(seat.occupied, ESeatEmpty);
     assert!(seat.player == ctx.sender(), ENotOwner);
 
+    let mut raise_amount = 0;
     if (table.betting_round.is_some()) {
         let round = table.betting_round.borrow_mut();
-        let raise_amount = round.process_raise(total_bet, seat_index, seat.bet, seat.stack);
+        raise_amount = round.process_raise(total_bet, seat_index, seat.bet, seat.stack);
         seat.stack = seat.stack - raise_amount;
         seat.bet = seat.bet + raise_amount;
         seat.total_bet = seat.total_bet + raise_amount;
         if (seat.stack == 0) { seat.all_in = true };
     };
 
+    let is_all_in = seat.stack == 0;
     seat.acted_this_round = true;
     reset_other_players_acted(&mut table.seats, seat_index);
     advance_turn(table);
-    event::emit(PlayerRaised { table_id: object::id(table), seat_index, total_bet })
-}
-
-// ========== 摊牌 ==========
-public entry fun showdown(table: &mut Table, _ctx: &mut TxContext) {
-    assert!(table.round_state == ROUND_RIVER, EInvalidRoundState);
-    collect_bets_to_pot(table);
-
-    // 进入 ShowdownReveal 阶段（而非直接 SHOWDOWN）
-    table.round_state = ROUND_SHOWDOWN_REVEAL;
-    start_showdown_reveal_phase(table);
+    table_events::emit_player_raised(object::id(table), seat_index, raise_amount, total_bet, table.round_state);
+    if (is_all_in && raise_amount > 0) {
+        table_events::emit_player_all_in(object::id(table), seat_index, 1, raise_amount, table.round_state);
+    };
 }
 
 // ========== 结算 ==========
 public fun settle_hand(table: &mut Table) {
-    assert!(table.round_state == ROUND_SHOWDOWN, EInvalidRoundState);
+    assert!(table.round_state == table_constants::round_showdown(), EInvalidRoundState);
 
-    let bets = extract_bets(&table.seats);
-    let folded = extract_folded(&table.seats);
-    let all_in_flags = extract_all_in(&table.seats);
+    // 优化: 单次遍历提取 bets/folded/all_in，避免三次循环
+    let (bets, folded, all_in_flags) = extract_betting_state(&table.seats);
     let (main_pot, side_pots) = side_pot::calculate_side_pots(&bets, &folded, &all_in_flags);
 
-    distribute_pot(table, main_pot, &folded);
+    let mut all_winners = vector[];
+    let main_winners = distribute_pot(table, main_pot, &folded);
+    let mut mw = 0;
+    while (mw < main_winners.length()) {
+        if (!is_in_list(&all_winners, main_winners[mw])) {
+            all_winners.push_back(main_winners[mw]);
+        };
+        mw = mw + 1;
+    };
 
     let mut i = 0;
     while (i < side_pots.length()) {
         let sp = &side_pots[i];
-        distribute_side_pot(table, sp, &folded);
+        let side_winners = distribute_side_pot(table, sp, &folded);
+        let mut sw = 0;
+        while (sw < side_winners.length()) {
+            if (!is_in_list(&all_winners, side_winners[sw])) {
+                all_winners.push_back(side_winners[sw]);
+            };
+            sw = sw + 1;
+        };
         i = i + 1;
     };
 
     let pot = table.pot;
-    table.round_state = ROUND_HAND_COMPLETE;
-    table.hand_complete_at = 0;  // will be set by tick
-    event::emit(HandSettled { table_id: object::id(table), pot })
+    table_events::emit_hand_settled(object::id(table), pot, all_winners);
+    reset_for_next_hand(table);
+    table.timestamps.hand_complete_at = 0;
 }
 
 // ========== 内部函数 ==========
@@ -1260,11 +1762,51 @@ fun find_seat_index(seats: &vector<Seat>, player: address): u64 {
     abort EPlayerNotSeated
 }
 
+/// 根据 card_index 找到手牌的牌主 seat_index
+/// Preflop 手牌按 active_seats 顺序分配：active_seats[0] 的牌在 card_index [0,1]，active_seats[1] 在 [2,3]，...
+fun find_hand_card_owner(table: &mut Table, card_index: u64): u64 {
+    let active_seats = get_active_seat_indices(&table.seats);
+    let hand_start = table.deck_state.cards_dealt - active_seats.length() * table_constants::cards_per_player();
+    let offset = card_index - hand_start;
+    let seat_offset = offset / table_constants::cards_per_player();
+    active_seats[seat_offset]
+}
+
+/// 从 decrypted_cards 中查找指定 card_index 的部分解密密文
+fun find_partial_ciphertext(decrypted_cards: &vector<DecryptedCard>, card_index: u64): vector<u8> {
+    let mut i = 0;
+    while (i < decrypted_cards.length()) {
+        if (decrypted_cards[i].encrypted_card_index == card_index
+            && decrypted_cards[i].ciphertext_bytes.length() > 0) {
+            return decrypted_cards[i].ciphertext_bytes
+        };
+        i = i + 1;
+    };
+    vector[]
+}
+
+/// 将 decrypted_card 从部分解密密文更新为完全解密明文
+fun update_decrypted_card_to_plaintext(
+    decrypted_cards: &mut vector<DecryptedCard>,
+    card_index: u64,
+    plaintext_bytes: vector<u8>,
+) {
+    let mut i = 0;
+    while (i < decrypted_cards.length()) {
+        if (decrypted_cards[i].encrypted_card_index == card_index
+            && decrypted_cards[i].ciphertext_bytes.length() > 0) {
+            decrypted_cards[i].ciphertext_bytes = vector[];
+            decrypted_cards[i].plaintext_bytes = plaintext_bytes;
+        };
+        i = i + 1;
+    };
+}
+
 fun count_active_players(seats: &vector<Seat>): u64 {
     let mut count = 0;
     let mut i = 0;
     while (i < seats.length()) {
-        if (seats[i].occupied && !seats[i].folded) { count = count + 1 };
+        if (seats[i].occupied && !seats[i].folded && !seats[i].is_waiting) { count = count + 1 };
         i = i + 1;
     };
     count
@@ -1274,7 +1816,7 @@ fun count_active_occupied(seats: &vector<Seat>): u64 {
     let mut count = 0;
     let mut i = 0;
     while (i < seats.length()) {
-        if (seats[i].occupied) { count = count + 1 };
+        if (seats[i].occupied && !seats[i].is_waiting) { count = count + 1 };
         i = i + 1;
     };
     count
@@ -1284,7 +1826,19 @@ fun get_active_seat_indices(seats: &vector<Seat>): vector<u64> {
     let mut result = vector[];
     let mut i = 0;
     while (i < seats.length()) {
-        if (seats[i].occupied) { result.push_back(i) };
+        if (seats[i].occupied && !seats[i].is_waiting) { result.push_back(i) };
+        i = i + 1;
+    };
+    result
+}
+
+fun get_pending_seat_indices(completed_players: &vector<u64>, seats: &vector<Seat>): vector<u64> {
+    let mut result = vector[];
+    let mut i = 0;
+    while (i < seats.length()) {
+        if (seats[i].occupied && !seats[i].is_waiting && !is_in_list(completed_players, i)) {
+            result.push_back(i)
+        };
         i = i + 1;
     };
     result
@@ -1359,6 +1913,12 @@ fun post_blinds(table: &mut Table) {
         find_next_active_seat(&table.seats, bb_seat, n)
     };
     table.current_turn = option::some(first_to_act);
+    table_events::emit_blinds_posted(
+        object::id(table),
+        sb_seat, bb_seat,
+        table.small_blind, table.big_blind,
+        first_to_act,
+    );
 }
 
 fun start_betting_round(table: &mut Table, is_preflop: bool) {
@@ -1383,22 +1943,43 @@ fun start_betting_round(table: &mut Table, is_preflop: bool) {
         let first = find_next_active_seat(&table.seats, table.button, table.max_players);
         table.current_turn = option::some(first);
     };
+
+    let first_to_act = if (table.current_turn.is_some()) { *table.current_turn.borrow() } else { 0 };
+    table_events::emit_betting_round_started(
+        object::id(table),
+        table.round_state,
+        table.betting_round.borrow().current_bet(),
+        table.betting_round.borrow().min_raise(),
+        first_to_act,
+        table.pot,
+    );
 }
 
 fun is_betting_round(table: &Table): bool {
-    table.round_state == ROUND_PREFLOP ||
-    table.round_state == ROUND_FLOP ||
-    table.round_state == ROUND_TURN ||
-    table.round_state == ROUND_RIVER
+    table.betting_round.is_some() && (
+        table.round_state == table_constants::round_preflop() ||
+        table.round_state == table_constants::round_flop() ||
+        table.round_state == table_constants::round_turn() ||
+        table.round_state == table_constants::round_river()
+    )
 }
 
-fun is_reveal_phase(table: &Table): bool {
-    table.round_state == ROUND_PREFLOP_REVEAL ||
-    table.round_state == ROUND_FLOP_REVEAL ||
-    table.round_state == ROUND_TURN_REVEAL ||
-    table.round_state == ROUND_RIVER_REVEAL ||
-    table.round_state == ROUND_SHOWDOWN_REVEAL
+/// 是否处于进行中的游戏阶段（非等待）
+public fun is_playing(table: &Table): bool {
+    table.round_state != table_constants::round_waiting() ||
+    table.shuffle_state.phase != table_constants::shuffle_phase_none() ||
+    table.reveal_token_state.reveal_phase != table_constants::reveal_phase_none() ||
+    table.reconstruct_state.phase != table_constants::reconstruct_phase_none()
 }
+
+fun can_leave_state(table: &Table): bool {
+    table.round_state == table_constants::round_waiting() 
+}
+
+fun can_join_state(table: &Table): bool {
+    table.round_state == table_constants::round_waiting() 
+}
+
 
 fun is_player_turn(table: &Table, seat_index: u64): bool {
     table.current_turn.is_some() && *table.current_turn.borrow() == seat_index
@@ -1427,7 +2008,7 @@ fun is_betting_complete(table: &Table): bool {
     let mut i = 0;
     while (i < table.seats.length()) {
         let seat = &table.seats[i];
-        if (seat.occupied && !seat.folded && !seat.all_in) {
+        if (seat.occupied && !seat.folded && !seat.all_in && !seat.is_waiting) {
             if (!seat.acted_this_round) { all_acted = false };
             if (seat.bet < current_bet) { all_matched = false };
         };
@@ -1438,37 +2019,58 @@ fun is_betting_complete(table: &Table): bool {
 }
 
 fun collect_bets_to_pot(table: &mut Table) {
+    let mut collected_seats = vector[];
     let mut i = 0;
     while (i < table.seats.length()) {
-        table.pot = table.pot + table.seats[i].bet;
+        if (table.seats[i].bet > 0) {
+            table.pot = table.pot + table.seats[i].bet;
+            collected_seats.push_back(i);
+        };
         table.seats[i].bet = 0;
         i = i + 1;
     };
+    table_events::emit_pot_collected(
+        object::id(table),
+        table.round_state,
+        table.pot,
+        collected_seats,
+    );
 }
 
 fun advance_round(table: &mut Table) {
+    let from_round = table.round_state;
     table.betting_round = option::none();
     table.current_turn = option::none();
 
     // 下注轮结束后进入对应的 Reveal 阶段
-    if (table.round_state == ROUND_PREFLOP) {
-        table.round_state = ROUND_FLOP_REVEAL;
-        table.reveal_started_at = 0;
-        start_community_reveal_phase(table, 3);
-    } else if (table.round_state == ROUND_FLOP) {
-        table.round_state = ROUND_TURN_REVEAL;
-        table.reveal_started_at = 0;
-        start_community_reveal_phase(table, 1);
-    } else if (table.round_state == ROUND_TURN) {
-        table.round_state = ROUND_RIVER_REVEAL;
-        table.reveal_started_at = 0;
-        start_community_reveal_phase(table, 1);
-    } else if (table.round_state == ROUND_RIVER) {
-        table.round_state = ROUND_SHOWDOWN_REVEAL;
-        table.showdown_at = 0;
+    if (from_round == table_constants::round_preflop()) {
+        table.round_state = table_constants::round_flop();
+        table.timestamps.reveal_started_at = 0;
+        start_community_reveal_phase(table, 3,table_constants::reveal_phase_flop());
+    } else if (from_round == table_constants::round_flop()) {
+        table.round_state = table_constants::round_turn();
+        table.timestamps.reveal_started_at = 0;
+        start_community_reveal_phase(table, 1,table_constants::reveal_phase_turn());
+    } else if (from_round == table_constants::round_turn()) {
+        table.round_state = table_constants::round_river();
+        table.timestamps.reveal_started_at = 0;
+        start_community_reveal_phase(table, 1,table_constants::reveal_phase_river());
+    } else if (from_round == table_constants::round_river()) {
+        table.round_state = table_constants::round_showdown();
+        table.timestamps.showdown_at = 0;
         start_showdown_reveal_phase(table);
     };
+
+    table_events::emit_round_advanced(
+        object::id(table),
+        from_round,
+        table.round_state,
+        table.pot,
+        table.community_cards.length(),
+    );
 }
+
+
 
 fun end_without_showdown(table: &mut Table) {
     collect_bets_to_pot(table);
@@ -1476,64 +2078,100 @@ fun end_without_showdown(table: &mut Table) {
     let mut winner_idx = 0;
     let mut i = 0;
     while (i < table.seats.length()) {
-        if (table.seats[i].occupied && !table.seats[i].folded) {
+        if (table.seats[i].occupied && !table.seats[i].folded && !table.seats[i].is_waiting) {
             winner_idx = i;
         };
         i = i + 1;
     };
 
-    table.seats[winner_idx].stack = table.seats[winner_idx].stack + table.pot;
-    table.pot = 0;
-    table.round_state = ROUND_HAND_COMPLETE;
-    table.hand_complete_at = 0;  // will be set by tick
-    table.betting_round = option::none();
-    table.current_turn = option::none();
+    let pot = table.pot;
+    let winner_player = table.seats[winner_idx].player;
+    table.seats[winner_idx].stack = table.seats[winner_idx].stack + pot;
+    table.timestamps.hand_complete_at = 0;  // will be set by tick
+    reset_for_next_hand(table);
+    table_events::emit_hand_ended_without_showdown(
+        object::id(table),
+        winner_idx,
+        winner_player,
+        pot,
+    );
 }
 
 // ========== 洗牌推进 ==========
 
 fun advance_shuffle(table: &mut Table) {
-    // 检查活跃人数是否足够
-    if (count_active_occupied(&table.seats) < MIN_PLAYERS_TO_START) {
-        reset_for_next_hand(table);
+    if (table.shuffle_state.phase != table_constants::shuffle_phase_reconstruct() && table.shuffle_state.phase != table_constants::shuffle_phase_before_preflop()) {
         return
     };
-
-    if (table.shuffle_state.pending_players.length() == 0 &&
-        table.shuffle_state.completed_players.length() >= MIN_PLAYERS_TO_START) {
+    // 检查活跃人数是否足够
+    if (table.shuffle_state.pending_players.length() == 0 ) {
         // 所有玩家完成洗牌
-        table.round_state = ROUND_SHUFFLE_COMPLETE;
-        table.shuffle_state.current_shuffler = option::none();
-        event::emit(ShuffleCompleteEvt { table_id: object::id(table) });
-
-        // 自动推进到 PreFlopReveal
-        table.round_state = ROUND_PREFLOP_REVEAL;
-        table.reveal_started_at = 0;
-        start_preflop_reveal_phase(table);
+        let curr_phase = table.shuffle_state.phase;
+        on_shuffle_complete(table);
+        if (curr_phase == table_constants::shuffle_phase_before_preflop()) {
+            table.timestamps.reveal_started_at = 0;
+            table.round_state = table_constants::round_preflop();
+            start_preflop_reveal_phase(table);
+        }else if (curr_phase == table_constants::shuffle_phase_reconstruct()) {
+            // 洗牌完了可以清理数据了
+            table.reconstruct_state = empty_reconstruct_state();
+            table.reveal_token_state = empty_reveal_token_state();
+            table.timestamps.reveal_started_at = 0;
+            // 下注轮结束后进入对应的 Reveal 阶段
+            if (table.round_state == table_constants::round_preflop()) {
+                start_preflop_reveal_phase(table);
+            } else if (table.round_state == table_constants::round_flop()) {
+                start_community_reveal_phase(table, 3,table_constants::reveal_phase_flop());
+            } else if (table.round_state == table_constants::round_turn()) {
+                start_community_reveal_phase(table, 1,table_constants::reveal_phase_turn());
+            } else if (table.round_state == table_constants::round_river()) {
+                start_community_reveal_phase(table, 1,table_constants::reveal_phase_river());
+            } else if (table.round_state == table_constants::round_showdown()) {
+                table.timestamps.showdown_at = 0;
+                start_showdown_reveal_phase(table);
+            };
+        }
     } else if (table.shuffle_state.pending_players.length() > 0) {
         // 设置下一个洗牌者
         table.shuffle_state.current_shuffler = option::some(table.shuffle_state.pending_players[0]);
-        table.shuffle_started_at = 0;  // will be set by tick when relayer calls
+        table.timestamps.shuffle_started_at = 0;  // will be set by tick when relayer calls
+        table_events::emit_shuffle_turn(
+            object::id(table),
+            table.shuffle_state.pending_players[0],
+            table.shuffle_state.pending_players.length(),
+            table.shuffle_state.completed_players.length(),
+        );
     };
 }
 
 // ========== Reveal Phase 启动 ==========
 
 fun start_preflop_reveal_phase(table: &mut Table) {
-    // 发牌：每个玩家 2 张牌
-    let mut card_index = 0;
+    // 发牌：每个玩家 2 张牌，从 cards_dealt 开始
+    // 手牌的 pending_players 排除牌主（牌主不需要为自己的牌提交 reveal token）
+    let mut card_index = table.deck_state.cards_dealt;
     let mut assignments = vector[];
     let active_seats = get_active_seat_indices(&table.seats);
 
     let mut s = 0;
     while (s < active_seats.length()) {
-        let _seat_idx = active_seats[s];
+        let seat_idx = active_seats[s];
+        // 优化: 每个玩家只构建一次 pending 列表（排除牌主），复用给该玩家的所有手牌
+        let mut pending = vector[];
+        let mut a = 0;
+        while (a < active_seats.length()) {
+            if (active_seats[a] != seat_idx) {
+                pending.push_back(active_seats[a]);
+            };
+            a = a + 1;
+        };
         let mut c = 0;
-        while (c < CARDS_PER_PLAYER) {
-            let all_seats = get_active_seat_indices(&table.seats);
+        while (c < table_constants::cards_per_player()) {
+            // 复制 pending（vector<bool> 有 copy）
+            let pending_copy = copy pending;
             assignments.push_back(RevealAssignment {
                 encrypted_card_index: card_index,
-                pending_players: all_seats,
+                pending_players: pending_copy,
                 reveal_tokens: vector[],
                 decrypted: false,
             });
@@ -1543,15 +2181,19 @@ fun start_preflop_reveal_phase(table: &mut Table) {
         s = s + 1;
     };
 
+    // 更新已发牌数量
+    table.deck_state.cards_dealt = card_index;
+
     table.reveal_token_state = RevealTokenState {
-        reveal_phase: REVEAL_PHASE_HAND,
+        reveal_phase: table_constants::reveal_phase_preflop(),
         assignments,
     };
+    table_events::emit_reveal_phase(object::id(table), table_constants::reveal_phase_preflop());
 }
 
-fun start_community_reveal_phase(table: &mut Table, count: u64) {
-    // 公共牌从手牌之后开始
-    let start_index = count_active_occupied(&table.seats) * CARDS_PER_PLAYER + table.community_cards.length();
+fun start_community_reveal_phase(table: &mut Table, count: u64, phase: u8) {
+    // 公共牌从 cards_dealt 开始
+    let start_index = table.deck_state.cards_dealt;
     let mut assignments = vector[];
     let active_seats = get_active_seat_indices(&table.seats);
 
@@ -1566,58 +2208,69 @@ fun start_community_reveal_phase(table: &mut Table, count: u64) {
         c = c + 1;
     };
 
+    // 更新已发牌数量
+    table.deck_state.cards_dealt = start_index + count;
+
     table.reveal_token_state = RevealTokenState {
-        reveal_phase: REVEAL_PHASE_COMMUNITY,
+        reveal_phase: phase,
         assignments,
     };
+    table_events::emit_reveal_phase(object::id(table), phase);
 }
 
 fun start_showdown_reveal_phase(table: &mut Table) {
     // Showdown: 需要揭示未 fold 玩家的手牌
+    // 从 decrypted_cards 中找到部分解密的手牌密文，只要求牌主提交 reveal token
     let mut assignments = vector[];
-    let active_seats = get_active_seat_indices(&table.seats);
-    let mut card_index = 0;
 
     let mut s = 0;
     while (s < table.seats.length()) {
         let seat = &table.seats[s];
-        if (seat.occupied && !seat.folded) {
+        if (seat.occupied && !seat.folded && !seat.is_waiting) {
+            // 在 decrypted_cards 中查找属于该玩家的手牌（部分解密密文）
             let mut c = 0;
-            while (c < CARDS_PER_PLAYER) {
-                assignments.push_back(RevealAssignment {
-                    encrypted_card_index: card_index,
-                    pending_players: active_seats,
-                    reveal_tokens: vector[],
-                    decrypted: false,
-                });
-                card_index = card_index + 1;
+            while (c < table.deck_state.decrypted_cards.length()) {
+                let dc = &table.deck_state.decrypted_cards[c];
+                if (dc.owner_seat_index == s && dc.ciphertext_bytes.length() > 0) {
+                    // 只有牌主需要提交 reveal token
+                    let pending = vector[s];
+                    assignments.push_back(RevealAssignment {
+                        encrypted_card_index: dc.encrypted_card_index,
+                        pending_players: pending,
+                        reveal_tokens: vector[],
+                        decrypted: false,
+                    });
+                };
                 c = c + 1;
             };
-        } else if (seat.occupied) {
-            card_index = card_index + CARDS_PER_PLAYER;
         };
         s = s + 1;
     };
 
     table.reveal_token_state = RevealTokenState {
-        reveal_phase: REVEAL_PHASE_SHOWDOWN,
+        reveal_phase: table_constants::reveal_phase_showdown(),
         assignments,
     };
+    table_events::emit_reveal_phase(object::id(table), table_constants::reveal_phase_showdown());
 }
 
-fun create_reveal_assignments_for_cards(card_indices: &vector<u64>, seats: &vector<Seat>): vector<RevealAssignment> {
+fun create_reveal_assignments_for_cards(table: &mut Table, count: u64): vector<RevealAssignment> {
+    // 从 cards_dealt 开始分配新牌（与发牌逻辑一致）
     let mut assignments = vector[];
-    let active_seats = get_active_seat_indices(seats);
+    let active_seats = get_active_seat_indices(&table.seats);
+    let start_index = table.deck_state.cards_dealt;
     let mut i = 0;
-    while (i < card_indices.length()) {
+    while (i < count) {
         assignments.push_back(RevealAssignment {
-            encrypted_card_index: card_indices[i],
+            encrypted_card_index: start_index + i,
             pending_players: active_seats,
             reveal_tokens: vector[],
             decrypted: false,
         });
         i = i + 1;
     };
+    // 更新已发牌数量
+    table.deck_state.cards_dealt = start_index + count;
     assignments
 }
 
@@ -1638,258 +2291,119 @@ fun check_reveal_phase_complete(table: &mut Table) {
     // 所有牌已解密，根据当前阶段推进
     let phase = table.reveal_token_state.reveal_phase;
 
-    event::emit(RevealPhaseComplete { table_id: object::id(table), phase });
+    table_events::emit_reveal_phase_complete(object::id(table), phase);
 
-    if (phase == REVEAL_PHASE_HAND && table.round_state == ROUND_PREFLOP_REVEAL) {
-        // 手牌解密完成，进入 PreFlop 下注
-        table.round_state = ROUND_PREFLOP;
-        table.betting_started_at = 0;
+    if (phase == table_constants::reveal_phase_preflop()) {
+        // Preflop 手牌仅部分解密（其他玩家提交了 reveal token，牌主尚未提交）
+        // 不写入 seat.hand，等 showdown 时牌主提交后才能得到明文
+        // 进入 PreFlop 下注
+        table.timestamps.betting_started_at = 0;
         post_blinds(table);
         start_betting_round(table, true);
-    } else if (phase == REVEAL_PHASE_COMMUNITY) {
-        // 公共牌解密完成
-        if (table.round_state == ROUND_FLOP_REVEAL) {
-            table.round_state = ROUND_FLOP;
-            table.betting_started_at = 0;
-            start_betting_round(table, false);
-        } else if (table.round_state == ROUND_TURN_REVEAL) {
-            table.round_state = ROUND_TURN;
-            table.betting_started_at = 0;
-            start_betting_round(table, false);
-        } else if (table.round_state == ROUND_RIVER_REVEAL) {
-            table.round_state = ROUND_RIVER;
-            table.betting_started_at = 0;
-            start_betting_round(table, false);
-        };
-    } else if (phase == REVEAL_PHASE_SHOWDOWN && table.round_state == ROUND_SHOWDOWN_REVEAL) {
-        // 摊牌牌面解密完成，进入 Showdown
-        table.round_state = ROUND_SHOWDOWN;
-        table.showdown_at = 0;
+    } else if (phase == table_constants::reveal_phase_flop()) {
+        // 公共牌解密完成，写入 community_cards
+        // round_state 已在 advance_round 中设为 table_constants::round_flop()
+        write_decrypted_cards_to_community(table);
+        table.timestamps.betting_started_at = 0;
+        start_betting_round(table, false);
+    } else if (phase == table_constants::reveal_phase_turn()) {
+        // round_state 已在 advance_round 中设为 table_constants::round_turn()
+        write_decrypted_cards_to_community(table);
+        table.timestamps.betting_started_at = 0;
+        start_betting_round(table, false);
+    } else if (phase == table_constants::reveal_phase_river()) {
+        // round_state 已在 advance_round 中设为 table_constants::round_river()
+        write_decrypted_cards_to_community(table);
+        table.timestamps.betting_started_at = 0;
+        start_betting_round(table, false);
+    } else if (phase == table_constants::reveal_phase_showdown()) {
+        // 摊牌牌面解密完成，将手牌写入 seat.hand
+        // round_state 已在 advance_round 中设为 table_constants::round_showdown()
+        write_decrypted_cards_to_hands(table);
+        table.timestamps.showdown_at = 0;
         settle_hand(table);
-    } else if (phase == REVEAL_PHASE_REDEAL) {
-        // Redeal 完成，不改变 round_state，保持当前下注阶段继续
-        // Rust 端参考：redeal reveal 完成后保持 PreFlop，通过 reveal_token_state 追踪进度
-        // round_state 不变，只需重置 reveal state（在函数末尾执行）
+    } else if (phase == table_constants::reveal_phase_redeal()) {
+        // Redeal 完成：将 identity 牌替换为 placeholder，等待客户端重新加密提交
+        let mut a = 0;
+        while (a < table.reveal_token_state.assignments.length()) {
+            let card_idx = table.reveal_token_state.assignments[a].encrypted_card_index;
+            if (card_idx < table.deck_state.encrypted.length()) {
+                let placeholder = bls_elgamal::new_placeholder_card();
+                table.deck_state.encrypted.swap_remove(card_idx);
+                table.deck_state.encrypted.insert(placeholder, card_idx);
+            };
+            a = a + 1;
+        };
     };
 
     // 重置 reveal state
     table.reveal_token_state = empty_reveal_token_state();
 }
 
-// ========== PK 聚合计算 ==========
+// ========== 解密牌写入 ==========
 
-fun add_pk_to_aggregated(aggregated: &vector<u8>, pk: &vector<u8>): vector<u8> {
-    let agg_point = if (aggregated.length() == 0) {
-        bls12381::g1_identity()
-    } else {
-        bls12381::g1_from_bytes(aggregated)
-    };
-    let pk_point = bls12381::g1_from_bytes(pk);
-    let new_agg = bls12381::g1_add(&agg_point, &pk_point);
-    bls_scalar::g1_to_bytes(&new_agg)
-}
-
-fun remove_pk_from_aggregated(aggregated: &vector<u8>, pk: &vector<u8>): vector<u8> {
-    let agg_point = bls12381::g1_from_bytes(aggregated);
-    let pk_point = bls12381::g1_from_bytes(pk);
-    let new_agg = bls12381::g1_sub(&agg_point, &pk_point);
-    bls_scalar::g1_to_bytes(&new_agg)
-}
-
-// ========== Proof 反序列化辅助 ==========
-
-const G1_POINT_SIZE: u64 = 48;
-const SCALAR_SIZE: u64 = 32;
-const CIPHERTEXT_SIZE: u64 = 96;
-
-fun read_bytes(data: &vector<u8>, offset: u64, len: u64): vector<u8> {
-    let mut result = vector[];
+/// 将 decrypted_cards 中完全解密的公共牌写入 table.community_cards
+/// 处理后清除 plaintext_bytes，避免后续阶段重复写入
+fun write_decrypted_cards_to_community(table: &mut Table) {
+    let mut card_indices = vector[];
+    let mut card_ranks = vector[];
+    let mut card_suits = vector[];
+    let mut processed_indices = vector[];
     let mut i = 0;
-    while (i < len) {
-        result.push_back(*vector::borrow(data, offset + i));
+    while (i < table.deck_state.decrypted_cards.length()) {
+        let dc = &table.deck_state.decrypted_cards[i];
+        // 只处理完全解密的公共牌（owner_seat_index 为 MAX_U64 且有 plaintext_bytes）
+        if (dc.plaintext_bytes.length() > 0 && dc.owner_seat_index == 0xFFFFFFFFFFFFFFFF) {
+            let playing_card = plaintext_to_playing_card(&table.deck_state.plaintext, &dc.plaintext_bytes);
+            let card = card::new(card_suit(&playing_card), card_rank(&playing_card));
+            table.community_cards.push_back(card);
+            card_indices.push_back(dc.encrypted_card_index);
+            card_ranks.push_back(card_rank(&playing_card));
+            card_suits.push_back(card_suit(&playing_card));
+            processed_indices.push_back(i);
+        };
         i = i + 1;
     };
-    result
-}
-
-fun read_u16(data: &vector<u8>, offset: u64): u64 {
-    let lo = (*vector::borrow(data, offset) as u64);
-    let hi = (*vector::borrow(data, offset + 1) as u64);
-    lo + (hi << 8)
-}
-
-fun read_g1_point(data: &vector<u8>, offset: u64): vector<u8> {
-    read_bytes(data, offset, G1_POINT_SIZE)
-}
-
-fun read_scalar(data: &vector<u8>, offset: u64): vector<u8> {
-    read_bytes(data, offset, SCALAR_SIZE)
-}
-
-fun deserialize_schnorr_proof(data: &vector<u8>, mut offset: u64): (GeneralizedSchnorrProof, u64) {
-    let commitment = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let count = read_u16(data, offset);
-    offset = offset + 2;
-    let mut responses = vector[];
-    let mut i = 0;
-    while (i < count) {
-        responses.push_back(read_scalar(data, offset));
-        offset = offset + SCALAR_SIZE;
-        i = i + 1;
+    // 清除已处理公共牌的 plaintext_bytes，避免下次调用重复写入
+    let mut p = 0;
+    while (p < processed_indices.length()) {
+        let idx = processed_indices[p];
+        table.deck_state.decrypted_cards[idx].plaintext_bytes = vector[];
+        p = p + 1;
     };
-    (texas_poker::schnorr_proof::new(commitment, responses), offset)
-}
-
-fun deserialize_shuffle_proof(data: &vector<u8>): ShuffleProof {
-    let mut offset = 0;
-    let sum_c1_commit = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let sum_c2_commit = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let nonce = read_scalar(data, offset);
-    offset = offset + SCALAR_SIZE;
-    let (combined_schnorr_proof, offset) = deserialize_schnorr_proof(data, offset);
-    let (sum_c1_schnorr_proof, offset) = deserialize_schnorr_proof(data, offset);
-    let (sum_c2_schnorr_proof, _offset) = deserialize_schnorr_proof(data, offset);
-    texas_poker::shuffle_proof::new(
-        sum_c1_commit,
-        sum_c2_commit,
-        combined_schnorr_proof,
-        sum_c1_schnorr_proof,
-        sum_c2_schnorr_proof,
-        nonce,
-    )
-}
-
-fun deserialize_remask_proof(data: &vector<u8>): RemaskProof {
-    let mut offset = 0;
-    let count = read_u16(data, offset);
-    offset = offset + 2;
-    let mut per_card_commitments = vector[];
-    let mut i = 0;
-    while (i < count) {
-        per_card_commitments.push_back(read_g1_point(data, offset));
-        offset = offset + G1_POINT_SIZE;
-        i = i + 1;
-    };
-    let commitment_pk = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let response = read_scalar(data, offset);
-    offset = offset + SCALAR_SIZE;
-    let nonce = read_scalar(data, offset);
-    texas_poker::remask_proof::new(per_card_commitments, commitment_pk, response, nonce)
-}
-
-fun deserialize_leave_proof(data: &vector<u8>): LeaveProof {
-    let mut offset = 0;
-    let count = read_u16(data, offset);
-    offset = offset + 2;
-    let mut per_card_commitments = vector[];
-    let mut i = 0;
-    while (i < count) {
-        per_card_commitments.push_back(read_g1_point(data, offset));
-        offset = offset + G1_POINT_SIZE;
-        i = i + 1;
-    };
-    let commitment_pk = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let response = read_scalar(data, offset);
-    offset = offset + SCALAR_SIZE;
-    let nonce = read_scalar(data, offset);
-    texas_poker::leave_proof::new(per_card_commitments, commitment_pk, response, nonce)
-}
-
-fun deserialize_reveal_token_proof(data: &vector<u8>): RevealTokenProof {
-    let mut offset = 0;
-    let user_public_key = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let commitment_t1 = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let commitment_t2 = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let response_s = read_scalar(data, offset);
-    texas_poker::reveal_token_proof::new(user_public_key, commitment_t1, commitment_t2, response_s)
-}
-
-fun deserialize_reconstruct_proof(data: &vector<u8>): ReconstructProof {
-    let mut offset = 0;
-    // swap_out_cards_proofs
-    let swap_out_count = read_u16(data, offset);
-    offset = offset + 2;
-    let mut swap_out_proofs = vector[];
-    let mut i = 0;
-    while (i < swap_out_count) {
-        // user_readable_card: 96 bytes
-        let user_readable_card = read_bytes(data, offset, CIPHERTEXT_SIZE);
-        offset = offset + CIPHERTEXT_SIZE;
-        // swap_out_card: 96 bytes
-        let swap_out_card = read_bytes(data, offset, CIPHERTEXT_SIZE);
-        offset = offset + CIPHERTEXT_SIZE;
-        // chaum_pedersen: commitment_a(48) + commitment_b(48) + response(32)
-        let cp_commitment_a = read_g1_point(data, offset);
-        offset = offset + G1_POINT_SIZE;
-        let cp_commitment_b = read_g1_point(data, offset);
-        offset = offset + G1_POINT_SIZE;
-        let cp_response = read_scalar(data, offset);
-        offset = offset + SCALAR_SIZE;
-        let cp_proof = texas_poker::chaum_pedersen::new(cp_commitment_a, cp_commitment_b, cp_response);
-        swap_out_proofs.push_back(
-            texas_poker::reconstruct_proof::new_swap_out_card_proof(user_readable_card, swap_out_card, cp_proof)
+    if (card_indices.length() > 0) {
+        table_events::emit_community_card_revealed(
+            object::id(table),
+            table.reveal_token_state.reveal_phase,
+            card_indices,
+            card_ranks,
+            card_suits,
         );
+    };
+}
+
+/// 将 decrypted_cards 中完全解密的手牌写入对应 seat.hand（showdown 阶段使用）
+fun write_decrypted_cards_to_hands(table: &mut Table) {
+    let mut i = 0;
+    while (i < table.deck_state.decrypted_cards.length()) {
+        let dc = &table.deck_state.decrypted_cards[i];
+        // 只处理完全解密的手牌（有 plaintext_bytes 且 owner_seat_index 有效）
+        if (dc.plaintext_bytes.length() > 0 && dc.owner_seat_index != 0xFFFFFFFFFFFFFFFF) {
+            let seat_idx = dc.owner_seat_index;
+            if (seat_idx < table.seats.length()) {
+                let playing_card = plaintext_to_playing_card(&table.deck_state.plaintext, &dc.plaintext_bytes);
+                let card = card::new(card_suit(&playing_card), card_rank(&playing_card));
+                table.seats[seat_idx].hand.push_back(card);
+            };
+        };
         i = i + 1;
     };
-    let sum_c1_r_commit = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let sum_c2_r_commit = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let swap_sum_c1_commit = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let swap_sum_c2_commit = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let nonce = read_scalar(data, offset);
-    offset = offset + SCALAR_SIZE;
-    // blind_dleq_proof: commitment(48) + response(32) + nonce(32)
-    let blind_commitment = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let blind_response = read_scalar(data, offset);
-    offset = offset + SCALAR_SIZE;
-    let blind_nonce = read_scalar(data, offset);
-    offset = offset + SCALAR_SIZE;
-    let blind_dleq_proof = texas_poker::reconstruct_proof::new_reconstruction_dleq_proof(
-        blind_commitment, blind_response, blind_nonce
-    );
-    // total_dleq_proof: commitment_a(48) + commitment_b(48) + response(32)
-    let total_commitment_a = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let total_commitment_b = read_g1_point(data, offset);
-    offset = offset + G1_POINT_SIZE;
-    let total_response = read_scalar(data, offset);
-    offset = offset + SCALAR_SIZE;
-    let total_dleq_proof = texas_poker::chaum_pedersen::new(total_commitment_a, total_commitment_b, total_response);
-    // schnorr proofs
-    let (swap_combined_schnorr_proof, offset) = deserialize_schnorr_proof(data, offset);
-    let (sum_swap_out_c1_schnorr_proof, offset) = deserialize_schnorr_proof(data, offset);
-    let (sum_swap_out_c2_schnorr_proof, _offset) = deserialize_schnorr_proof(data, offset);
-    texas_poker::reconstruct_proof::new(
-        swap_out_proofs,
-        sum_c1_r_commit,
-        sum_c2_r_commit,
-        swap_sum_c1_commit,
-        swap_sum_c2_commit,
-        nonce,
-        blind_dleq_proof,
-        total_dleq_proof,
-        swap_combined_schnorr_proof,
-        sum_swap_out_c1_schnorr_proof,
-        sum_swap_out_c2_schnorr_proof,
-    )
 }
 
 // ========== 结算相关 ==========
 
-fun distribute_pot(table: &mut Table, pot_amount: u64, folded: &vector<bool>) {
-    if (pot_amount == 0) { return };
+fun distribute_pot(table: &mut Table, pot_amount: u64, folded: &vector<bool>): vector<u64> {
+    if (pot_amount == 0) { return vector[] };
 
     let (winners, _best_rank) = find_winners(&table.seats, &table.community_cards, folded);
 
@@ -1900,13 +2414,23 @@ fun distribute_pot(table: &mut Table, pot_amount: u64, folded: &vector<bool>) {
         let mut w = 0;
         while (w < winner_count) {
             let idx = winners[w];
-            table.seats[idx].stack = table.seats[idx].stack + share + if (w == 0) { remainder } else { 0 };
+            let amount = share + if (w == 0) { remainder } else { 0 };
+            table.seats[idx].stack = table.seats[idx].stack + amount;
+            table_events::emit_winner_awarded(
+                object::id(table),
+                idx,
+                table.seats[idx].player,
+                amount,
+                0,
+                option::none(),
+            );
             w = w + 1;
         };
     };
+    winners
 }
 
-fun distribute_side_pot(table: &mut Table, sp: &SidePot, folded: &vector<bool>) {
+fun distribute_side_pot(table: &mut Table, sp: &SidePot, folded: &vector<bool>): vector<u64> {
     let eligible = sp.eligible_seats();
     let pot_amount = sp.amount();
 
@@ -1921,10 +2445,20 @@ fun distribute_side_pot(table: &mut Table, sp: &SidePot, folded: &vector<bool>) 
         let mut w = 0;
         while (w < winner_count) {
             let idx = winners[w];
-            table.seats[idx].stack = table.seats[idx].stack + share + if (w == 0) { remainder } else { 0 };
+            let amount = share + if (w == 0) { remainder } else { 0 };
+            table.seats[idx].stack = table.seats[idx].stack + amount;
+            table_events::emit_winner_awarded(
+                object::id(table),
+                idx,
+                table.seats[idx].player,
+                amount,
+                1,
+                option::none(),
+            );
             w = w + 1;
         };
     };
+    winners
 }
 
 fun find_winners(
@@ -1938,7 +2472,7 @@ fun find_winners(
     let mut i = 0;
     while (i < seats.length()) {
         let seat = &seats[i];
-        if (seat.occupied && !folded[i] && seat.hand.length() == CARDS_PER_PLAYER) {
+        if (seat.occupied && !folded[i] && seat.hand.length() == table_constants::cards_per_player()) {
             let all_cards = combine_cards(&seat.hand, community_cards);
             if (all_cards.length() >= 5) {
                 let rank = hand_evaluator::best_hand(&all_cards);
@@ -1974,7 +2508,7 @@ fun find_winners_in_eligible(
     while (i < eligible.length()) {
         let idx = eligible[i];
         let seat = &seats[idx];
-        if (seat.occupied && !folded[idx] && seat.hand.length() == CARDS_PER_PLAYER) {
+        if (seat.occupied && !folded[idx] && seat.hand.length() == table_constants::cards_per_player()) {
             let all_cards = combine_cards(&seat.hand, community_cards);
             if (all_cards.length() >= 5) {
                 let rank = hand_evaluator::best_hand(&all_cards);
@@ -2012,46 +2546,24 @@ fun combine_cards(hand: &vector<Card>, community: &vector<Card>): vector<Card> {
     all
 }
 
-fun extract_bets(seats: &vector<Seat>): vector<u64> {
+// 优化: 合并三个 extract 函数为单次遍历
+fun extract_betting_state(seats: &vector<Seat>): (vector<u64>, vector<bool>, vector<bool>) {
     let mut bets = vector[];
-    let mut i = 0;
-    while (i < seats.length()) {
-        if (seats[i].occupied) {
-            bets.push_back(seats[i].total_bet);
-        } else {
-            bets.push_back(0);
-        };
-        i = i + 1;
-    };
-    bets
-}
-
-fun extract_folded(seats: &vector<Seat>): vector<bool> {
     let mut folded = vector[];
-    let mut i = 0;
-    while (i < seats.length()) {
-        if (seats[i].occupied) {
-            folded.push_back(seats[i].folded);
-        } else {
-            folded.push_back(true);
-        };
-        i = i + 1;
-    };
-    folded
-}
-
-fun extract_all_in(seats: &vector<Seat>): vector<bool> {
     let mut all_in_flags = vector[];
     let mut i = 0;
     while (i < seats.length()) {
-        if (seats[i].occupied) {
-            all_in_flags.push_back(seats[i].all_in);
-        } else {
-            all_in_flags.push_back(false);
-        };
+        let seat = &seats[i];
+        // bets: occupied 或 left_during_hand 都返回 total_bet
+        let bet = if (seat.occupied || seat.left_during_hand) { seat.total_bet } else { 0 };
+        bets.push_back(bet);
+        // folded: 未占座（包括中途离开）都视为 folded
+        folded.push_back(!seat.occupied || seat.folded);
+        // all_in: 只有 occupied 的座位才可能 all_in
+        all_in_flags.push_back(seat.occupied && seat.all_in);
         i = i + 1;
     };
-    all_in_flags
+    (bets, folded, all_in_flags)
 }
 
 fun find_next_active_seat(seats: &vector<Seat>, from: u64, max: u64): u64 {
@@ -2060,7 +2572,8 @@ fun find_next_active_seat(seats: &vector<Seat>, from: u64, max: u64): u64 {
     while (count < max) {
         if (i >= max) { i = 0 };
         let seat = &seats[i];
-        if (seat.occupied && !seat.folded && !seat.all_in) {
+        // 必须排除 is_waiting 玩家，他们不参与本局
+        if (seat.occupied && !seat.folded && !seat.all_in && !seat.is_waiting) {
             return i
         };
         i = i + 1;
@@ -2069,35 +2582,12 @@ fun find_next_active_seat(seats: &vector<Seat>, from: u64, max: u64): u64 {
     from
 }
 
-fun reset_hand_state(table: &mut Table) {
-    table.pot = 0;
-    table.side_pots = vector[];
-    table.community_cards = vector[];
-    table.betting_round = option::none();
-    table.current_turn = option::none();
-    table.deck_encrypted = vector[];
-    table.shuffle_state = empty_shuffle_state();
-    table.reveal_token_state = empty_reveal_token_state();
-    table.reconstruct_state = empty_reconstruct_state();
-
-    let mut i = 0;
-    while (i < table.seats.length()) {
-        let seat = &mut table.seats[i];
-        seat.hand = vector[];
-        seat.bet = 0;
-        seat.total_bet = 0;
-        seat.folded = false;
-        seat.all_in = false;
-        seat.acted_this_round = false;
-        i = i + 1;
-    };
-}
 
 fun reset_other_players_acted(seats: &mut vector<Seat>, raiser_index: u64) {
     let mut i = 0;
     while (i < seats.length()) {
         // 只重置未 fold 且未 all_in 的玩家
-        if (i != raiser_index && seats[i].occupied && !seats[i].folded && !seats[i].all_in) {
+        if (i != raiser_index && seats[i].occupied && !seats[i].folded && !seats[i].all_in && !seats[i].is_waiting) {
             seats[i].acted_this_round = false;
         };
         i = i + 1;
@@ -2113,7 +2603,7 @@ fun do_fold(table: &mut Table, seat_index: u64) {
 
     seat.folded = true;
     seat.acted_this_round = true;
-    table.betting_started_at = 0;  // reset for next player
+    table.timestamps.betting_started_at = 0;  // reset for next player
 
     if (table.betting_round.is_some()) {
         table.betting_round.borrow_mut().process_fold();
@@ -2138,6 +2628,12 @@ fun reset_for_next_hand(table: &mut Table) {
         seat.folded = false;
         seat.all_in = false;
         seat.acted_this_round = false;
+        if (seat.is_waiting){
+            let new_aggregated_pk = table_serialization::add_pk_to_aggregated(&table.deck_state.aggregated_pk, &seat.pk);
+            table.deck_state.aggregated_pk = new_aggregated_pk;  
+        };
+        seat.is_waiting = false;
+        seat.left_during_hand = false;
         i = i + 1;
     };
     table.pot = 0;
@@ -2145,71 +2641,67 @@ fun reset_for_next_hand(table: &mut Table) {
     table.community_cards = vector[];
     table.betting_round = option::none();
     table.current_turn = option::none();
-    table.round_state = ROUND_WAITING;
-    table.deck_encrypted = vector[];
+    table.round_state = table_constants::round_waiting();
+    table.deck_state.encrypted = vector[];
+    table.deck_state.cards_dealt = 0;
+    table.deck_state.decrypted_cards = vector[];
     table.shuffle_state = empty_shuffle_state();
     table.reveal_token_state = empty_reveal_token_state();
     table.reconstruct_state = empty_reconstruct_state();
-    table.ready_at = 0;
-    table.shuffle_started_at = 0;
-    table.reveal_started_at = 0;
-    table.betting_started_at = 0;
-    table.reconstruct_started_at = 0;
-    table.showdown_at = 0;
-    table.hand_complete_at = 0;
-}
-
-fun cleanup_hand(table: &mut Table) {
-    // Remove busted players (stack == 0)
-    let mut i = 0;
-    while (i < table.seats.length()) {
-        if (table.seats[i].occupied && table.seats[i].stack == 0) {
-            // Reset seat (player is busted)
-            table.seats[i].occupied = false;
-            table.seats[i].player = @0x0;
-            table.seats[i].stack = 0;
-            table.seats[i].hand = vector[];
-            table.seats[i].bet = 0;
-            table.seats[i].total_bet = 0;
-            table.seats[i].folded = false;
-            table.seats[i].all_in = false;
-            table.seats[i].acted_this_round = false;
-            table.seats[i].pk = vector[];
-            table.active_count = table.active_count - 1;
-        };
-        i = i + 1;
+    table.timestamps = Timestamps {
+        ready_at: 0,
+        shuffle_started_at: 0,
+        reveal_started_at: 0,
+        betting_started_at: 0,
+        reconstruct_started_at: 0,
+        showdown_at: 0,
+        hand_complete_at: 0,
     };
-
-    reset_for_next_hand(table);
-    event::emit(HandCleanedUp { table_id: object::id(table) });
+    // 设置为 WAITING 允许玩家在下一手开始前通过 join_and_shuffle 预洗牌
+    table.shuffle_state.phase = table_constants::shuffle_phase_waiting();
 }
 
-fun kick_player_internal(table: &mut Table, seat_index: u64) {
+
+
+fun kick_player_internal(table: &mut Table, seat_index: u64, reason: u8) {
     let seat = &mut table.seats[seat_index];
     assert!(seat.occupied, ESeatEmpty);
 
     let pk = seat.pk;
+    let player = seat.player;
+    // 只退 stack, total_bet 不退
+    let refund_amount = seat.stack;
+    // 只加当前轮未收取的下注到 pot（前几轮已通过 collect_bets_to_pot 收取）
+    table.pot = table.pot + seat.bet;
+    // waiting 玩家的 pk 未加入 aggregated_pk，踢出时不应移除
+    let was_waiting = seat.is_waiting;
     let is_current_shuffler = table.shuffle_state.current_shuffler.is_some() &&
         *table.shuffle_state.current_shuffler.borrow() == seat_index;
     let is_current_turn = table.current_turn.is_some() &&
         *table.current_turn.borrow() == seat_index;
 
-    // Mark seat as empty
+    // Mark seat as empty, but keep total_bet and player for side pot / refund
     seat.occupied = false;
-    seat.player = @0x0;
+    // 不清除 seat.player，保留供 refund_all_bets 退款
     seat.stack = 0;
     seat.hand = vector[];
     seat.bet = 0;
-    seat.total_bet = 0;
-    seat.folded = false;
+    // total_bet 保留不清零，供 settle_hand 的 side pot 计算
+    seat.left_during_hand = true;
+    seat.folded = true;  // 标记为 folded，不能赢
     seat.all_in = false;
     seat.acted_this_round = false;
+    seat.is_waiting = false;  // 必须重置，避免 reset_for_next_hand 用空 pk 调用 add_pk_to_aggregated
     seat.pk = vector[];
-    table.active_count = table.active_count - 1;
 
-    // Update aggregated PK
-    if (pk.length() > 0) {
-        table.aggregated_pk = remove_pk_from_aggregated(&table.aggregated_pk, &pk);
+    // Update aggregated PK: 仅当玩家非 waiting 时才移除（waiting 玩家 pk 未加入过）
+    if (pk.length() > 0 && !was_waiting) {
+        table.deck_state.aggregated_pk = table_serialization::remove_pk_from_aggregated(&table.deck_state.aggregated_pk, &pk);
+    };
+
+    // 发退款事件，链下处理实际退款
+    if (refund_amount > 0) {
+        table_events::emit_player_refund(object::id(table), seat_index, player, refund_amount, table_events::refund_type_stack_only());
     };
 
     // Remove from shuffle state
@@ -2225,8 +2717,6 @@ fun kick_player_internal(table: &mut Table, seat_index: u64) {
 
     // Remove from reconstruct state
     remove_from_pending(&mut table.reconstruct_state.pending_players, seat_index);
-    remove_from_pending(&mut table.reconstruct_state.voted_players, seat_index);
-    remove_from_pending(&mut table.reconstruct_state.completed_players, seat_index);
 
     // If kicked player was current shuffler, advance
     if (is_current_shuffler) {
@@ -2242,24 +2732,28 @@ fun kick_player_internal(table: &mut Table, seat_index: u64) {
         } else {
             let next = find_next_active_seat(&table.seats, seat_index, table.max_players);
             table.current_turn = option::some(next);
-            table.betting_started_at = 0;
+            table.timestamps.betting_started_at = 0;
         };
     };
+    table_events::emit_player_kicked(object::id(table), seat_index, player, reason);
 
     // Check if enough players remain
-    if (count_active_occupied(&table.seats) < MIN_PLAYERS_TO_START) {
+    if (count_active_occupied(&table.seats) < table_constants::min_players_to_start()) {
         reset_for_next_hand(table);
     };
-
-    event::emit(PlayerKicked { table_id: object::id(table), seat_index });
 }
 
 // ========== 访问器 ==========
+public fun table_id(table: &Table): ID { object::id(table) }
+public fun name(table: &Table): &String { &table.name }
+public fun max_players(table: &Table): u64 { table.max_players }
 public fun round_state(table: &Table): u8 { table.round_state }
 public fun pot(table: &Table): u64 { table.pot }
+public fun side_pots_count(table: &Table): u64 { table.side_pots.length() }
 public fun community_cards(table: &Table): &vector<Card> { &table.community_cards }
+public fun community_cards_count(table: &Table): u64 { table.community_cards.length() }
 public fun current_turn(table: &Table): Option<u64> { table.current_turn }
-public fun active_count(table: &Table): u64 { table.active_count }
+public fun active_count(table: &Table): u64 { count_active_occupied(&table.seats) }
 public fun button(table: &Table): u64 { table.button }
 public fun small_blind(table: &Table): u64 { table.small_blind }
 public fun big_blind(table: &Table): u64 { table.big_blind }
@@ -2267,42 +2761,66 @@ public fun big_blind(table: &Table): u64 { table.big_blind }
 public fun seat_player(table: &Table, index: u64): address { table.seats[index].player }
 public fun seat_stack(table: &Table, index: u64): u64 { table.seats[index].stack }
 public fun seat_bet(table: &Table, index: u64): u64 { table.seats[index].bet }
+public fun seat_total_bet(table: &Table, index: u64): u64 { table.seats[index].total_bet }
 public fun seat_folded(table: &Table, index: u64): bool { table.seats[index].folded }
+public fun seat_all_in(table: &Table, index: u64): bool { table.seats[index].all_in }
 public fun seat_hand(table: &Table, index: u64): &vector<Card> { &table.seats[index].hand }
 public fun seat_occupied(table: &Table, index: u64): bool { table.seats[index].occupied }
 public fun seat_pk(table: &Table, index: u64): &vector<u8> { &table.seats[index].pk }
 
-public fun deck_encrypted(table: &Table): &vector<ElGamalCiphertext> { &table.deck_encrypted }
-public fun aggregated_pk(table: &Table): &vector<u8> { &table.aggregated_pk }
+public fun deck_encrypted(table: &Table): &vector<ElGamalCiphertext> { &table.deck_state.encrypted }
+public fun deck_size(table: &Table): u64 { table.deck_state.encrypted.length() }
+public fun aggregated_pk(table: &Table): &vector<u8> { &table.deck_state.aggregated_pk }
+public fun deck_plaintext(table: &Table): &vector<vector<u8>> { &table.deck_state.plaintext }
 
 public fun shuffle_current_shuffler(table: &Table): Option<u64> { table.shuffle_state.current_shuffler }
 public fun shuffle_pending_players(table: &Table): &vector<u64> { &table.shuffle_state.pending_players }
 public fun shuffle_completed_players(table: &Table): &vector<u64> { &table.shuffle_state.completed_players }
+public fun shuffle_pending_count(table: &Table): u64 { table.shuffle_state.pending_players.length() }
+public fun shuffle_completed_count(table: &Table): u64 { table.shuffle_state.completed_players.length() }
 
 public fun reveal_phase(table: &Table): u8 { table.reveal_token_state.reveal_phase }
 public fun reveal_assignments(table: &Table): &vector<RevealAssignment> { &table.reveal_token_state.assignments }
+public fun reveal_assignment_count(table: &Table): u64 { table.reveal_token_state.assignments.length() }
 
 public fun reconstruct_phase(table: &Table): u8 { table.reconstruct_state.phase }
-public fun reconstruct_votes(table: &Table): (u64, u64) {
-    (table.reconstruct_state.votes_yes, table.reconstruct_state.votes_no)
+
+
+// ========== BettingRound 访问器 ==========
+public fun betting_round_exists(table: &Table): bool { table.betting_round.is_some() }
+public fun betting_round_current_bet(table: &Table): u64 {
+    if (table.betting_round.is_some()) { table.betting_round.borrow().current_bet() } else { 0 }
+}
+public fun betting_round_min_raise(table: &Table): u64 {
+    if (table.betting_round.is_some()) { table.betting_round.borrow().min_raise() } else { 0 }
+}
+public fun betting_round_big_blind(table: &Table): u64 {
+    if (table.betting_round.is_some()) { table.betting_round.borrow().big_blind() } else { 0 }
+}
+public fun betting_round_last_raiser_seat(table: &Table): Option<u64> {
+    if (table.betting_round.is_some()) { table.betting_round.borrow().last_raiser_seat() } else { option::none() }
+}
+public fun betting_round_actions_taken(table: &Table): u64 {
+    if (table.betting_round.is_some()) { table.betting_round.borrow().actions_taken() } else { 0 }
 }
 
 // ========== 超时配置访问器 ==========
-public fun shuffle_timeout_ms(table: &Table): u64 { table.shuffle_timeout_ms }
-public fun reveal_timeout_ms(table: &Table): u64 { table.reveal_timeout_ms }
-public fun betting_timeout_ms(table: &Table): u64 { table.betting_timeout_ms }
-public fun reconstruct_timeout_ms(table: &Table): u64 { table.reconstruct_timeout_ms }
-public fun ready_at(table: &Table): u64 { table.ready_at }
-public fun shuffle_started_at(table: &Table): u64 { table.shuffle_started_at }
-public fun reveal_started_at(table: &Table): u64 { table.reveal_started_at }
-public fun betting_started_at(table: &Table): u64 { table.betting_started_at }
-public fun reconstruct_started_at(table: &Table): u64 { table.reconstruct_started_at }
-public fun showdown_at(table: &Table): u64 { table.showdown_at }
-public fun hand_complete_at(table: &Table): u64 { table.hand_complete_at }
+public fun shuffle_timeout_ms(table: &Table): u64 { table.timeout_config.shuffle_timeout_ms }
+public fun reveal_timeout_ms(table: &Table): u64 { table.timeout_config.reveal_timeout_ms }
+public fun betting_timeout_ms(table: &Table): u64 { table.timeout_config.betting_timeout_ms }
+public fun reconstruct_timeout_ms(table: &Table): u64 { table.timeout_config.reconstruct_timeout_ms }
+public fun ready_at(table: &Table): u64 { table.timestamps.ready_at }
+public fun shuffle_started_at(table: &Table): u64 { table.timestamps.shuffle_started_at }
+public fun reveal_started_at(table: &Table): u64 { table.timestamps.reveal_started_at }
+public fun betting_started_at(table: &Table): u64 { table.timestamps.betting_started_at }
+public fun reconstruct_started_at(table: &Table): u64 { table.timestamps.reconstruct_started_at }
+public fun showdown_at(table: &Table): u64 { table.timestamps.showdown_at }
+public fun hand_complete_at(table: &Table): u64 { table.timestamps.hand_complete_at }
 
 // ========== 超时配置设置 ==========
-public entry fun set_timeout_config(
+public  fun set_timeout_config(
     table: &mut Table,
+    _admin_cap: &AdminCap,
     shuffle_timeout_ms: u64,
     reveal_timeout_ms: u64,
     betting_timeout_ms: u64,
@@ -2310,33 +2828,23 @@ public entry fun set_timeout_config(
     showdown_display_ms: u64,
     hand_complete_wait_ms: u64,
     ready_wait_ms: u64,
-    ctx: &TxContext,
 ) {
-    assert!(ctx.sender() == table.admin, ENotAdmin);
-    table.shuffle_timeout_ms = shuffle_timeout_ms;
-    table.reveal_timeout_ms = reveal_timeout_ms;
-    table.betting_timeout_ms = betting_timeout_ms;
-    table.reconstruct_timeout_ms = reconstruct_timeout_ms;
-    table.showdown_display_ms = showdown_display_ms;
-    table.hand_complete_wait_ms = hand_complete_wait_ms;
-    table.ready_wait_ms = ready_wait_ms;
+    table.timeout_config.shuffle_timeout_ms = shuffle_timeout_ms;
+    table.timeout_config.reveal_timeout_ms = reveal_timeout_ms;
+    table.timeout_config.betting_timeout_ms = betting_timeout_ms;
+    table.timeout_config.reconstruct_timeout_ms = reconstruct_timeout_ms;
+    table.timeout_config.showdown_display_ms = showdown_display_ms;
+    table.timeout_config.hand_complete_wait_ms = hand_complete_wait_ms;
+    table.timeout_config.ready_wait_ms = ready_wait_ms;
 }
 
 // ========== 阶段常量 ==========
-public fun round_waiting(): u8 { ROUND_WAITING }
-public fun round_shuffling(): u8 { ROUND_SHUFFLING }
-public fun round_preflop(): u8 { ROUND_PREFLOP }
-public fun round_flop(): u8 { ROUND_FLOP }
-public fun round_turn(): u8 { ROUND_TURN }
-public fun round_river(): u8 { ROUND_RIVER }
-public fun round_showdown(): u8 { ROUND_SHOWDOWN }
-public fun round_hand_complete(): u8 { ROUND_HAND_COMPLETE }
-public fun round_shuffle_complete(): u8 { ROUND_SHUFFLE_COMPLETE }
-public fun round_preflop_reveal(): u8 { ROUND_PREFLOP_REVEAL }
-public fun round_flop_reveal(): u8 { ROUND_FLOP_REVEAL }
-public fun round_turn_reveal(): u8 { ROUND_TURN_REVEAL }
-public fun round_river_reveal(): u8 { ROUND_RIVER_REVEAL }
-public fun round_showdown_reveal(): u8 { ROUND_SHOWDOWN_REVEAL }
+public fun round_waiting(): u8 { table_constants::round_waiting() }
+public fun round_preflop(): u8 { table_constants::round_preflop() }
+public fun round_flop(): u8 { table_constants::round_flop() }
+public fun round_turn(): u8 { table_constants::round_turn() }
+public fun round_river(): u8 { table_constants::round_river() }
+public fun round_showdown(): u8 { table_constants::round_showdown() }
 
 // ========== 测试辅助 ==========
 #[test_only]
@@ -2347,7 +2855,7 @@ public fun create_table_for_test(
     max_players: u64,
     ctx: &mut TxContext,
 ): Table {
-    assert!(max_players <= MAX_PLAYERS, ETableFull);
+    assert!(max_players <= table_constants::max_players(), ETableFull);
     let mut seats = vector[];
     let mut i = 0;
     while (i < max_players) {
@@ -2358,38 +2866,45 @@ public fun create_table_for_test(
     Table {
         id,
         name,
-        admin: ctx.sender(),
         max_players,
         small_blind,
         big_blind,
         seats,
-        active_count: 0,
         button: 0,
         pot: 0,
         side_pots: vector[],
         community_cards: vector[],
-        round_state: ROUND_WAITING,
+        round_state: table_constants::round_waiting(),
         betting_round: option::none(),
         current_turn: option::none(),
-        deck_encrypted: vector[],
-        aggregated_pk: vector[],
+        deck_state: DeckState {
+            encrypted: vector[],
+            aggregated_pk: vector[],
+            plaintext: table_serialization::generate_plaintext_bytes(),
+            cards_dealt: 0,
+            decrypted_cards: vector[],
+        },
         shuffle_state: empty_shuffle_state(),
         reveal_token_state: empty_reveal_token_state(),
         reconstruct_state: empty_reconstruct_state(),
-        shuffle_timeout_ms: 10000,
-        reveal_timeout_ms: 10000,
-        betting_timeout_ms: 30000,
-        reconstruct_timeout_ms: 10000,
-        showdown_display_ms: 3000,
-        hand_complete_wait_ms: 5000,
-        ready_wait_ms: 5000,
-        ready_at: 0,
-        shuffle_started_at: 0,
-        reveal_started_at: 0,
-        betting_started_at: 0,
-        reconstruct_started_at: 0,
-        showdown_at: 0,
-        hand_complete_at: 0,
+        timeout_config: TimeoutConfig {
+            shuffle_timeout_ms: 10000,
+            reveal_timeout_ms: 10000,
+            betting_timeout_ms: 30000,
+            reconstruct_timeout_ms: 10000,
+            showdown_display_ms: 3000,
+            hand_complete_wait_ms: 5000,
+            ready_wait_ms: 5000,
+        },
+        timestamps: Timestamps {
+            ready_at: 0,
+            shuffle_started_at: 0,
+            reveal_started_at: 0,
+            betting_started_at: 0,
+            reconstruct_started_at: 0,
+            showdown_at: 0,
+            hand_complete_at: 0,
+        },
     }
 }
 
@@ -2399,20 +2914,140 @@ public fun join_table_for_test(table: &mut Table, seat_index: u64, player: addre
     assert!(buy_in > 0, EInvalidBetAmount);
     assert!(!table.seats[seat_index].occupied, ESeatOccupied);
     assert!(!is_player_seated(&table.seats, player), EPlayerAlreadySeated);
-    init_seat(&mut table.seats[seat_index], player, buy_in, vector[]);
-    table.active_count = table.active_count + 1;
+    init_seat(&mut table.seats[seat_index], player, buy_in, vector[], false);
 }
 
 #[test_only]
 public fun destroy_table(table: Table) {
-    let Table { id, seats: _, name: _, admin: _, max_players: _, small_blind: _, big_blind: _,
-        active_count: _, button: _, pot: _, side_pots: _, community_cards: _,
+    let Table { id, seats: _, name: _, max_players: _, small_blind: _, big_blind: _,
+        button: _, pot: _, side_pots: _, community_cards: _,
         round_state: _, betting_round: _, current_turn: _,
-        deck_encrypted: _, aggregated_pk: _,
-        shuffle_state: _, reveal_token_state: _, reconstruct_state: _,
-        shuffle_timeout_ms: _, reveal_timeout_ms: _, betting_timeout_ms: _,
-        reconstruct_timeout_ms: _, showdown_display_ms: _, hand_complete_wait_ms: _,
-        ready_wait_ms: _, ready_at: _, shuffle_started_at: _, reveal_started_at: _,
-        betting_started_at: _, reconstruct_started_at: _, showdown_at: _, hand_complete_at: _ } = table;
+        deck_state: _, shuffle_state: _, reveal_token_state: _, reconstruct_state: _,
+        timeout_config: _, timestamps: _ } = table;
     id.delete();
+}
+
+// ========== 测试辅助: 绕过 ZK 验证的状态推进 ==========
+
+/// 绕过 ZK 验证，直接完成所有玩家的洗牌并推进
+#[test_only]
+public fun advance_shuffle_for_test(table: &mut Table, _ctx: &mut TxContext) {
+    // 生成 mock 加密牌组（52 张 placeholder）
+    if (table.deck_state.encrypted.length() == 0) {
+        let mut mock_deck = vector[];
+        let mut i = 0;
+        while (i < table_constants::n_cards()) {
+            mock_deck.push_back(bls_elgamal::new_placeholder_card());
+            i = i + 1;
+        };
+        table.deck_state.encrypted = mock_deck;
+        // 设置 mock 聚合公钥
+        if (table.deck_state.aggregated_pk.length() == 0) {
+            let g = bls12381::g1_generator();
+            table.deck_state.aggregated_pk = bls_scalar::g1_to_bytes(&g);
+        };
+    };
+
+    // 标记所有 pending 玩家为已完成
+    let pending = &mut table.shuffle_state.pending_players;
+    while (pending.length() > 0) {
+        let p = pending.remove(0);
+        table.shuffle_state.completed_players.push_back(p);
+    };
+    table.shuffle_state.current_shuffler = option::none();
+
+    // 推进洗牌
+    advance_shuffle(table);
+}
+
+/// 绕过 ZK 验证，直接完成当前 reveal 阶段
+#[test_only]
+public fun complete_reveal_phase_for_test(table: &mut Table) {
+    let phase = table.reveal_token_state.reveal_phase;
+    let plaintext_len = table.deck_state.plaintext.length();
+
+    // 标记所有 assignment 为已解密
+    let mut i = 0;
+    while (i < table.reveal_token_state.assignments.length()) {
+        let assignment = &mut table.reveal_token_state.assignments[i];
+        if (!assignment.decrypted) {
+            assignment.decrypted = true;
+            // 写入 mock 解密数据
+            let card_idx = assignment.encrypted_card_index;
+            let owner = if (phase == table_constants::reveal_phase_preflop()) {
+                (i / table_constants::cards_per_player()) as u64
+            } else if (phase == table_constants::reveal_phase_showdown()) {
+                if (assignment.pending_players.length() > 0) {
+                    *assignment.pending_players.borrow(0)
+                } else {
+                    0xFFFFFFFFFFFFFFFF
+                }
+            } else {
+                0xFFFFFFFFFFFFFFFF
+            };
+
+            // 获取明文（先读取再 push，避免借用冲突）
+            let plaintext = table.deck_state.plaintext[card_idx % plaintext_len];
+
+            table.deck_state.decrypted_cards.push_back(DecryptedCard {
+                encrypted_card_index: card_idx,
+                owner_seat_index: owner,
+                ciphertext_bytes: vector[],
+                plaintext_bytes: plaintext,
+            });
+        };
+        i = i + 1;
+    };
+
+    // 检查 reveal phase 完成并推进
+    check_reveal_phase_complete(table);
+}
+
+/// 设置玩家公钥（测试用）
+#[test_only]
+public fun set_player_pk_for_test(table: &mut Table, seat_index: u64, pk: vector<u8>) {
+    assert!(seat_index < table.seats.length(), EInvalidSeatIndex);
+    table.seats[seat_index].pk = pk;
+}
+
+/// 直接设置 round_state（测试用，仅用于验证状态机）
+#[test_only]
+public fun set_round_state_for_test(table: &mut Table, state: u8) {
+    table.round_state = state;
+}
+
+/// 获取 seat 的 left_during_hand 标志（测试用）
+#[test_only]
+public fun seat_left_during_hand(table: &Table, index: u64): bool {
+    table.seats[index].left_during_hand
+}
+
+/// 获取 seat 的 is_waiting 标志（测试用）
+#[test_only]
+public fun seat_is_waiting(table: &Table, index: u64): bool {
+    table.seats[index].is_waiting
+}
+
+/// 直接调用 reset_for_next_hand（测试用）
+#[test_only]
+public fun reset_for_next_hand_for_test(table: &mut Table) {
+    reset_for_next_hand(table);
+}
+
+/// 直接调用 kick_player_internal（测试用，绕过 AdminCap）
+#[test_only]
+public fun kick_player_for_test(table: &mut Table, seat_index: u64, reason: u8) {
+    kick_player_internal(table, seat_index, reason);
+}
+
+/// 直接设置 aggregated_pk（测试用，用于初始化场景）
+#[test_only]
+public fun set_aggregated_pk_for_test(table: &mut Table, pk: vector<u8>) {
+    table.deck_state.aggregated_pk = pk;
+}
+
+/// 直接设置 seat 的 is_waiting 标志（测试用，模拟中途加入）
+#[test_only]
+public fun set_is_waiting_for_test(table: &mut Table, seat_index: u64, is_waiting: bool) {
+    table.seats[seat_index].is_waiting = is_waiting;
 }

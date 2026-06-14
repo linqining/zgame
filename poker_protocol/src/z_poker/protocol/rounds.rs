@@ -4,6 +4,7 @@ use crate::crypto::{
 use crate::zk_shuffle::ShuffleProof;
 use crate::zk_shuffle::remask_proof::{RemaskProof, remask_ciphertext};
 use crate::zk_shuffle::leave_proof::{LeaveProof, leave_ciphertext};
+use crate::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 use crate::crypto::curve::CurveScalar;
 use crate::z_poker::key_manager::PKOwnershipProof;
 use rand_core::{OsRng, RngCore, CryptoRng};
@@ -19,7 +20,7 @@ impl ShuffleRound {
     pub fn execute(
         input_cards: &[ElGamalCiphertext],
         share_pk: &EcPoint,
-        transcript: &mut merlin::Transcript,
+        transcript: &mut impl CryptoTranscript,
         rng: &mut (impl RngCore + CryptoRng),
     ) -> Self {
         //todo 用户传入permute，核心是用户洗牌
@@ -53,7 +54,7 @@ impl ShuffleRound {
         }
     }
 
-    pub fn verify(&self, share_pk: &EcPoint, transcript: &mut merlin::Transcript) -> bool {
+    pub fn verify(&self, share_pk: &EcPoint, transcript: &mut impl CryptoTranscript) -> bool {
         self.proof.verify(&self.input_cards, &self.output_cards, share_pk, transcript).is_ok()
     }
 }
@@ -83,10 +84,8 @@ impl MaskAndShuffleRound {
         player_pk: &EcPoint,
         rng: &mut (impl RngCore + CryptoRng),
     ) -> Self {
-        use merlin::Transcript;
-
         // 创建共享 transcript，绑定 remask_proof 和 shuffle_proof
-        let mut transcript = Transcript::new(b"poker_protocol_mask_shuffle");
+        let mut transcript = MerlinTranscript::new(b"poker_protocol_mask_shuffle");
 
         let mut mask_cards: Vec<ElGamalCiphertext> = vec![];
         for i in 0..input_cards.len() {
@@ -119,15 +118,13 @@ impl LeaveGameRound {
         player_sk: &Scalar,
         player_pk: &EcPoint,
     ) -> Self {
-        use merlin::Transcript;
-
         let mut rng = OsRng;
         let output_cards: Vec<ElGamalCiphertext> = input_cards
             .iter()
             .map(|ct| leave_ciphertext(ct, player_sk, player_pk, &mut rng).unwrap())
             .collect();
 
-        let mut transcript = Transcript::new(b"poker_protocol_leave");
+        let mut transcript = MerlinTranscript::new(b"poker_protocol_leave");
         let leave_proof = LeaveProof::<DefaultCurve>::prove(input_cards, &output_cards, player_sk, player_pk, &mut transcript);
 
         Self {

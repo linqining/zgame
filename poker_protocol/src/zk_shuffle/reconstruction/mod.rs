@@ -4,11 +4,10 @@ mod swap_out;
 mod tests;
 
 use std::collections::HashMap;
-use merlin::Transcript;
+use crate::zk_shuffle::transcript_ext::CryptoTranscript;
 use rand_core::OsRng;
 use rayon::prelude::*;
 use crate::crypto::curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
-use crate::zk_shuffle::transcript_ext::TranscriptExtension;
 use crate::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof;
 pub use crate::zk_shuffle::error::VerificationError;
 pub use chaum_pedersen::ChaumPedersenDLEQProof;
@@ -141,9 +140,8 @@ impl<C: Curve> ReconstructProof<C> {
         user_sk: &C::Scalar,
         user_pk: &C::Point,
         s_vec: Vec<C::Scalar>,
-        mut transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> Result<Self, VerificationError>
-    where Transcript: TranscriptExtension<C>,
     {
         //reconstruct_deck 构造了cards + usercard长度的数组
         // 现在核心是证明output_cards 是 cards + share_pk 的线性组合
@@ -154,7 +152,7 @@ impl<C: Curve> ReconstructProof<C> {
         // This nonce ensures each proof is unique even with identical inputs
         let nonce = C::Scalar::random(&mut OsRng);
         // The nonce binds this proof to a unique instance
-        TranscriptExtension::<C>::append_scalar(transcript,b"reconstruct_proof_nonce", &nonce);
+        transcript.append_scalar::<C>(b"reconstruct_proof_nonce", &nonce);
 
         // 步骤一：证明swap_out_cards 是由user_readable_cards 一一 替换出来的
         let mut swap_out_cards_proofs: Vec<SwapOutCardProof<C>> = Vec::new();
@@ -164,11 +162,11 @@ impl<C: Curve> ReconstructProof<C> {
             swap_out_cards_proofs.push(swap_out_card_proof);
         }
         for card in &cards {
-            TranscriptExtension::<C>::append_point(transcript,b"reconstruct_proof_card", card);
+            transcript.append_point::<C>(b"reconstruct_proof_card", card);
         }
         for output_card in &output_cards {
-            TranscriptExtension::<C>::append_point(transcript,b"reconstruct_proof_output_card", &output_card.c1);
-            TranscriptExtension::<C>::append_point(transcript,b"reconstruct_proof_output_card", &output_card.c2);
+            transcript.append_point::<C>(b"reconstruct_proof_output_card", &output_card.c1);
+            transcript.append_point::<C>(b"reconstruct_proof_output_card", &output_card.c2);
         }
 
         // 步骤二：计算 sum(output_cards *ri) 作为commitment
@@ -311,12 +309,11 @@ impl<C: Curve> ReconstructProof<C> {
         swap_out_cards: &[ElGamalCiphertextGeneric<C>],
         user_readable_cards: &[ElGamalCiphertextGeneric<C>],
         user_pk: &C::Point,
-        transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> Result<(), VerificationError>
-    where Transcript: TranscriptExtension<C>,
     {
         // The nonce binds this proof to a unique instance
-        TranscriptExtension::<C>::append_scalar(transcript,b"reconstruct_proof_nonce", &self.nonce);
+        transcript.append_scalar::<C>(b"reconstruct_proof_nonce", &self.nonce);
         // 步骤一：验证 swap_out_cards_proofs - 每个 swap_out_card 都是由对应的 user_readable_card 替换出来的
         // SECURITY FIX (V3): 验证每个 swap_out_card_proof 中的 user_pk 与预期的 user_pk 一致
         // 防止攻击者使用不同的 user_pk 伪造 swap 证明
@@ -348,11 +345,11 @@ impl<C: Curve> ReconstructProof<C> {
             ).map_err(|_| VerificationError::InvalidProofAtPosition(i))?;
         }
         for card in cards {
-            TranscriptExtension::<C>::append_point(transcript,b"reconstruct_proof_card", card);
+            transcript.append_point::<C>(b"reconstruct_proof_card", card);
         }
         for output_card in output_cards {
-            TranscriptExtension::<C>::append_point(transcript,b"reconstruct_proof_output_card", &output_card.c1);
-            TranscriptExtension::<C>::append_point(transcript,b"reconstruct_proof_output_card", &output_card.c2);
+            transcript.append_point::<C>(b"reconstruct_proof_output_card", &output_card.c1);
+            transcript.append_point::<C>(b"reconstruct_proof_output_card", &output_card.c2);
         }
 
         // 步骤二：重新生成相同的随机 scalars（rho_i）用于验证

@@ -25,6 +25,7 @@ mod tests {
     use crate::crypto::{BASE_G, Scalar, EcPoint, ElGamalCiphertext, DefaultCurve, N_CARDS};
     use crate::zk_shuffle::reveal_token_proof::{RevealTokenAndProof, ExpelHandState};
     use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
+    use crate::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
     use crate::crypto::curve::{Curve, CurveScalar, CurvePoint};
     use rand_core::OsRng;
 
@@ -43,7 +44,7 @@ mod tests {
             let encrypted_card = ElGamalCiphertext::encrypt(&pt, agg_pk, &r);
 
             let reveal_token = encrypted_card.gen_reveal_token(&player.sk);
-            let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+            let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
             let proof = RevealTokenProof::<DefaultCurve>::prove(&player.sk, &player.pk, &encrypted_card, &reveal_token, &mut OsRng, &mut transcript);
 
             let token_and_proof = RevealTokenAndProof::<DefaultCurve> {
@@ -68,10 +69,10 @@ mod tests {
         let encrypted_card = ElGamalCiphertext::encrypt(&pt, &agg_pk, &r);
 
         let reveal_token = encrypted_card.gen_reveal_token(&player.sk);
-        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
         let proof = RevealTokenProof::<DefaultCurve>::prove(&player.sk, &player.pk, &encrypted_card, &reveal_token, &mut OsRng, &mut transcript);
 
-        let mut transcript = merlin::Transcript::new(b"reveal_token_proof_v3");
+        let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
         let verify_result = proof.verify(&encrypted_card, &reveal_token, &player.pk, &mut transcript);
         assert!(verify_result.is_ok(), "Proof should verify: {:?}", verify_result);
 
@@ -103,11 +104,11 @@ mod tests {
         let pk = *BASE_G * sk;
         let input = make_full_encrypted_cards(&pk);
 
-        let mut transcript = merlin::Transcript::new(b"test_shuffle_round");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle_round");
         let round = ShuffleRound::execute(&input, &pk, &mut transcript, &mut OsRng);
 
         // verify 应通过
-        let mut transcript = merlin::Transcript::new(b"test_shuffle_round");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle_round");
         assert!(round.verify(&pk, &mut transcript), "honest shuffle round should verify");
 
         // output 牌数应等于 input
@@ -126,12 +127,12 @@ mod tests {
         let pk = *BASE_G * sk;
         let input = make_full_encrypted_cards(&pk);
 
-        let mut transcript = merlin::Transcript::new(b"test_shuffle_round_wrong_pk");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle_round_wrong_pk");
         let round = ShuffleRound::execute(&input, &pk, &mut transcript, &mut OsRng);
 
         let wrong_sk = Scalar::random(&mut OsRng);
         let wrong_pk = *BASE_G * wrong_sk;
-        let mut transcript = merlin::Transcript::new(b"test_shuffle_round_wrong_pk");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle_round_wrong_pk");
         assert!(!round.verify(&wrong_pk, &mut transcript), "verify with wrong pk should fail");
     }
 
@@ -141,12 +142,12 @@ mod tests {
         let pk = *BASE_G * sk;
         let input = make_full_encrypted_cards(&pk);
 
-        let mut transcript = merlin::Transcript::new(b"test_shuffle_round_tampered");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle_round_tampered");
         let mut round = ShuffleRound::execute(&input, &pk, &mut transcript, &mut OsRng);
 
         // 篡改 output[0]
         round.output_cards[0] = round.output_cards[0].re_encrypt(&pk, &Scalar::random(&mut OsRng));
-        let mut transcript = merlin::Transcript::new(b"test_shuffle_round_tampered");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle_round_tampered");
         assert!(!round.verify(&pk, &mut transcript), "tampered output should fail verify");
     }
 
@@ -156,7 +157,7 @@ mod tests {
         let pk = *BASE_G * sk;
         let input = make_full_encrypted_cards(&pk);
 
-        let mut transcript = merlin::Transcript::new(b"test_shuffle_round_tampered_input");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle_round_tampered_input");
         let round = ShuffleRound::execute(&input, &pk, &mut transcript, &mut OsRng);
 
         // 篡改 input[1]
@@ -169,7 +170,7 @@ mod tests {
             output_cards: round.output_cards.clone(),
             proof: round.proof,
         };
-        let mut transcript = merlin::Transcript::new(b"test_shuffle_round_tampered_input");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle_round_tampered_input");
         assert!(!tampered_round.verify(&pk, &mut transcript), "tampered input should fail verify");
     }
 
@@ -180,9 +181,9 @@ mod tests {
         let pk = *BASE_G * sk;
         let input = make_full_encrypted_cards(&pk);
 
-        let mut transcript1 = merlin::Transcript::new(b"test_shuffle_round_det1");
+        let mut transcript1 = MerlinTranscript::new(b"test_shuffle_round_det1");
         let round1 = ShuffleRound::execute(&input, &pk, &mut transcript1, &mut OsRng);
-        let mut transcript2 = merlin::Transcript::new(b"test_shuffle_round_det2");
+        let mut transcript2 = MerlinTranscript::new(b"test_shuffle_round_det2");
         let round2 = ShuffleRound::execute(&input, &pk, &mut transcript2, &mut OsRng);
 
         // 两次 output 的 c1 不应完全相同（随机排列+随机重加密）
@@ -207,7 +208,7 @@ mod tests {
         // 2. 再验证 shuffle_proof（在 remask 数据之后继续吸收 shuffle 数据）
 
         // remask proof 应通过
-        let mut transcript = merlin::Transcript::new(b"poker_protocol_mask_shuffle");
+        let mut transcript = MerlinTranscript::new(b"poker_protocol_mask_shuffle");
         assert!(round.remask_proof.verify(&input, &round.mask_cards, &player_pk, &mut transcript),
             "remask proof should verify");
 

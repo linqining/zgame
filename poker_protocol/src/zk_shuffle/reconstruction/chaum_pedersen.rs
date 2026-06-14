@@ -1,7 +1,6 @@
-use merlin::Transcript;
+use crate::zk_shuffle::transcript_ext::CryptoTranscript;
 use rand_core::OsRng;
 use crate::crypto::curve::{Curve, CurvePoint, CurveScalar};
-use crate::zk_shuffle::transcript_ext::TranscriptExtension;
 pub use crate::zk_shuffle::error::VerificationError;
 
 /// Chaum-Pedersen DLEQ proof for proving that two points have the same discrete logarithm
@@ -32,9 +31,8 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
         s: C::Scalar,
         P1: C::Point,
         P2: C::Point,
-        transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> Result<Self, VerificationError>
-    where Transcript: TranscriptExtension<C>,
     {
         // SECURITY: Reject identity base points to prevent trivial attacks
         if G1.is_identity() || G2.is_identity() {
@@ -42,10 +40,10 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
         }
 
         // Append public values to transcript
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_g1", &G1);
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_g2", &G2);
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_p1", &P1);
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_p2", &P2);
+        transcript.append_point::<C>(b"chaum_g1", &G1);
+        transcript.append_point::<C>(b"chaum_g2", &G2);
+        transcript.append_point::<C>(b"chaum_p1", &P1);
+        transcript.append_point::<C>(b"chaum_p2", &P2);
 
         // Generate random nonce w
         let w = C::Scalar::random(&mut OsRng);
@@ -55,11 +53,11 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
         let commitment_b = G2 * w;
 
         // Append commitments to transcript
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_commitment_a", &commitment_a);
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_commitment_b", &commitment_b);
+        transcript.append_point::<C>(b"chaum_commitment_a", &commitment_a);
+        transcript.append_point::<C>(b"chaum_commitment_b", &commitment_b);
 
         // Get challenge scalar from transcript
-        let c = TranscriptExtension::<C>::challenge(transcript, b"chaum_challenge").scalar;
+        let c = transcript.challenge::<C>(b"chaum_challenge").scalar;
 
         // Compute response: s = w + c*x
         let response = w + s * c;
@@ -85,9 +83,8 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
         G2: C::Point,
         P1: C::Point,
         P2: C::Point,
-        transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> Result<(), VerificationError>
-    where Transcript: TranscriptExtension<C>,
     {
         // SECURITY: Reject identity base points to prevent trivial attacks
         if G1.is_identity() || G2.is_identity() {
@@ -95,17 +92,17 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
         }
 
         // Append public values to transcript
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_g1", &G1);
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_g2", &G2);
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_p1", &P1);
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_p2", &P2);
+        transcript.append_point::<C>(b"chaum_g1", &G1);
+        transcript.append_point::<C>(b"chaum_g2", &G2);
+        transcript.append_point::<C>(b"chaum_p1", &P1);
+        transcript.append_point::<C>(b"chaum_p2", &P2);
 
         // Append commitments to transcript
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_commitment_a", &self.commitment_a);
-        TranscriptExtension::<C>::append_point(transcript,b"chaum_commitment_b", &self.commitment_b);
+        transcript.append_point::<C>(b"chaum_commitment_a", &self.commitment_a);
+        transcript.append_point::<C>(b"chaum_commitment_b", &self.commitment_b);
 
         // Get challenge scalar from transcript
-        let c = TranscriptExtension::<C>::challenge(transcript, b"chaum_challenge").scalar;
+        let c = transcript.challenge::<C>(b"chaum_challenge").scalar;
 
         // Verify: s*G1 = A + c*P1
         let lhs1 = G1 * self.response;

@@ -1,8 +1,7 @@
 use crate::crypto::curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
 use rand_core::{CryptoRng, RngCore};
 use crate::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof;
-use merlin::Transcript;
-use crate::zk_shuffle::transcript_ext::TranscriptExtension;
+use crate::zk_shuffle::transcript_ext::CryptoTranscript;
 use crate::zk_shuffle::error::VerificationError;
 
 
@@ -26,17 +25,17 @@ pub struct ZKShuffleProof<C: Curve> {
     pub nonce: C::Scalar,
 }
 
-impl<C: Curve> ZKShuffleProof<C> where Transcript: TranscriptExtension<C> {
-    fn derive_batch_coefficients(input_cts: &[ElGamalCiphertextGeneric<C>], output_cts: &[ElGamalCiphertextGeneric<C>], transcript: &mut Transcript,) -> Vec<C::Scalar> {
+impl<C: Curve> ZKShuffleProof<C> {
+    fn derive_batch_coefficients(input_cts: &[ElGamalCiphertextGeneric<C>], output_cts: &[ElGamalCiphertextGeneric<C>], transcript: &mut impl CryptoTranscript,) -> Vec<C::Scalar> {
         let n = C::n_cards();
         for i in input_cts.iter().take(n) {
-            transcript.append_point(b"input c1", &i.c1);
-            transcript.append_point(b"input c2", &i.c2);
+            transcript.append_point::<C>(b"input c1", &i.c1);
+            transcript.append_point::<C>(b"input c2", &i.c2);
         }
 
         for i in output_cts.iter().take(n) {
-            transcript.append_point(b"output c1", &i.c1);
-            transcript.append_point(b"output c2", &i.c2);
+            transcript.append_point::<C>(b"output c1", &i.c1);
+            transcript.append_point::<C>(b"output c2", &i.c2);
         }
         let scalars: Vec<C::Scalar> = (0..n)
             .map(|_| {
@@ -55,7 +54,7 @@ impl<C: Curve> ZKShuffleProof<C> where Transcript: TranscriptExtension<C> {
         r_values: &[C::Scalar],
         pk: &C::Point,
         rng: &mut (impl RngCore + CryptoRng),
-        transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> Result<Self, VerificationError> {
         let n = C::n_cards();
         if input_cts.len() != n || output_cts.len() != n || permute.len() != n || r_values.len() != n {
@@ -63,7 +62,7 @@ impl<C: Curve> ZKShuffleProof<C> where Transcript: TranscriptExtension<C> {
         }
 
         let nonce = C::Scalar::random(rng);
-        transcript.append_scalar(b"shuffle_nonce", &nonce);
+        transcript.append_scalar::<C>(b"shuffle_nonce", &nonce);
 
         let rho = Self::derive_batch_coefficients(input_cts, output_cts, transcript);
         let input_c1s: Vec<C::Point> = input_cts.iter().map(|ct| ct.c1).collect();
@@ -155,9 +154,9 @@ impl<C: Curve> ZKShuffleProof<C> where Transcript: TranscriptExtension<C> {
         input_cts: &[ElGamalCiphertextGeneric<C>],
         output_cts: &[ElGamalCiphertextGeneric<C>],
         pk: &C::Point,
-        transcript: &mut Transcript,
+        transcript: &mut impl CryptoTranscript,
     ) -> Result<(), VerificationError> {
-        transcript.append_scalar(b"shuffle_nonce", &self.nonce);
+        transcript.append_scalar::<C>(b"shuffle_nonce", &self.nonce);
         let rho = Self::derive_batch_coefficients(input_cts, output_cts, transcript);
 
         let input_c1s: Vec<C::Point> = input_cts.iter().map(|ct| ct.c1).collect();
@@ -203,6 +202,7 @@ impl<C: Curve> ZKShuffleProof<C> where Transcript: TranscriptExtension<C> {
 mod tests {
     use super::*;
     use crate::crypto::curve::{RistrettoCurve, ec_encrypt_batch_generic};
+    use crate::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
     use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar as DalekScalar};
     use rand::seq::SliceRandom;
     use rand_core::OsRng;
@@ -263,9 +263,9 @@ mod tests {
         let permute = random_permute();
         let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut transcript = Transcript::new(b"test_shuffle");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle");
         let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut transcript).unwrap();
-        let mut verify_transcript = Transcript::new(b"test_shuffle");
+        let mut verify_transcript = MerlinTranscript::new(b"test_shuffle");
         assert!(proof.verify(&input, &output, &pk, &mut verify_transcript).is_ok(), "honest prover should pass");
     }
 
@@ -277,9 +277,9 @@ mod tests {
         let permute: Vec<usize> = (0..n).collect();
         let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut transcript = Transcript::new(b"test_shuffle");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle");
         let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut transcript).unwrap();
-        let mut verify_transcript = Transcript::new(b"test_shuffle");
+        let mut verify_transcript = MerlinTranscript::new(b"test_shuffle");
         assert!(proof.verify(&input, &output, &pk, &mut verify_transcript).is_ok(), "identity permutation should pass");
     }
 
@@ -293,7 +293,7 @@ mod tests {
         let permute = random_permute();
         let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut transcript = Transcript::new(b"test_shuffle");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle");
         let result = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut transcript);
         assert!(result.is_err(), "placeholder cards should cause prove to fail");
         assert_eq!(result.unwrap_err(), VerificationError::IdentityBasePoint);
@@ -309,9 +309,9 @@ mod tests {
         let permute = random_permute();
         let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut transcript = Transcript::new(b"test_shuffle");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle");
         let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut transcript).unwrap();
-        let mut verify_transcript = Transcript::new(b"test_shuffle");
+        let mut verify_transcript = MerlinTranscript::new(b"test_shuffle");
         assert!(proof.verify(&input, &output, &wrong_pk, &mut verify_transcript).is_err(), "wrong pk should fail");
     }
 
@@ -322,13 +322,13 @@ mod tests {
         let permute = random_permute();
         let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut transcript = Transcript::new(b"test_shuffle");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle");
         let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut transcript).unwrap();
 
         // 篡改 output[0] 的 c2
         let mut tampered = output.clone();
         tampered[0] = tampered[0].re_encrypt(&pk, &Scalar::random(&mut OsRng));
-        let mut verify_transcript = Transcript::new(b"test_shuffle");
+        let mut verify_transcript = MerlinTranscript::new(b"test_shuffle");
         assert!(proof.verify(&input, &tampered, &pk, &mut verify_transcript).is_err(), "tampered output should fail");
     }
 
@@ -339,7 +339,7 @@ mod tests {
         let permute = random_permute();
         let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut transcript = Transcript::new(b"test_shuffle");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle");
         let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut transcript).unwrap();
 
         // 篡改 input[1]
@@ -347,7 +347,7 @@ mod tests {
         tampered[1] = ElGamalCiphertext::encrypt(
             &(RistrettoCurve::base_g() * Scalar::from(99u64)), &pk, &Scalar::random(&mut OsRng),
         );
-        let mut verify_transcript = Transcript::new(b"test_shuffle");
+        let mut verify_transcript = MerlinTranscript::new(b"test_shuffle");
         assert!(proof.verify(&tampered, &output, &pk, &mut verify_transcript).is_err(), "tampered input should fail");
     }
 
@@ -363,9 +363,9 @@ mod tests {
         output[0].c2 = output[1].c2;
         output[1].c2 = tmp;
 
-        let mut transcript = Transcript::new(b"test_shuffle");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle");
         let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut transcript).unwrap();
-        let mut verify_transcript = Transcript::new(b"test_shuffle");
+        let mut verify_transcript = MerlinTranscript::new(b"test_shuffle");
         assert!(proof.verify(&input, &output, &pk, &mut verify_transcript).is_err(), "c2 swap attack should fail");
     }
 
@@ -376,12 +376,12 @@ mod tests {
         let permute = random_permute();
         let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut transcript = Transcript::new(b"test_shuffle");
+        let mut transcript = MerlinTranscript::new(b"test_shuffle");
         let mut proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut transcript).unwrap();
 
         // 篡改 combined schnorr proof 的 commitment
         proof.combined_schnorr_proof.commitment = proof.combined_schnorr_proof.commitment + RistrettoCurve::base_g();
-        let mut verify_transcript = Transcript::new(b"test_shuffle");
+        let mut verify_transcript = MerlinTranscript::new(b"test_shuffle");
         assert!(proof.verify(&input, &output, &pk, &mut verify_transcript).is_err(), "tampered commitment should fail");
     }
 
@@ -392,11 +392,11 @@ mod tests {
         let permute = random_permute();
         let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut Transcript::new(b"test_tampered_nonce_fails")).unwrap();
+        let mut proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut MerlinTranscript::new(b"test_tampered_nonce_fails")).unwrap();
 
         // 篡改 nonce
         proof.nonce = proof.nonce + Scalar::ONE;
-        assert!(proof.verify(&input, &output, &pk, &mut Transcript::new(b"test_tampered_nonce_fails")).is_err(), "tampered nonce should fail");
+        assert!(proof.verify(&input, &output, &pk, &mut MerlinTranscript::new(b"test_tampered_nonce_fails")).is_err(), "tampered nonce should fail");
     }
 
     #[test]
@@ -406,13 +406,13 @@ mod tests {
         let permute = random_permute();
         let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let mut proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut Transcript::new(b"test_tampered_response_fails")).unwrap();
+        let mut proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut MerlinTranscript::new(b"test_tampered_response_fails")).unwrap();
 
         // 篡改 combined schnorr proof 的第一个 response
         if !proof.combined_schnorr_proof.responses.is_empty() {
             proof.combined_schnorr_proof.responses[0] = proof.combined_schnorr_proof.responses[0] + Scalar::ONE;
         }
-        assert!(proof.verify(&input, &output, &pk, &mut Transcript::new(b"test_tampered_response_fails")).is_err(), "tampered response should fail");
+        assert!(proof.verify(&input, &output, &pk, &mut MerlinTranscript::new(b"test_tampered_response_fails")).is_err(), "tampered response should fail");
     }
 
     // ========== 跨实例重放攻击测试 ==========
@@ -428,12 +428,12 @@ mod tests {
         let permute1 = random_permute();
         let (r_values1, output1) = shuffle_and_reencrypt(&input1, &permute1, &pk1);
 
-        let proof1 = ZKShuffleProof::<RistrettoCurve>::prove(&input1, &output1, &permute1, &r_values1, &pk1, &mut OsRng, &mut Transcript::new(b"test_cross_instance_replay_fails")).unwrap();
+        let proof1 = ZKShuffleProof::<RistrettoCurve>::prove(&input1, &output1, &permute1, &r_values1, &pk1, &mut OsRng, &mut MerlinTranscript::new(b"test_cross_instance_replay_fails")).unwrap();
 
         // 用 proof1 验证完全不同的 input/output/pk
-        assert!(proof1.verify(&input2, &output1, &pk2, &mut Transcript::new(b"test_cross_instance_replay_fails")).is_err(), "cross-instance replay should fail");
+        assert!(proof1.verify(&input2, &output1, &pk2, &mut MerlinTranscript::new(b"test_cross_instance_replay_fails")).is_err(), "cross-instance replay should fail");
         // 即使 pk 相同，不同的 input/output 也应失败
-        assert!(proof1.verify(&input2, &output1, &pk1, &mut Transcript::new(b"test_cross_instance_replay_fails")).is_err(), "different data same pk should fail");
+        assert!(proof1.verify(&input2, &output1, &pk1, &mut MerlinTranscript::new(b"test_cross_instance_replay_fails")).is_err(), "different data same pk should fail");
     }
 
     // ========== Nonce 唯一性测试 ==========
@@ -445,8 +445,8 @@ mod tests {
         let permute = random_permute();
         let (r_values, output) = shuffle_and_reencrypt(&input, &permute, &pk);
 
-        let proof_a = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut Transcript::new(b"test_nonce_uniqueness_a")).unwrap();
-        let proof_b = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut Transcript::new(b"test_nonce_uniqueness_b")).unwrap();
+        let proof_a = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut MerlinTranscript::new(b"test_nonce_uniqueness_a")).unwrap();
+        let proof_b = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut MerlinTranscript::new(b"test_nonce_uniqueness_b")).unwrap();
 
         assert_ne!(proof_a.nonce, proof_b.nonce, "each prove() must generate unique nonce");
     }
@@ -467,8 +467,8 @@ mod tests {
 
         // Warmup
         for _ in 0..WARMUP {
-            let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut Transcript::new(b"test_benchmark_warmup")).unwrap();
-            let _ = proof.verify(&input, &output, &pk, &mut Transcript::new(b"test_benchmark_warmup"));
+            let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut MerlinTranscript::new(b"test_benchmark_warmup")).unwrap();
+            let _ = proof.verify(&input, &output, &pk, &mut MerlinTranscript::new(b"test_benchmark_warmup"));
         }
 
         let mut prove_times = Vec::with_capacity(ITERATIONS);
@@ -476,11 +476,11 @@ mod tests {
 
         for i in 0..ITERATIONS {
             let start = Instant::now();
-            let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut Transcript::new(b"test_benchmark_prove_verify")).unwrap();
+            let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut MerlinTranscript::new(b"test_benchmark_prove_verify")).unwrap();
             prove_times.push(start.elapsed());
 
             let verify_start = Instant::now();
-            let result = proof.verify(&input, &output, &pk, &mut Transcript::new(b"test_benchmark_prove_verify"));
+            let result = proof.verify(&input, &output, &pk, &mut MerlinTranscript::new(b"test_benchmark_prove_verify"));
             verify_times.push(verify_start.elapsed());
             assert!(result.is_ok());
         }
@@ -569,8 +569,8 @@ mod tests {
 
         // === 手动构造伪造证明 ===
         let nonce = Scalar::random(&mut OsRng);
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
-        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
+        transcript.append_scalar::<RistrettoCurve>(b"nonce", &nonce);
         let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
 
         // 计算 sum commitments
@@ -648,7 +648,7 @@ mod tests {
         };
 
         // === 伪造证明被验证拒绝 — 排列约束生效 ===
-        let verify_result = forged_proof.verify(&input, &output, &pk, &mut Transcript::new(b"zk_shuffle_proof"));
+        let verify_result = forged_proof.verify(&input, &output, &pk, &mut MerlinTranscript::new(b"zk_shuffle_proof"));
         assert!(verify_result.is_err(), "non-permutation forged proof should be rejected");
 
         // === 验证 output 确实不是合法 shuffle ===
@@ -684,8 +684,8 @@ mod tests {
 
         // 构造伪造证明
         let nonce = Scalar::random(&mut OsRng);
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
-        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
+        transcript.append_scalar::<RistrettoCurve>(b"nonce", &nonce);
         let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
 
         let output_c1s: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
@@ -761,7 +761,7 @@ mod tests {
         };
 
         // 伪造证明被验证拒绝 — 排列约束生效
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
         let verify_result = forged_proof.verify(&input, &output, &pk, &mut transcript);
         assert!(verify_result.is_err(), "non-permutation forged proof should be rejected");
 
@@ -805,8 +805,8 @@ mod tests {
 
         // === 尝试1: 用恒等排列的 secret_vec 构造合并证明 ===
         let nonce = Scalar::random(&mut OsRng);
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
-        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
+        transcript.append_scalar::<RistrettoCurve>(b"nonce", &nonce);
         let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
 
         let input_c1s: Vec<EcPoint> = input.iter().map(|ct| ct.c1).collect();
@@ -878,7 +878,7 @@ mod tests {
         };
 
         // === 合并证明后，c1/c2 使用不同排列的伪造证明被拒绝 ===
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
         let verify_result = forged_proof.verify(&input, &output, &pk, &mut transcript);
         assert!(verify_result.is_err(), "c1/c2 inconsistent permutation should be rejected after fix");
 
@@ -920,8 +920,8 @@ mod tests {
 
         // 构造伪造证明
         let nonce = Scalar::random(&mut OsRng);
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
-        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
+        transcript.append_scalar::<RistrettoCurve>(b"nonce", &nonce);
         let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
 
         let output_c1s: Vec<EcPoint> = output.iter().map(|ct| ct.c1).collect();
@@ -999,7 +999,7 @@ mod tests {
         };
 
         // 伪造证明被验证拒绝 — 排列约束生效
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
         let verify_result = forged_proof.verify(&input, &output, &pk, &mut transcript);
         assert!(verify_result.is_err(), "non-permutation forged proof should be rejected");
 
@@ -1036,8 +1036,8 @@ mod tests {
 
         // === 构造伪造证明 ===
         let nonce = Scalar::random(&mut OsRng);
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
-        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
+        transcript.append_scalar::<RistrettoCurve>(b"nonce", &nonce);
         let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
 
         // 使用 INPUT 计算 sum commitments (与 verify 中的重计算一致)
@@ -1107,7 +1107,7 @@ mod tests {
         };
 
         // === 添加独立 c1/c2 Schnorr 证明后，信息转移攻击被拒绝 ===
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
         let verify_result = forged_proof.verify(&input, &output, &pk, &mut transcript);
         assert!(verify_result.is_err(),
             "c1/c2 information shift forged proof should be REJECTED after adding independent c1/c2 proofs");
@@ -1150,8 +1150,8 @@ mod tests {
 
         // 构造伪造证明 (与攻击5相同的方法)
         let nonce = Scalar::random(&mut OsRng);
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
-        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
+        transcript.append_scalar::<RistrettoCurve>(b"nonce", &nonce);
         let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
 
         let input_c1s: Vec<EcPoint> = input.iter().map(|ct| ct.c1).collect();
@@ -1217,7 +1217,7 @@ mod tests {
         };
 
         // 添加独立 c1/c2 Schnorr 证明后，部分信息转移攻击被拒绝
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
         let verify_result = forged_proof.verify(&input, &output, &pk, &mut transcript);
         assert!(verify_result.is_err(),
             "partial c1/c2 shift forged proof should be REJECTED after adding independent c1/c2 proofs");
@@ -1254,8 +1254,8 @@ mod tests {
 
         // 构造伪造证明，使用排列系数
         let nonce = Scalar::random(&mut OsRng);
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
-        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
+        transcript.append_scalar::<RistrettoCurve>(b"nonce", &nonce);
         let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
 
         let input_c1s: Vec<EcPoint> = input.iter().map(|ct| ct.c1).collect();
@@ -1328,7 +1328,7 @@ mod tests {
         };
 
         // 添加独立 c1/c2 Schnorr 证明后，带排列的信息转移攻击被拒绝
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
         let verify_result = forged_proof.verify(&input, &output, &pk, &mut transcript);
         assert!(verify_result.is_err(),
             "c1/c2 shift with permutation forged proof should be REJECTED after adding independent c1/c2 proofs");
@@ -1368,8 +1368,8 @@ mod tests {
 
         // === 构造伪造证明，为每个 Schnorr 证明使用不同的 secret_vec ===
         let nonce = Scalar::random(&mut OsRng);
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
-        TranscriptExtension::<RistrettoCurve>::append_scalar(&mut transcript, b"nonce", &nonce);
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
+        transcript.append_scalar::<RistrettoCurve>(b"nonce", &nonce);
         let rho = ZKShuffleProof::<RistrettoCurve>::derive_batch_coefficients(&input, &output, &mut transcript);
 
         let input_c1s: Vec<EcPoint> = input.iter().map(|ct| ct.c1).collect();
@@ -1438,7 +1438,7 @@ mod tests {
         };
 
         // 伪造证明被拒绝 — c1 Schnorr 证明方程不成立
-        let mut transcript = Transcript::new(b"zk_shuffle_proof");
+        let mut transcript = MerlinTranscript::new(b"zk_shuffle_proof");
         let verify_result = forged_proof.verify(&input, &output, &pk, &mut transcript);
         assert!(verify_result.is_err(),
             "smart c1/c2 information shift forged proof should be REJECTED: \

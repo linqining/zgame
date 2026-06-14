@@ -3,7 +3,13 @@ import Axios from 'axios';
 import setAuthToken from '../helpers/setAuthToken';
 import { useGlobalContext } from '../context/global/globalContext';
 import { useCurrentAccount } from '@mysten/dapp-kit-react';
-import { dAppKit } from '../sui/config';
+import { dAppKit, ZKLOGIN_CONFIG } from '../sui/config';
+import {
+  getZkLoginSessionManager,
+  ZkLoginSession,
+} from '../sui/zkLoginSession';
+import { getSponsoredTransactionService } from '../sui/sponsoredTx';
+import type { AuthMethod, ZkLoginState, SponsoredTxState } from '../types/sui';
 
 interface UseAuthReturn {
   isLoggedIn: boolean;
@@ -14,6 +20,13 @@ interface UseAuthReturn {
   walletAddress: string | null;
   connectWallet: () => void;
   disconnectWallet: () => void;
+  // zkLogin
+  zkLoginState: ZkLoginState;
+  loginWithZkLogin: (provider: string) => Promise<void>;
+  handleZkLoginCallback: (jwt: string) => Promise<void>;
+  // Sponsored transactions
+  sponsoredTxState: SponsoredTxState;
+  authMethod: AuthMethod | null;
 }
 
 const useAuth = (): UseAuthReturn => {
@@ -34,6 +47,26 @@ const useAuth = (): UseAuthReturn => {
   );
   const [prevWalletAddress, setPrevWalletAddress] = useState<string | null>(null);
   const [authRetryCount, setAuthRetryCount] = useState(0);
+  const [authMethod, setAuthMethod] = useState<AuthMethod | null>(
+    (localStorage.getItem('authMethod') as AuthMethod) || null
+  );
+
+  // zkLogin state
+  const [zkLoginState, setZkLoginState] = useState<ZkLoginState>({
+    isInitialized: false,
+    isLoggedIn: false,
+    address: null,
+    provider: null,
+    isSessionValid: false,
+  });
+
+  // Sponsored tx state
+  const [sponsoredTxState, setSponsoredTxState] = useState<SponsoredTxState>({
+    isAvailable: false,
+    lastTxDigest: null,
+    isSubmitting: false,
+    error: null,
+  });
 
   const currentAccount = useCurrentAccount();
 
@@ -42,6 +75,9 @@ const useAuth = (): UseAuthReturn => {
 
     const storedToken = localStorage.getItem('token');
     if (storedToken) loadUser(storedToken);
+
+    // Check existing zkLogin session
+    checkZkLoginSession();
 
     setIsLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -55,8 +91,7 @@ const useAuth = (): UseAuthReturn => {
       localStorage.setItem('walletAddress', currentAccount.address);
     } else {
       setWalletAddress(null);
-      // Wallet was connected before but now disconnected
-      if (prevWalletAddress && isLoggedIn) {
+      if (prevWalletAddress && isLoggedIn && authMethod === 'wallet') {
         disconnectWallet();
       }
       setPrevWalletAddress(null);
@@ -64,9 +99,9 @@ const useAuth = (): UseAuthReturn => {
     }
   }, [currentAccount]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-authenticate with backend when wallet connects (skip if already logged in)
+  // Auto-authenticate with backend when wallet connects
   useEffect(() => {
-    if (walletAddress && !isLoggedIn && authRetryCount < 3) {
+    if (walletAddress && !isLoggedIn && authRetryCount < 3 && authMethod === 'wallet') {
       const storedToken = localStorage.getItem('token');
       if (!storedToken) {
         authenticateWithWallet(walletAddress);
@@ -75,16 +110,164 @@ const useAuth = (): UseAuthReturn => {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walletAddress, isLoggedIn, authRetryCount]);
+  }, [walletAddress, isLoggedIn, authRetryCount, authMethod]);
+
+  // Check zkLogin session validity periodically
+  useEffect(() => {
+    if (!zkLoginState.isLoggedIn) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const manager = getZkLoginSessionManager();
+        const isValid = await manager.isSessionValid();
+        setZkLoginState(prev => ({ ...prev, isSessionValid: isValid }));
+        if (!isValid) {
+          // Session expired, need to re-login
+          setZkLoginState(prev => ({
+            ...prev,
+            isLoggedIn: false,
+            address: null,
+            isSessionValid: false,
+          }));
+          setAuthMethod(null);
+          localStorage.removeItem('authMethod');
+        }
+      } catch {
+        // Ignore check errors
+      }
+    }, 60000); // Check every minute
+
+    return () => clearInterval(interval);
+  }, [zkLoginState.isLoggedIn]);
+
+  const checkZkLoginSession = async () => {
+    try {
+      const manager = getZkLoginSessionManager();
+      const session = manager.getSession();
+      if (session) {
+        const isValid = await manager.isSessionValid();
+        setZkLoginState({
+          isInitialized: true,
+          isLoggedIn: isValid,
+          address: isValid ? session.address : null,
+          provider: localStorage.getItem('zklogin_provider'),
+          isSessionValid: isValid,
+        });
+        if (isValid) {
+          setAuthMethod((localStorage.getItem('authMethod') as AuthMethod) || null);
+          setSponsoredTxState(prev => ({ ...prev, isAvailable: true }));
+          // Auto-authenticate with backend if not already
+          if (!isLoggedIn) {
+            await authenticateWithZkLogin(session);
+          }
+        }
+      } else {
+        setZkLoginState(prev => ({ ...prev, isInitialized: true }));
+      }
+    } catch {
+      setZkLoginState(prev => ({ ...prev, isInitialized: true }));
+    }
+  };
+
+  // zkLogin: Initiate OAuth flow
+  const loginWithZkLogin = async (provider: string): Promise<void> => {
+    setIsLoading(true);
+    try {
+      const providerConfig = ZKLOGIN_CONFIG[provider as keyof typeof ZKLOGIN_CONFIG];
+      if (!providerConfig?.clientId) {
+        throw new Error(`OAuth client ID not configured for ${provider}. Set VITE_${provider.toUpperCase()}_CLIENT_ID in .env`);
+      }
+
+      const manager = getZkLoginSessionManager();
+      const { url } = await manager.prepareOAuthUrl(
+        provider,
+        providerConfig.clientId,
+        providerConfig.redirectUrl,
+      );
+
+      // Store provider for callback
+      localStorage.setItem('zklogin_provider', provider);
+
+      // Redirect to OAuth provider
+      window.location.href = url;
+    } catch (error) {
+      console.error('zkLogin initiation failed:', error);
+      setIsLoading(false);
+    }
+  };
+
+  // zkLogin: Handle OAuth callback
+  const handleZkLoginCallback = async (jwt: string): Promise<void> => {
+    setIsLoading(true);
+    try {
+      const manager = getZkLoginSessionManager();
+      const session = await manager.handleCallback(jwt);
+      const provider = localStorage.getItem('zklogin_provider') || 'unknown';
+
+      setZkLoginState({
+        isInitialized: true,
+        isLoggedIn: true,
+        address: session.address,
+        provider,
+        isSessionValid: true,
+      });
+
+      const method = `zklogin_${provider}` as AuthMethod;
+      setAuthMethod(method);
+      localStorage.setItem('authMethod', method);
+
+      // Authenticate with backend
+      await authenticateWithZkLogin(session);
+
+      setSponsoredTxState(prev => ({ ...prev, isAvailable: true }));
+    } catch (error) {
+      console.error('zkLogin callback failed:', error);
+      setZkLoginState(prev => ({
+        ...prev,
+        isLoggedIn: false,
+        address: null,
+        isSessionValid: false,
+      }));
+    }
+    setIsLoading(false);
+  };
+
+  // Authenticate zkLogin user with backend
+  const authenticateWithZkLogin = async (session: ZkLoginSession): Promise<void> => {
+    try {
+      // Sign a message with the ephemeral key to prove ownership
+      const message = `zgame-zklogin:${session.address}:${Date.now()}`;
+      const messageBytes = new TextEncoder().encode(message);
+
+      const { signature } = await session.ephemeralKeyPair.signPersonalMessage(messageBytes);
+
+      const res = await Axios.post('/api/auth/zklogin', {
+        address: session.address,
+        signature,
+        message,
+        provider: session.decodedJwt.iss,
+        email: session.decodedJwt.email,
+      });
+
+      const backendToken = res.data.token;
+      if (backendToken) {
+        localStorage.setItem('token', backendToken);
+        setAuthToken(backendToken);
+        await loadUser(backendToken);
+        setAuthRetryCount(0);
+      }
+    } catch (error) {
+      console.error('zkLogin backend auth failed:', error);
+      setAuthRetryCount(prev => prev + 1);
+    }
+  };
 
   const authenticateWithWallet = async (address: string): Promise<void> => {
     setIsLoading(true);
     try {
-      // Construct a message for the user to sign
       const message = `zgame-login:${address}:${Date.now()}`;
       const messageBytes = new TextEncoder().encode(message);
 
-      // Request signature from the wallet
       const signResult = await dAppKit.signPersonalMessage({
         message: messageBytes,
       });
@@ -101,6 +284,8 @@ const useAuth = (): UseAuthReturn => {
         localStorage.setItem('token', token);
         setAuthToken(token);
         await loadUser(token);
+        setAuthMethod('wallet');
+        localStorage.setItem('authMethod', 'wallet');
         setAuthRetryCount(0);
       }
     } catch (error) {
@@ -182,21 +367,42 @@ const useAuth = (): UseAuthReturn => {
   const logout = useCallback((): void => {
     localStorage.removeItem('token');
     localStorage.removeItem('walletAddress');
+    localStorage.removeItem('authMethod');
+    localStorage.removeItem('zklogin_provider');
     setIsLoggedIn(false);
     setId(null);
     setUserName(null);
     setEmail(null);
     setChipsAmount(null);
+    setAuthMethod(null);
+
+    // Clear zkLogin session
+    try {
+      const manager = getZkLoginSessionManager();
+      manager.clearSession();
+    } catch {
+      // Manager not initialized yet
+    }
+    setZkLoginState({
+      isInitialized: true,
+      isLoggedIn: false,
+      address: null,
+      provider: null,
+      isSessionValid: false,
+    });
+    setSponsoredTxState({
+      isAvailable: false,
+      lastTxDigest: null,
+      isSubmitting: false,
+      error: null,
+    });
   }, [setId, setUserName, setEmail, setChipsAmount]);
 
   const connectWallet = useCallback((): void => {
-    // Wallet connection is handled by the ConnectButton component from dapp-kit
-    // This is a placeholder for programmatic connection if needed
     console.log('Use the ConnectButton component to connect wallet');
   }, []);
 
   const disconnectWallet = useCallback((): void => {
-    // Call backend wallet_logout endpoint
     const token = localStorage.getItem('token');
     if (token) {
       Axios.post('/api/auth/wallet/logout', {}, {
@@ -205,7 +411,6 @@ const useAuth = (): UseAuthReturn => {
         console.error('wallet_logout backend call failed:', err);
       });
     }
-    // Wallet disconnection is handled internally by dapp-kit
     setWalletAddress(null);
     logout();
   }, [logout]);
@@ -216,9 +421,14 @@ const useAuth = (): UseAuthReturn => {
     logout,
     register,
     loadUser,
-    walletAddress,
+    walletAddress: walletAddress || zkLoginState.address,
     connectWallet,
     disconnectWallet,
+    zkLoginState,
+    loginWithZkLogin,
+    handleZkLoginCallback,
+    sponsoredTxState,
+    authMethod,
   };
 };
 
