@@ -6,6 +6,7 @@ use axum::{
     response::Response,
     Json,
 };
+use base64::Engine;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ use crate::config::Config;
 use crate::models::{Database, UserResponse};
 use crate::pokergame::player::{Player, WalletAddress};
 use crate::pokergame::game_state::SubmitRevealTokenJson;
+use crate::relayer::RelayerState;
 use crate::socket::SocketState;
 use crate::pokergame::game_state::RevealPhase;
 
@@ -27,6 +29,7 @@ pub struct AppState {
     pub db: Database,
     pub config: Config,
     pub socket_state: Arc<SocketState>,
+    pub relayer_state: Arc<RelayerState>,
 }
 
 #[derive(Deserialize,Debug)]
@@ -742,5 +745,175 @@ pub async fn free_chips(
             tracing::warn!("[free_chips] token verification failed");
             (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sui table 缓存查询 / 刷新
+// ---------------------------------------------------------------------------
+
+/// GET /api/sui/tables — 返回所有缓存的 TableSummary 列表
+pub async fn list_sui_tables(Extension(state): Extension<Arc<AppState>>) -> Response {
+    let tables = state.relayer_state.list();
+    (StatusCode::OK, Json(tables)).into_response()
+}
+
+/// GET /api/sui/tables/:table_id — 获取单个缓存的 TableSummary
+pub async fn get_sui_table(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(table_id): Path<String>,
+) -> Response {
+    match state.relayer_state.get(&table_id) {
+        Some(summary) => (StatusCode::OK, Json(summary)).into_response(),
+        None => err_resp(StatusCode::NOT_FOUND, &format!("Table {} not cached", table_id)),
+    }
+}
+
+/// POST /api/sui/tables/:table_id/refresh — 从链上重新拉取 TableSummary 并更新缓存
+pub async fn refresh_sui_table(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(table_id): Path<String>,
+) -> Response {
+    match crate::sui_query::fetch_table_summary(&state.config.fullnode_url, &table_id).await {
+        Ok(summary) => {
+            state.relayer_state.insert(table_id, summary.clone());
+            (StatusCode::OK, Json(summary)).into_response()
+        }
+        Err(e) => err_resp(StatusCode::BAD_GATEWAY, &format!("Failed to fetch table: {}", e)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sui action PTB 构建
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct BuildActionRequest {
+    action: String,
+    table_id: String,
+    seat_index: u64,
+    // raise 特有
+    total_bet: Option<u64>,
+    // join_and_shuffle 特有
+    buy_in: Option<u64>,
+    pk: Option<String>,
+    pk_ownership_proof: Option<String>,
+    output_cards: Option<String>,
+    remask_proof_bytes: Option<String>,
+    shuffle_proof_bytes: Option<String>,
+}
+
+/// 解码 hex 或 base64 字符串为 Vec<u8>。
+/// 优先尝试 hex（支持可选 `0x` 前缀），失败后回退到 base64。
+fn decode_hex_or_base64(s: &str) -> Result<Vec<u8>, String> {
+    let trimmed = s.trim();
+    let hex_str = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    if let Ok(bytes) = hex::decode(hex_str) {
+        return Ok(bytes);
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .map_err(|e| format!("Failed to decode as hex or base64: {}", e))
+}
+
+/// POST /api/sui/action/build — 根据请求体构建 PTB 并返回 base64 编码的 TransactionKind
+pub async fn build_action_ptb(
+    Extension(state): Extension<Arc<AppState>>,
+    req: Body,
+) -> Response {
+    let body = match axum::body::to_bytes(req, 1024 * 64).await {
+        Ok(b) => b,
+        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid request body"),
+    };
+    let req: BuildActionRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
+    };
+
+    let package_id = &state.config.sui_package_id;
+    let table_id = &req.table_id;
+    let seat_index = req.seat_index;
+
+    let ptb_result: Result<_, String> = match req.action.as_str() {
+        "fold" => Ok(crate::relayer::ptb::build_fold_ptb(package_id, table_id, seat_index)),
+        "check" => Ok(crate::relayer::ptb::build_check_ptb(package_id, table_id, seat_index)),
+        "call" => Ok(crate::relayer::ptb::build_call_ptb(package_id, table_id, seat_index)),
+        "raise" => {
+            let total_bet = match req.total_bet {
+                Some(v) => v,
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing total_bet for raise action"),
+            };
+            Ok(crate::relayer::ptb::build_raise_ptb(package_id, table_id, seat_index, total_bet))
+        }
+        "join_and_shuffle" => {
+            let buy_in = match req.buy_in {
+                Some(v) => v,
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing buy_in for join_and_shuffle action"),
+            };
+            let pk = match req.pk.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid pk: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing pk for join_and_shuffle action"),
+            };
+            let pk_ownership_proof = match req.pk_ownership_proof.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid pk_ownership_proof: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing pk_ownership_proof for join_and_shuffle action"),
+            };
+            let output_cards = match req.output_cards.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid output_cards: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing output_cards for join_and_shuffle action"),
+            };
+            let remask_proof_bytes = match req.remask_proof_bytes.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid remask_proof_bytes: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing remask_proof_bytes for join_and_shuffle action"),
+            };
+            let shuffle_proof_bytes = match req.shuffle_proof_bytes.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid shuffle_proof_bytes: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing shuffle_proof_bytes for join_and_shuffle action"),
+            };
+            Ok(crate::relayer::ptb::build_join_and_shuffle_ptb(
+                package_id,
+                table_id,
+                seat_index,
+                buy_in,
+                pk,
+                pk_ownership_proof,
+                output_cards,
+                remask_proof_bytes,
+                shuffle_proof_bytes,
+            ))
+        }
+        other => {
+            return err_resp(StatusCode::BAD_REQUEST, &format!("Unknown action: {}", other));
+        }
+    };
+
+    let ptb = match ptb_result {
+        Ok(p) => p,
+        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &e),
+    };
+
+    match crate::relayer::ptb::serialize_tx_kind(ptb) {
+        Ok(tx_kind) => (StatusCode::OK, Json(serde_json::json!({ "tx_kind": tx_kind }))).into_response(),
+        Err(e) => err_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to serialize tx_kind: {}", e)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 手动触发 tick
+// ---------------------------------------------------------------------------
+
+/// POST /api/sui/tables/:table_id/tick — 手动提交 tick 交易
+pub async fn manual_tick(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(table_id): Path<String>,
+) -> Response {
+    match crate::relayer::submit::submit_tick_tx(&state.config, &table_id).await {
+        Ok(digest) => (StatusCode::OK, Json(serde_json::json!({ "digest": digest }))).into_response(),
+        Err(e) => err_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("Tick failed: {}", e)),
     }
 }

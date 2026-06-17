@@ -1,0 +1,913 @@
+{
+  "id": {
+    "address": "texas_poker",
+    "name": "hand_evaluator"
+  },
+  "doc": null,
+  "immediate_dependencies": [
+    {
+      "address": "std",
+      "name": "string"
+    },
+    {
+      "address": "texas_poker",
+      "name": "card"
+    }
+  ],
+  "attributes": [],
+  "functions": {
+    "new_hand_rank": {
+      "source_index": 0,
+      "index": 0,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "category",
+          "type_": "u8"
+        },
+        {
+          "name": "kickers",
+          "type_": {
+            "vector": "u8"
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "hand_evaluator"
+            },
+            "name": "HandRank",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "category": {
+      "source_index": 1,
+      "index": 1,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "hr",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "hand_evaluator"
+                  },
+                  "name": "HandRank",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u8"
+      ]
+    },
+    "kickers": {
+      "source_index": 2,
+      "index": 2,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "hr",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "hand_evaluator"
+                  },
+                  "name": "HandRank",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "compare": {
+      "source_index": 3,
+      "index": 3,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "a",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "hand_evaluator"
+                  },
+                  "name": "HandRank",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "b",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "hand_evaluator"
+                  },
+                  "name": "HandRank",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u8"
+      ]
+    },
+    "compare_kickers": {
+      "source_index": 4,
+      "index": 4,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "a",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "b",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u8"
+      ]
+    },
+    "best_hand": {
+      "source_index": 5,
+      "index": 5,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "cards",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "texas_poker",
+                      "name": "card"
+                    },
+                    "name": "Card",
+                    "type_arguments": []
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "hand_evaluator"
+            },
+            "name": "HandRank",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "update_best": {
+      "source_index": 6,
+      "index": 6,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "cards",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "texas_poker",
+                      "name": "card"
+                    },
+                    "name": "Card",
+                    "type_arguments": []
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "best",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "hand_evaluator"
+                  },
+                  "name": "HandRank",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "i0",
+          "type_": "u64"
+        },
+        {
+          "name": "i1",
+          "type_": "u64"
+        },
+        {
+          "name": "i2",
+          "type_": "u64"
+        },
+        {
+          "name": "i3",
+          "type_": "u64"
+        },
+        {
+          "name": "i4",
+          "type_": "u64"
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "hand_evaluator"
+            },
+            "name": "HandRank",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "eval5i": {
+      "source_index": 7,
+      "index": 7,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "cards",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "texas_poker",
+                      "name": "card"
+                    },
+                    "name": "Card",
+                    "type_arguments": []
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "i0",
+          "type_": "u64"
+        },
+        {
+          "name": "i1",
+          "type_": "u64"
+        },
+        {
+          "name": "i2",
+          "type_": "u64"
+        },
+        {
+          "name": "i3",
+          "type_": "u64"
+        },
+        {
+          "name": "i4",
+          "type_": "u64"
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "hand_evaluator"
+            },
+            "name": "HandRank",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "evaluate_five": {
+      "source_index": 8,
+      "index": 8,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "cards",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "texas_poker",
+                      "name": "card"
+                    },
+                    "name": "Card",
+                    "type_arguments": []
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "hand_evaluator"
+            },
+            "name": "HandRank",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "evaluate_five_by_indices": {
+      "source_index": 9,
+      "index": 9,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "cards",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "texas_poker",
+                      "name": "card"
+                    },
+                    "name": "Card",
+                    "type_arguments": []
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "i0",
+          "type_": "u64"
+        },
+        {
+          "name": "i1",
+          "type_": "u64"
+        },
+        {
+          "name": "i2",
+          "type_": "u64"
+        },
+        {
+          "name": "i3",
+          "type_": "u64"
+        },
+        {
+          "name": "i4",
+          "type_": "u64"
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "hand_evaluator"
+            },
+            "name": "HandRank",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "evaluate_five_impl": {
+      "source_index": 10,
+      "index": 10,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "c0",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "card"
+              },
+              "name": "Card",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "c1",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "card"
+              },
+              "name": "Card",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "c2",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "card"
+              },
+              "name": "Card",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "c3",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "card"
+              },
+              "name": "Card",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "c4",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "card"
+              },
+              "name": "Card",
+              "type_arguments": []
+            }
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "hand_evaluator"
+            },
+            "name": "HandRank",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "find_in_counts": {
+      "source_index": 11,
+      "index": 11,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "counts",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "target_count",
+          "type_": "u8"
+        }
+      ],
+      "return_": [
+        "u8"
+      ]
+    },
+    "find_pair_in_counts": {
+      "source_index": 12,
+      "index": 12,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "counts",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "exclude",
+          "type_": "u8"
+        }
+      ],
+      "return_": [
+        "u8"
+      ]
+    },
+    "find_highest_excluding_in_counts": {
+      "source_index": 13,
+      "index": 13,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "counts",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "e1",
+          "type_": "u8"
+        }
+      ],
+      "return_": [
+        "u8"
+      ]
+    },
+    "find_highest_excluding2_in_counts": {
+      "source_index": 14,
+      "index": 14,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "counts",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "e1",
+          "type_": "u8"
+        },
+        {
+          "name": "e2",
+          "type_": "u8"
+        }
+      ],
+      "return_": [
+        "u8"
+      ]
+    },
+    "find_highest_excluding3_in_counts": {
+      "source_index": 15,
+      "index": 15,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "counts",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "e1",
+          "type_": "u8"
+        },
+        {
+          "name": "e2",
+          "type_": "u8"
+        },
+        {
+          "name": "e3",
+          "type_": "u8"
+        }
+      ],
+      "return_": [
+        "u8"
+      ]
+    },
+    "sorted_ranks_from_cards": {
+      "source_index": 16,
+      "index": 16,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "c0",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "card"
+              },
+              "name": "Card",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "c1",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "card"
+              },
+              "name": "Card",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "c2",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "card"
+              },
+              "name": "Card",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "c3",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "card"
+              },
+              "name": "Card",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "c4",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "card"
+              },
+              "name": "Card",
+              "type_arguments": []
+            }
+          }
+        }
+      ],
+      "return_": [
+        {
+          "vector": "u8"
+        }
+      ]
+    },
+    "check_straight_from_sorted": {
+      "source_index": 17,
+      "index": 17,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "ranks",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "bool",
+        "u8"
+      ]
+    },
+    "category_name": {
+      "source_index": 18,
+      "index": 18,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "cat",
+          "type_": "u8"
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "std",
+              "name": "string"
+            },
+            "name": "String",
+            "type_arguments": []
+          }
+        }
+      ]
+    }
+  },
+  "structs": {
+    "HandRank": {
+      "index": 0,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop",
+        "Store"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "category": {
+            "index": 0,
+            "doc": null,
+            "type_": "u8"
+          },
+          "kickers": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          }
+        }
+      }
+    }
+  },
+  "enums": {}
+}

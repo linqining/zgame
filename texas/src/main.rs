@@ -11,6 +11,7 @@ mod sui_webhook;
 mod sui_listener;
 mod sui_grpc;
 mod sui_query;
+mod relayer;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -72,14 +73,19 @@ async fn main() -> std::io::Result<()> {
     socket::set_socket_io(io.clone());
     socket::register_handlers(&io);
 
+    let relayer_state = Arc::new(relayer::RelayerState::new());
+
     let app_state = Arc::new(AppState {
         db: socket_state.db.clone(),
         config: config.clone(),
         socket_state: socket_state.clone(),
+        relayer_state: relayer_state.clone(),
     });
 
     // 克隆用于 Sui 监听器后台任务
     let listener_state = app_state.clone();
+    // 克隆用于 relayer tick 后台任务
+    let tick_state = app_state.clone();
 
     let api_routes = Router::new()
         .route("/auth",routing::get(handlers::get_current_user).post(handlers::login))
@@ -93,6 +99,11 @@ async fn main() -> std::io::Result<()> {
         .route("/sponsor/transaction", routing::post(sponsor::sponsor_transaction))
         .route("/sponsor/gas-info", routing::get(sponsor::get_gas_info))
         .route("/sui/webhook", routing::post(sui_webhook::inodra_webhook))
+        .route("/sui/tables", routing::get(handlers::list_sui_tables))
+        .route("/sui/tables/:table_id", routing::get(handlers::get_sui_table))
+        .route("/sui/tables/:table_id/refresh", routing::post(handlers::refresh_sui_table))
+        .route("/sui/tables/:table_id/tick", routing::post(handlers::manual_tick))
+        .route("/sui/action/build", routing::post(handlers::build_action_ptb))
         .route("/games/:game_id/join", routing::post(handlers::join_game))
         .route("/games/:game_id/action", routing::post(handlers::player_action))
         .route("/games/:game_id/reveal-token", routing::post(handlers::submit_reveal_token));
@@ -125,6 +136,11 @@ async fn main() -> std::io::Result<()> {
     // 启动 Sui 事件监听器后台任务（历史回填）
     tokio::spawn(async move {
         sui_listener::start_sui_listener(listener_state).await;
+    });
+
+    // 启动 relayer 定时 tick 后台任务（处理链上超时）
+    tokio::spawn(async move {
+        relayer::tick::run_tick_loop(tick_state).await;
     });
 
     axum::serve(listener, app).await

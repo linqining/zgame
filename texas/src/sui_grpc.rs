@@ -165,7 +165,7 @@ pub async fn subscribe_with_reconnect(config: Config, state: Arc<AppState>) {
     }
 }
 
-async fn handle_grpc_event(event: SuiChainEvent, _state: &Arc<AppState>) {
+async fn handle_grpc_event(event: SuiChainEvent, state: &Arc<AppState>) {
     match &event {
         SuiChainEvent::PlayerJoined { table_id, player, buy_in, .. } => {
             tracing::info!(
@@ -189,6 +189,8 @@ async fn handle_grpc_event(event: SuiChainEvent, _state: &Arc<AppState>) {
             tracing::debug!("[sui_grpc] event: {:?}", event);
         }
     }
+
+    crate::relayer::process_event(&state.relayer_state, &state.config.fullnode_url, &event).await;
 }
 
 #[cfg(test)]

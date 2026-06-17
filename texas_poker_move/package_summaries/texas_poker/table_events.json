@@ -1,0 +1,3071 @@
+{
+  "id": {
+    "address": "texas_poker",
+    "name": "table_events"
+  },
+  "doc": null,
+  "immediate_dependencies": [
+    {
+      "address": "std",
+      "name": "option"
+    },
+    {
+      "address": "std",
+      "name": "string"
+    },
+    {
+      "address": "sui",
+      "name": "event"
+    },
+    {
+      "address": "sui",
+      "name": "object"
+    }
+  ],
+  "attributes": [],
+  "functions": {
+    "refund_type_stack_only": {
+      "source_index": 0,
+      "index": 0,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "refund_type_stack_and_bet": {
+      "source_index": 1,
+      "index": 1,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "refund_type_bet_only": {
+      "source_index": 2,
+      "index": 2,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "kick_reason_timeout": {
+      "source_index": 3,
+      "index": 3,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "kick_reason_admin": {
+      "source_index": 4,
+      "index": 4,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "kick_reason_reconstruct_timeout": {
+      "source_index": 5,
+      "index": 5,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "reset_reason_timeout": {
+      "source_index": 6,
+      "index": 6,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "reset_reason_kick": {
+      "source_index": 7,
+      "index": 7,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "reset_reason_reconstruct_fail": {
+      "source_index": 8,
+      "index": 8,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "reset_reason_last_player_standing": {
+      "source_index": 9,
+      "index": 9,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "fold_reason_manual": {
+      "source_index": 10,
+      "index": 10,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "fold_reason_auto_timeout": {
+      "source_index": 11,
+      "index": 11,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "fold_reason_force_admin": {
+      "source_index": 12,
+      "index": 12,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        "u8"
+      ]
+    },
+    "emit_table_created": {
+      "source_index": 13,
+      "index": 13,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "name",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "std",
+                "name": "string"
+              },
+              "name": "String",
+              "type_arguments": []
+            }
+          }
+        }
+      ],
+      "return_": []
+    },
+    "emit_player_joined": {
+      "source_index": 14,
+      "index": 14,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "player",
+          "type_": "address"
+        },
+        {
+          "name": "buy_in",
+          "type_": "u64"
+        },
+        {
+          "name": "is_waiting",
+          "type_": "bool"
+        },
+        {
+          "name": "active_count_after",
+          "type_": "u64"
+        }
+      ],
+      "return_": []
+    },
+    "emit_player_left": {
+      "source_index": 15,
+      "index": 15,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "player",
+          "type_": "address"
+        }
+      ],
+      "return_": []
+    },
+    "emit_hand_started": {
+      "source_index": 16,
+      "index": 16,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "button",
+          "type_": "u64"
+        },
+        {
+          "name": "small_blind",
+          "type_": "u64"
+        },
+        {
+          "name": "big_blind",
+          "type_": "u64"
+        },
+        {
+          "name": "participants",
+          "type_": {
+            "vector": "u64"
+          }
+        }
+      ],
+      "return_": []
+    },
+    "emit_blinds_posted": {
+      "source_index": 17,
+      "index": 17,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "sb_seat",
+          "type_": "u64"
+        },
+        {
+          "name": "bb_seat",
+          "type_": "u64"
+        },
+        {
+          "name": "sb_amount",
+          "type_": "u64"
+        },
+        {
+          "name": "bb_amount",
+          "type_": "u64"
+        },
+        {
+          "name": "first_to_act",
+          "type_": "u64"
+        }
+      ],
+      "return_": []
+    },
+    "emit_betting_round_started": {
+      "source_index": 18,
+      "index": 18,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "round_state",
+          "type_": "u8"
+        },
+        {
+          "name": "current_bet",
+          "type_": "u64"
+        },
+        {
+          "name": "min_raise",
+          "type_": "u64"
+        },
+        {
+          "name": "first_to_act",
+          "type_": "u64"
+        },
+        {
+          "name": "pot_before",
+          "type_": "u64"
+        }
+      ],
+      "return_": []
+    },
+    "emit_round_advanced": {
+      "source_index": 19,
+      "index": 19,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "from_round",
+          "type_": "u8"
+        },
+        {
+          "name": "to_round",
+          "type_": "u8"
+        },
+        {
+          "name": "pot",
+          "type_": "u64"
+        },
+        {
+          "name": "community_cards_count",
+          "type_": "u64"
+        }
+      ],
+      "return_": []
+    },
+    "emit_pot_collected": {
+      "source_index": 20,
+      "index": 20,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "round_state",
+          "type_": "u8"
+        },
+        {
+          "name": "pot_after",
+          "type_": "u64"
+        },
+        {
+          "name": "collected_from_seats",
+          "type_": {
+            "vector": "u64"
+          }
+        }
+      ],
+      "return_": []
+    },
+    "emit_winner_awarded": {
+      "source_index": 21,
+      "index": 21,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "player",
+          "type_": "address"
+        },
+        {
+          "name": "amount",
+          "type_": "u64"
+        },
+        {
+          "name": "pot_type",
+          "type_": "u8"
+        },
+        {
+          "name": "hand_rank",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "std",
+                "name": "option"
+              },
+              "name": "Option",
+              "type_arguments": [
+                {
+                  "phantom": false,
+                  "argument": "u64"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "return_": []
+    },
+    "emit_hand_settled": {
+      "source_index": 22,
+      "index": 22,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "pot",
+          "type_": "u64"
+        },
+        {
+          "name": "winners",
+          "type_": {
+            "vector": "u64"
+          }
+        }
+      ],
+      "return_": []
+    },
+    "emit_hand_ended_without_showdown": {
+      "source_index": 23,
+      "index": 23,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "winner_seat",
+          "type_": "u64"
+        },
+        {
+          "name": "winner_player",
+          "type_": "address"
+        },
+        {
+          "name": "pot",
+          "type_": "u64"
+        }
+      ],
+      "return_": []
+    },
+    "emit_hand_reset": {
+      "source_index": 24,
+      "index": 24,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "reason",
+          "type_": "u8"
+        },
+        {
+          "name": "round_state",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_player_folded": {
+      "source_index": 25,
+      "index": 25,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "reason",
+          "type_": "u8"
+        },
+        {
+          "name": "round_state",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_player_checked": {
+      "source_index": 26,
+      "index": 26,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "round_state",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_player_called": {
+      "source_index": 27,
+      "index": 27,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "call_delta",
+          "type_": "u64"
+        },
+        {
+          "name": "round_state",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_player_raised": {
+      "source_index": 28,
+      "index": 28,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "raise_delta",
+          "type_": "u64"
+        },
+        {
+          "name": "total_bet",
+          "type_": "u64"
+        },
+        {
+          "name": "round_state",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_player_all_in": {
+      "source_index": 29,
+      "index": 29,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "trigger_action",
+          "type_": "u8"
+        },
+        {
+          "name": "amount",
+          "type_": "u64"
+        },
+        {
+          "name": "round_state",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_shuffle_verified": {
+      "source_index": 30,
+      "index": 30,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "player",
+          "type_": "address"
+        }
+      ],
+      "return_": []
+    },
+    "emit_shuffle_turn": {
+      "source_index": 31,
+      "index": 31,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "pending_count",
+          "type_": "u64"
+        },
+        {
+          "name": "completed_count",
+          "type_": "u64"
+        }
+      ],
+      "return_": []
+    },
+    "emit_shuffle_complete": {
+      "source_index": 32,
+      "index": 32,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "phase",
+          "type_": "u8"
+        },
+        {
+          "name": "participant_count",
+          "type_": "u64"
+        },
+        {
+          "name": "deck_size",
+          "type_": "u64"
+        }
+      ],
+      "return_": []
+    },
+    "emit_shuffle_timeout": {
+      "source_index": 33,
+      "index": 33,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "phase",
+          "type_": "u8"
+        },
+        {
+          "name": "started_at",
+          "type_": "u64"
+        },
+        {
+          "name": "timeout_ms",
+          "type_": "u64"
+        }
+      ],
+      "return_": []
+    },
+    "emit_reveal_phase": {
+      "source_index": 34,
+      "index": 34,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "phase",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_reveal_token_submitted": {
+      "source_index": 35,
+      "index": 35,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "card_index",
+          "type_": "u64"
+        },
+        {
+          "name": "phase",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_reveal_phase_complete": {
+      "source_index": 36,
+      "index": 36,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "phase",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_reveal_timeout": {
+      "source_index": 37,
+      "index": 37,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "phase",
+          "type_": "u8"
+        },
+        {
+          "name": "pending_players",
+          "type_": {
+            "vector": "u64"
+          }
+        }
+      ],
+      "return_": []
+    },
+    "emit_card_is_identity": {
+      "source_index": 38,
+      "index": 38,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "card_index",
+          "type_": "u64"
+        },
+        {
+          "name": "assignment_index",
+          "type_": "u64"
+        },
+        {
+          "name": "phase",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_identity_redeal": {
+      "source_index": 39,
+      "index": 39,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "identity_card_indices",
+          "type_": {
+            "vector": "u64"
+          }
+        },
+        {
+          "name": "redeal_count",
+          "type_": "u64"
+        },
+        {
+          "name": "phase",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_redeal_requested": {
+      "source_index": 40,
+      "index": 40,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "card_indices",
+          "type_": {
+            "vector": "u64"
+          }
+        }
+      ],
+      "return_": []
+    },
+    "emit_community_card_revealed": {
+      "source_index": 41,
+      "index": 41,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "phase",
+          "type_": "u8"
+        },
+        {
+          "name": "card_indices",
+          "type_": {
+            "vector": "u64"
+          }
+        },
+        {
+          "name": "card_ranks",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "card_suits",
+          "type_": {
+            "vector": "u8"
+          }
+        }
+      ],
+      "return_": []
+    },
+    "emit_reconstruct_initiated": {
+      "source_index": 42,
+      "index": 42,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "expected_players",
+          "type_": {
+            "vector": "u64"
+          }
+        },
+        {
+          "name": "round_state",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_reconstruct_deck_submitted": {
+      "source_index": 43,
+      "index": 43,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        }
+      ],
+      "return_": []
+    },
+    "emit_reconstruct_complete": {
+      "source_index": 44,
+      "index": 44,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        }
+      ],
+      "return_": []
+    },
+    "emit_reconstruct_timeout": {
+      "source_index": 45,
+      "index": 45,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "pending_players",
+          "type_": {
+            "vector": "u64"
+          }
+        }
+      ],
+      "return_": []
+    },
+    "emit_player_kicked": {
+      "source_index": 46,
+      "index": 46,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "player",
+          "type_": "address"
+        },
+        {
+          "name": "reason",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    },
+    "emit_player_refund": {
+      "source_index": 47,
+      "index": 47,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "table_id",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "sui",
+                "name": "object"
+              },
+              "name": "ID",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "seat_index",
+          "type_": "u64"
+        },
+        {
+          "name": "player",
+          "type_": "address"
+        },
+        {
+          "name": "amount",
+          "type_": "u64"
+        },
+        {
+          "name": "refund_type",
+          "type_": "u8"
+        }
+      ],
+      "return_": []
+    }
+  },
+  "structs": {
+    "TableCreated": {
+      "index": 0,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "name": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          }
+        }
+      }
+    },
+    "PlayerJoined": {
+      "index": 1,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "player": {
+            "index": 2,
+            "doc": null,
+            "type_": "address"
+          },
+          "buy_in": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          },
+          "is_waiting": {
+            "index": 4,
+            "doc": null,
+            "type_": "bool"
+          },
+          "active_count_after": {
+            "index": 5,
+            "doc": null,
+            "type_": "u64"
+          }
+        }
+      }
+    },
+    "PlayerLeft": {
+      "index": 2,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "player": {
+            "index": 2,
+            "doc": null,
+            "type_": "address"
+          }
+        }
+      }
+    },
+    "HandStarted": {
+      "index": 3,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "button": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "small_blind": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          },
+          "big_blind": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          },
+          "participants": {
+            "index": 4,
+            "doc": null,
+            "type_": {
+              "vector": "u64"
+            }
+          }
+        }
+      }
+    },
+    "BlindsPosted": {
+      "index": 4,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "sb_seat": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "bb_seat": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          },
+          "sb_amount": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          },
+          "bb_amount": {
+            "index": 4,
+            "doc": null,
+            "type_": "u64"
+          },
+          "first_to_act": {
+            "index": 5,
+            "doc": null,
+            "type_": "u64"
+          }
+        }
+      }
+    },
+    "BettingRoundStarted": {
+      "index": 5,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "round_state": {
+            "index": 1,
+            "doc": null,
+            "type_": "u8"
+          },
+          "current_bet": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          },
+          "min_raise": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          },
+          "first_to_act": {
+            "index": 4,
+            "doc": null,
+            "type_": "u64"
+          },
+          "pot_before": {
+            "index": 5,
+            "doc": null,
+            "type_": "u64"
+          }
+        }
+      }
+    },
+    "RoundAdvanced": {
+      "index": 6,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "from_round": {
+            "index": 1,
+            "doc": null,
+            "type_": "u8"
+          },
+          "to_round": {
+            "index": 2,
+            "doc": null,
+            "type_": "u8"
+          },
+          "pot": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          },
+          "community_cards_count": {
+            "index": 4,
+            "doc": null,
+            "type_": "u64"
+          }
+        }
+      }
+    },
+    "PotCollected": {
+      "index": 7,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "round_state": {
+            "index": 1,
+            "doc": null,
+            "type_": "u8"
+          },
+          "pot_after": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          },
+          "collected_from_seats": {
+            "index": 3,
+            "doc": null,
+            "type_": {
+              "vector": "u64"
+            }
+          }
+        }
+      }
+    },
+    "WinnerAwarded": {
+      "index": 8,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "player": {
+            "index": 2,
+            "doc": null,
+            "type_": "address"
+          },
+          "amount": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          },
+          "pot_type": {
+            "index": 4,
+            "doc": " 0=main_pot, 1=side_pot",
+            "type_": "u8"
+          },
+          "hand_rank": {
+            "index": 5,
+            "doc": " 最佳牌型 (None=无摊牌直接获胜)",
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "option"
+                },
+                "name": "Option",
+                "type_arguments": [
+                  {
+                    "phantom": false,
+                    "argument": "u64"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "HandSettled": {
+      "index": 9,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "pot": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "winners": {
+            "index": 2,
+            "doc": null,
+            "type_": {
+              "vector": "u64"
+            }
+          }
+        }
+      }
+    },
+    "HandEndedWithoutShowdown": {
+      "index": 10,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "winner_seat": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "winner_player": {
+            "index": 2,
+            "doc": null,
+            "type_": "address"
+          },
+          "pot": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          }
+        }
+      }
+    },
+    "HandReset": {
+      "index": 11,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "reason": {
+            "index": 1,
+            "doc": null,
+            "type_": "u8"
+          },
+          "round_state": {
+            "index": 2,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "PlayerFolded": {
+      "index": 12,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "reason": {
+            "index": 2,
+            "doc": " 0=manual, 1=auto_timeout, 2=force_admin",
+            "type_": "u8"
+          },
+          "round_state": {
+            "index": 3,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "PlayerChecked": {
+      "index": 13,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "round_state": {
+            "index": 2,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "PlayerCalled": {
+      "index": 14,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "call_delta": {
+            "index": 2,
+            "doc": " 本次实际投入增量",
+            "type_": "u64"
+          },
+          "round_state": {
+            "index": 3,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "PlayerRaised": {
+      "index": 15,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "raise_delta": {
+            "index": 2,
+            "doc": " 本次加注增量",
+            "type_": "u64"
+          },
+          "total_bet": {
+            "index": 3,
+            "doc": " 加注后该玩家累计下注",
+            "type_": "u64"
+          },
+          "round_state": {
+            "index": 4,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "PlayerAllIn": {
+      "index": 16,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "trigger_action": {
+            "index": 2,
+            "doc": " 0=call_all_in, 1=raise_all_in",
+            "type_": "u8"
+          },
+          "amount": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          },
+          "round_state": {
+            "index": 4,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "ShuffleVerified": {
+      "index": 17,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "player": {
+            "index": 2,
+            "doc": null,
+            "type_": "address"
+          }
+        }
+      }
+    },
+    "ShuffleTurnEvt": {
+      "index": 18,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "pending_count": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          },
+          "completed_count": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          }
+        }
+      }
+    },
+    "ShuffleCompleteEvt": {
+      "index": 19,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "phase": {
+            "index": 1,
+            "doc": null,
+            "type_": "u8"
+          },
+          "participant_count": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          },
+          "deck_size": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          }
+        }
+      }
+    },
+    "ShuffleTimeout": {
+      "index": 20,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "phase": {
+            "index": 2,
+            "doc": null,
+            "type_": "u8"
+          },
+          "started_at": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          },
+          "timeout_ms": {
+            "index": 4,
+            "doc": null,
+            "type_": "u64"
+          }
+        }
+      }
+    },
+    "RevealPhaseEvt": {
+      "index": 21,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "phase": {
+            "index": 1,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "RevealTokenSubmitted": {
+      "index": 22,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "card_index": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          },
+          "phase": {
+            "index": 3,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "RevealPhaseComplete": {
+      "index": 23,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "phase": {
+            "index": 1,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "RevealTimeout": {
+      "index": 24,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "phase": {
+            "index": 1,
+            "doc": null,
+            "type_": "u8"
+          },
+          "pending_players": {
+            "index": 2,
+            "doc": null,
+            "type_": {
+              "vector": "u64"
+            }
+          }
+        }
+      }
+    },
+    "CardIsIdentity": {
+      "index": 25,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "card_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "assignment_index": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          },
+          "phase": {
+            "index": 3,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "IdentityRedeal": {
+      "index": 26,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "identity_card_indices": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "vector": "u64"
+            }
+          },
+          "redeal_count": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          },
+          "phase": {
+            "index": 3,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "RedealRequested": {
+      "index": 27,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "card_indices": {
+            "index": 2,
+            "doc": null,
+            "type_": {
+              "vector": "u64"
+            }
+          }
+        }
+      }
+    },
+    "CommunityCardRevealed": {
+      "index": 28,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "phase": {
+            "index": 1,
+            "doc": null,
+            "type_": "u8"
+          },
+          "card_indices": {
+            "index": 2,
+            "doc": null,
+            "type_": {
+              "vector": "u64"
+            }
+          },
+          "card_ranks": {
+            "index": 3,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "card_suits": {
+            "index": 4,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          }
+        }
+      }
+    },
+    "ReconstructInitiated": {
+      "index": 29,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "expected_players": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "vector": "u64"
+            }
+          },
+          "round_state": {
+            "index": 2,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "ReconstructDeckSubmitted": {
+      "index": 30,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          }
+        }
+      }
+    },
+    "ReconstructCompleteEvt": {
+      "index": 31,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          }
+        }
+      }
+    },
+    "ReconstructTimeout": {
+      "index": 32,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "pending_players": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "vector": "u64"
+            }
+          }
+        }
+      }
+    },
+    "PlayerKicked": {
+      "index": 33,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "player": {
+            "index": 2,
+            "doc": null,
+            "type_": "address"
+          },
+          "reason": {
+            "index": 3,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    },
+    "PlayerRefund": {
+      "index": 34,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "table_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "seat_index": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "player": {
+            "index": 2,
+            "doc": null,
+            "type_": "address"
+          },
+          "amount": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          },
+          "refund_type": {
+            "index": 4,
+            "doc": null,
+            "type_": "u8"
+          }
+        }
+      }
+    }
+  },
+  "enums": {}
+}

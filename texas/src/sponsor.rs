@@ -176,12 +176,12 @@ pub async fn zklogin_auth(
 
 #[derive(Serialize)]
 pub struct GasInfoResponse {
-    sponsor_address: String,
-    gas_coin_id: String,
-    gas_coin_version: String,
-    gas_coin_digest: String,
-    gas_price: String,
-    gas_budget: u64,
+    pub(crate) sponsor_address: String,
+    pub(crate) gas_coin_id: String,
+    pub(crate) gas_coin_version: String,
+    pub(crate) gas_coin_digest: String,
+    pub(crate) gas_price: String,
+    pub(crate) gas_budget: u64,
 }
 
 /// GET /api/sponsor/gas-info
@@ -203,7 +203,7 @@ pub async fn get_gas_info(
     }
 }
 
-async fn fetch_gas_info(config: &Config) -> Result<GasInfoResponse, String> {
+pub(crate) async fn fetch_gas_info(config: &Config) -> Result<GasInfoResponse, String> {
     let private_key = parse_sponsor_private_key(&config.sponsor_private_key)?;
     let public_key = private_key.public_key();
     let sponsor_address: sui_sdk_types::Address = public_key.derive_address();
@@ -316,7 +316,7 @@ pub async fn sponsor_transaction(
 /// `Signer<UserSignature>`. We compute the Sui signing digest
 /// (blake2b of intent + tx_bytes) and sign it, then serialize
 /// the result as a Sui signature (flag + sig + pubkey in base64).
-async fn sign_transaction_as_sponsor(
+pub(crate) async fn sign_transaction_as_sponsor(
     config: &Config,
     tx_bytes_b64: &str,
 ) -> Result<String, String> {
@@ -358,7 +358,7 @@ async fn sign_transaction_as_sponsor(
 /// Supports two formats:
 /// 1. `suiprivkey<base64>` - Sui CLI export format (flag byte + 32-byte key)
 /// 2. Raw base64 of 32-byte Ed25519 private key
-fn parse_sponsor_private_key(private_key: &str) -> Result<sui_crypto::ed25519::Ed25519PrivateKey, String> {
+pub(crate) fn parse_sponsor_private_key(private_key: &str) -> Result<sui_crypto::ed25519::Ed25519PrivateKey, String> {
     // Handle suiprivkey prefix
     let key_str = private_key.strip_prefix("suiprivkey").unwrap_or(private_key);
     let key_bytes = base64_decode(key_str)?;
@@ -384,7 +384,7 @@ fn parse_sponsor_private_key(private_key: &str) -> Result<sui_crypto::ed25519::E
     Ok(sui_crypto::ed25519::Ed25519PrivateKey::new(pk_bytes))
 }
 
-async fn sui_jsonrpc(
+pub(crate) async fn sui_jsonrpc(
     client: &reqwest::Client,
     url: &str,
     method: &str,

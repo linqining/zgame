@@ -116,7 +116,7 @@ pub async fn inodra_webhook(
 
 /// 处理解析后的链上事件
 /// 当前仅记录日志，后续可根据事件类型触发游戏逻辑
-async fn handle_chain_event(event: crate::sui_events::SuiChainEvent, _state: &Arc<AppState>) {
+async fn handle_chain_event(event: crate::sui_events::SuiChainEvent, state: &Arc<AppState>) {
     match &event {
         crate::sui_events::SuiChainEvent::PlayerJoined { table_id, player, buy_in, .. } => {
             tracing::info!(
@@ -143,4 +143,6 @@ async fn handle_chain_event(event: crate::sui_events::SuiChainEvent, _state: &Ar
             tracing::debug!("[sui_webhook] unhandled event: {:?}", event);
         }
     }
+
+    crate::relayer::process_event(&state.relayer_state, &state.config.fullnode_url, &event).await;
 }

@@ -10914,6 +10914,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sui-transaction-builder"
+version = "0.3.0"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=e494a36a76a0aab8c5d66d5557995faee5c1fb09#e494a36a76a0aab8c5d66d5557995faee5c1fb09"
+dependencies = [
+ "async-trait",
+ "bcs",
+ "futures",
+ "serde",
+ "sui-rpc 0.3.0",
+ "sui-sdk-types 0.3.0",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "sui-transaction-checks"
 version = "0.1.0"
 source = "git+https://github.com/mystenlabs/sui?rev=11ea899f8b9a19417096b01c6c75df0a9a48c878#11ea899f8b9a19417096b01c6c75df0a9a48c878"
@@ -11461,6 +11475,7 @@ dependencies = [
  "sui-rpc 0.3.0",
  "sui-sdk 1.73.0",
  "sui-sdk-types 0.3.0",
+ "sui-transaction-builder 0.3.0",
  "thiserror 2.0.18",
  "tokio",
  "tower 0.4.13",

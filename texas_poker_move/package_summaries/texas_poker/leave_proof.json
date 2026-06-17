@@ -1,0 +1,410 @@
+{
+  "id": {
+    "address": "texas_poker",
+    "name": "leave_proof"
+  },
+  "doc": null,
+  "immediate_dependencies": [
+    {
+      "address": "sui",
+      "name": "bls12381"
+    },
+    {
+      "address": "sui",
+      "name": "group_ops"
+    },
+    {
+      "address": "texas_poker",
+      "name": "bls_elgamal"
+    },
+    {
+      "address": "texas_poker",
+      "name": "bls_scalar"
+    },
+    {
+      "address": "texas_poker",
+      "name": "bls_transcript"
+    }
+  ],
+  "attributes": [],
+  "functions": {
+    "per_card_commitments": {
+      "source_index": 0,
+      "index": 0,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "leave_proof"
+                  },
+                  "name": "LeaveProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": {
+                "vector": "u8"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "commitment_pk": {
+      "source_index": 1,
+      "index": 1,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "leave_proof"
+                  },
+                  "name": "LeaveProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "response": {
+      "source_index": 2,
+      "index": 2,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "leave_proof"
+                  },
+                  "name": "LeaveProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "nonce": {
+      "source_index": 3,
+      "index": 3,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "leave_proof"
+                  },
+                  "name": "LeaveProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "new": {
+      "source_index": 4,
+      "index": 4,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "per_card_commitments",
+          "type_": {
+            "vector": {
+              "vector": "u8"
+            }
+          }
+        },
+        {
+          "name": "commitment_pk",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "response",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "nonce",
+          "type_": {
+            "vector": "u8"
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "leave_proof"
+            },
+            "name": "LeaveProof",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "verify": {
+      "source_index": 5,
+      "index": 5,
+      "doc": " 验证 LeaveProof\n input_cts: leave 前的密文\n output_cts: leave 后的密文\n player_pk: 玩家公钥 G * sk\n t: Fiat-Shamir transcript",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "leave_proof"
+                  },
+                  "name": "LeaveProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "input_cts",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "texas_poker",
+                      "name": "bls_elgamal"
+                    },
+                    "name": "ElGamalCiphertext",
+                    "type_arguments": []
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "output_cts",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "texas_poker",
+                      "name": "bls_elgamal"
+                    },
+                    "name": "ElGamalCiphertext",
+                    "type_arguments": []
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "player_pk",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "group_ops"
+                  },
+                  "name": "Element",
+                  "type_arguments": [
+                    {
+                      "phantom": true,
+                      "argument": {
+                        "Datatype": {
+                          "module": {
+                            "address": "sui",
+                            "name": "bls12381"
+                          },
+                          "name": "G1",
+                          "type_arguments": []
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "bls_transcript"
+                  },
+                  "name": "Transcript",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "bool"
+      ]
+    }
+  },
+  "structs": {
+    "LeaveProof": {
+      "index": 0,
+      "doc": " LeaveProof：证明 leave 操作 (c2 -= c1 * sk) 被正确执行\n 即证明知道 sk 使得 pk = G * sk，且 output.c2 = input.c2 - input.c1 * sk\n 与 RemaskProof 结构相同，但 d2 计算方向相反",
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop",
+        "Store"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "per_card_commitments": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "vector": {
+                "vector": "u8"
+              }
+            }
+          },
+          "commitment_pk": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "response": {
+            "index": 2,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "nonce": {
+            "index": 3,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          }
+        }
+      }
+    }
+  },
+  "enums": {}
+}

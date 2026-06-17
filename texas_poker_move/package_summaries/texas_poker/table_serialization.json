@@ -1,0 +1,482 @@
+{
+  "id": {
+    "address": "texas_poker",
+    "name": "table_serialization"
+  },
+  "doc": null,
+  "immediate_dependencies": [
+    {
+      "address": "sui",
+      "name": "bls12381"
+    },
+    {
+      "address": "sui",
+      "name": "group_ops"
+    },
+    {
+      "address": "texas_poker",
+      "name": "bls_scalar"
+    },
+    {
+      "address": "texas_poker",
+      "name": "chaum_pedersen"
+    },
+    {
+      "address": "texas_poker",
+      "name": "leave_proof"
+    },
+    {
+      "address": "texas_poker",
+      "name": "reconstruct_proof"
+    },
+    {
+      "address": "texas_poker",
+      "name": "remask_proof"
+    },
+    {
+      "address": "texas_poker",
+      "name": "reveal_token_proof"
+    },
+    {
+      "address": "texas_poker",
+      "name": "schnorr_proof"
+    },
+    {
+      "address": "texas_poker",
+      "name": "shuffle_proof"
+    }
+  ],
+  "attributes": [],
+  "functions": {
+    "add_pk_to_aggregated": {
+      "source_index": 0,
+      "index": 0,
+      "doc": " 将 pk 加到聚合公钥上",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "aggregated",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pk",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "vector": "u8"
+        }
+      ]
+    },
+    "remove_pk_from_aggregated": {
+      "source_index": 1,
+      "index": 1,
+      "doc": " 从聚合公钥中减去 pk",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "aggregated",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pk",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "vector": "u8"
+        }
+      ]
+    },
+    "read_bytes": {
+      "source_index": 2,
+      "index": 2,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "data",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "offset",
+          "type_": "u64"
+        },
+        {
+          "name": "len",
+          "type_": "u64"
+        }
+      ],
+      "return_": [
+        {
+          "vector": "u8"
+        }
+      ]
+    },
+    "read_u16": {
+      "source_index": 3,
+      "index": 3,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "data",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "offset",
+          "type_": "u64"
+        }
+      ],
+      "return_": [
+        "u64"
+      ]
+    },
+    "read_g1_point": {
+      "source_index": 4,
+      "index": 4,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "data",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "offset",
+          "type_": "u64"
+        }
+      ],
+      "return_": [
+        {
+          "vector": "u8"
+        }
+      ]
+    },
+    "read_scalar": {
+      "source_index": 5,
+      "index": 5,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "data",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "offset",
+          "type_": "u64"
+        }
+      ],
+      "return_": [
+        {
+          "vector": "u8"
+        }
+      ]
+    },
+    "deserialize_schnorr_proof": {
+      "source_index": 6,
+      "index": 6,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "data",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        },
+        {
+          "name": "offset",
+          "type_": "u64"
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "schnorr_proof"
+            },
+            "name": "GeneralizedSchnorrProof",
+            "type_arguments": []
+          }
+        },
+        "u64"
+      ]
+    },
+    "deserialize_shuffle_proof": {
+      "source_index": 7,
+      "index": 7,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "data",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "shuffle_proof"
+            },
+            "name": "ShuffleProof",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "deserialize_remask_proof": {
+      "source_index": 8,
+      "index": 8,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "data",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "remask_proof"
+            },
+            "name": "RemaskProof",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "generate_plaintext_bytes": {
+      "source_index": 9,
+      "index": 9,
+      "doc": " 由合约生成 52 张明文牌，序列化为 G1 compressed bytes",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [],
+      "return_": [
+        {
+          "vector": {
+            "vector": "u8"
+          }
+        }
+      ]
+    },
+    "deserialize_leave_proof": {
+      "source_index": 10,
+      "index": 10,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "data",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "leave_proof"
+            },
+            "name": "LeaveProof",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "deserialize_reveal_token_proof": {
+      "source_index": 11,
+      "index": 11,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "data",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "reveal_token_proof"
+            },
+            "name": "RevealTokenProof",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "deserialize_reconstruct_proof": {
+      "source_index": 12,
+      "index": 12,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "data",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "reconstruct_proof"
+            },
+            "name": "ReconstructProof",
+            "type_arguments": []
+          }
+        }
+      ]
+    }
+  },
+  "structs": {},
+  "enums": {}
+}

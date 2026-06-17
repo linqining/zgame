@@ -24,6 +24,9 @@ pub struct Config {
     pub sui_package_id: String,
     pub sui_network: String,
     pub sui_event_provider: String,
+    // Sui tick task config
+    pub sui_tick_interval_ms: u64,
+    pub sui_clock_object_id: String,
 }
 
 impl Config {
@@ -50,6 +53,8 @@ impl Config {
             sui_package_id: std::env::var("SUI_PACKAGE_ID").unwrap_or_else(|_| "".to_string()),
             sui_network: std::env::var("SUI_NETWORK").unwrap_or_else(|_| "testnet".to_string()),
             sui_event_provider: std::env::var("SUI_EVENT_PROVIDER").unwrap_or_else(|_| "grpc".to_string()),
+            sui_tick_interval_ms: std::env::var("SUI_TICK_INTERVAL_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000),
+            sui_clock_object_id: std::env::var("SUI_CLOCK_OBJECT_ID").unwrap_or_else(|_| "0x6".to_string()),
         }
     }
 }

@@ -75,7 +75,7 @@ impl SuiEventProvider {
 /// 使用 Sui GraphQL RPC 回填历史事件
 pub async fn backfill_historical_events(
     config: &Config,
-    _state: &Arc<AppState>,
+    state: &Arc<AppState>,
     last_checkpoint: u64,
 ) -> Result<u64, String> {
     let graphql_url = match config.sui_network.as_str() {
@@ -175,6 +175,7 @@ query Events($package: SuiAddress!, $cursor: String) {
 
             if let Some(chain_event) = parse_chain_event(event_type, &json_data) {
                 tracing::info!("[sui_listener] backfill event: {:?}", chain_event);
+                crate::relayer::process_event(&state.relayer_state, &config.fullnode_url, &chain_event).await;
                 total_events += 1;
             }
         }

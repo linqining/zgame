@@ -1,0 +1,296 @@
+{
+  "id": {
+    "address": "texas_poker",
+    "name": "schnorr_proof"
+  },
+  "doc": null,
+  "immediate_dependencies": [
+    {
+      "address": "sui",
+      "name": "bls12381"
+    },
+    {
+      "address": "sui",
+      "name": "group_ops"
+    },
+    {
+      "address": "texas_poker",
+      "name": "bls_scalar"
+    },
+    {
+      "address": "texas_poker",
+      "name": "bls_transcript"
+    }
+  ],
+  "attributes": [],
+  "functions": {
+    "commitment": {
+      "source_index": 0,
+      "index": 0,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "schnorr_proof"
+                  },
+                  "name": "GeneralizedSchnorrProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "responses": {
+      "source_index": 1,
+      "index": 1,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "schnorr_proof"
+                  },
+                  "name": "GeneralizedSchnorrProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": {
+                "vector": "u8"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "new": {
+      "source_index": 2,
+      "index": 2,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "commitment",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "responses",
+          "type_": {
+            "vector": {
+              "vector": "u8"
+            }
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "schnorr_proof"
+            },
+            "name": "GeneralizedSchnorrProof",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "verify": {
+      "source_index": 3,
+      "index": 3,
+      "doc": " 验证广义 Schnorr 证明\n base_points: 基点数组 G_1, ..., G_n\n r_point: 声称的线性组合点 R = sum(k_i * G_i)\n t: Fiat-Shamir transcript",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "schnorr_proof"
+                  },
+                  "name": "GeneralizedSchnorrProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "base_points",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "sui",
+                      "name": "group_ops"
+                    },
+                    "name": "Element",
+                    "type_arguments": [
+                      {
+                        "phantom": true,
+                        "argument": {
+                          "Datatype": {
+                            "module": {
+                              "address": "sui",
+                              "name": "bls12381"
+                            },
+                            "name": "G1",
+                            "type_arguments": []
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "r_point",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "group_ops"
+                  },
+                  "name": "Element",
+                  "type_arguments": [
+                    {
+                      "phantom": true,
+                      "argument": {
+                        "Datatype": {
+                          "module": {
+                            "address": "sui",
+                            "name": "bls12381"
+                          },
+                          "name": "G1",
+                          "type_arguments": []
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "bls_transcript"
+                  },
+                  "name": "Transcript",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "bool"
+      ]
+    }
+  },
+  "structs": {
+    "GeneralizedSchnorrProof": {
+      "index": 0,
+      "doc": " 广义 Schnorr 证明\n 证明知道 k_1, ..., k_n 使得 R = sum(k_i * G_i)",
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop",
+        "Store"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "commitment": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "responses": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "vector": {
+                "vector": "u8"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "enums": {}
+}

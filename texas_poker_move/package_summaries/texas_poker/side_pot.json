@@ -1,0 +1,291 @@
+{
+  "id": {
+    "address": "texas_poker",
+    "name": "side_pot"
+  },
+  "doc": null,
+  "immediate_dependencies": [],
+  "attributes": [],
+  "functions": {
+    "new_side_pot": {
+      "source_index": 0,
+      "index": 0,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "amount",
+          "type_": "u64"
+        },
+        {
+          "name": "eligible_seats",
+          "type_": {
+            "vector": "u64"
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "side_pot"
+            },
+            "name": "SidePot",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "amount": {
+      "source_index": 1,
+      "index": 1,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "sp",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "side_pot"
+                  },
+                  "name": "SidePot",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u64"
+      ]
+    },
+    "eligible_seats": {
+      "source_index": 2,
+      "index": 2,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "sp",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "side_pot"
+                  },
+                  "name": "SidePot",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u64"
+            }
+          ]
+        }
+      ]
+    },
+    "calculate_side_pots": {
+      "source_index": 3,
+      "index": 3,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "bets",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u64"
+              }
+            ]
+          }
+        },
+        {
+          "name": "folded",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "bool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "all_in",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "bool"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u64",
+        {
+          "vector": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "side_pot"
+              },
+              "name": "SidePot",
+              "type_arguments": []
+            }
+          }
+        }
+      ]
+    },
+    "sum_bets": {
+      "source_index": 4,
+      "index": 4,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "bets",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u64"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u64"
+      ]
+    },
+    "collect_all_in_bets": {
+      "source_index": 5,
+      "index": 5,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "bets",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u64"
+              }
+            ]
+          }
+        },
+        {
+          "name": "all_in",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "bool"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "vector": "u64"
+        }
+      ]
+    },
+    "sort_ascending": {
+      "source_index": 6,
+      "index": 6,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Private",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "v",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "vector": "u64"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    }
+  },
+  "structs": {
+    "SidePot": {
+      "index": 0,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop",
+        "Store"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "amount": {
+            "index": 0,
+            "doc": null,
+            "type_": "u64"
+          },
+          "eligible_seats": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "vector": "u64"
+            }
+          }
+        }
+      }
+    }
+  },
+  "enums": {}
+}

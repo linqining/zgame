@@ -1,0 +1,1407 @@
+{
+  "id": {
+    "address": "texas_poker",
+    "name": "reconstruct_proof"
+  },
+  "doc": null,
+  "immediate_dependencies": [
+    {
+      "address": "sui",
+      "name": "bls12381"
+    },
+    {
+      "address": "sui",
+      "name": "group_ops"
+    },
+    {
+      "address": "texas_poker",
+      "name": "bls_elgamal"
+    },
+    {
+      "address": "texas_poker",
+      "name": "bls_scalar"
+    },
+    {
+      "address": "texas_poker",
+      "name": "bls_transcript"
+    },
+    {
+      "address": "texas_poker",
+      "name": "chaum_pedersen"
+    },
+    {
+      "address": "texas_poker",
+      "name": "schnorr_proof"
+    }
+  ],
+  "attributes": [],
+  "functions": {
+    "user_readable_card": {
+      "source_index": 0,
+      "index": 0,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "SwapOutCardProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "swap_out_card": {
+      "source_index": 1,
+      "index": 1,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "SwapOutCardProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "chaum_pedersen_proof": {
+      "source_index": 2,
+      "index": 2,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "SwapOutCardProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "chaum_pedersen"
+                },
+                "name": "ChaumPedersenProof",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "commitment": {
+      "source_index": 3,
+      "index": 3,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructionDLEQProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "response": {
+      "source_index": 4,
+      "index": 4,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructionDLEQProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "nonce": {
+      "source_index": 5,
+      "index": 5,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructionDLEQProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "swap_out_proofs": {
+      "source_index": 6,
+      "index": 6,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "SwapOutCardProof",
+                  "type_arguments": []
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "sum_c1_r_commit": {
+      "source_index": 7,
+      "index": 7,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "sum_c2_r_commit": {
+      "source_index": 8,
+      "index": 8,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "swap_sum_c1_commit": {
+      "source_index": 9,
+      "index": 9,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "swap_sum_c2_commit": {
+      "source_index": 10,
+      "index": 10,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "reconstruct_nonce": {
+      "source_index": 11,
+      "index": 11,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "vector": "u8"
+            }
+          ]
+        }
+      ]
+    },
+    "blind_dleq_proof": {
+      "source_index": 12,
+      "index": 12,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "reconstruct_proof"
+                },
+                "name": "ReconstructionDLEQProof",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "total_dleq_proof": {
+      "source_index": 13,
+      "index": 13,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "chaum_pedersen"
+                },
+                "name": "ChaumPedersenProof",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "swap_combined_schnorr_proof": {
+      "source_index": 14,
+      "index": 14,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "schnorr_proof"
+                },
+                "name": "GeneralizedSchnorrProof",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "sum_swap_out_c1_schnorr_proof": {
+      "source_index": 15,
+      "index": 15,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "schnorr_proof"
+                },
+                "name": "GeneralizedSchnorrProof",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "sum_swap_out_c2_schnorr_proof": {
+      "source_index": 16,
+      "index": 16,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "schnorr_proof"
+                },
+                "name": "GeneralizedSchnorrProof",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "new_swap_out_card_proof": {
+      "source_index": 17,
+      "index": 17,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "user_readable_card",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "swap_out_card",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "chaum_pedersen_proof",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "chaum_pedersen"
+              },
+              "name": "ChaumPedersenProof",
+              "type_arguments": []
+            }
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "reconstruct_proof"
+            },
+            "name": "SwapOutCardProof",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "new_reconstruction_dleq_proof": {
+      "source_index": 18,
+      "index": 18,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "commitment",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "response",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "nonce",
+          "type_": {
+            "vector": "u8"
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "reconstruct_proof"
+            },
+            "name": "ReconstructionDLEQProof",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "new": {
+      "source_index": 19,
+      "index": 19,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "swap_out_proofs",
+          "type_": {
+            "vector": {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "reconstruct_proof"
+                },
+                "name": "SwapOutCardProof",
+                "type_arguments": []
+              }
+            }
+          }
+        },
+        {
+          "name": "sum_c1_r_commit",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "sum_c2_r_commit",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "swap_sum_c1_commit",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "swap_sum_c2_commit",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "nonce",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "blind_dleq_proof",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "reconstruct_proof"
+              },
+              "name": "ReconstructionDLEQProof",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "total_dleq_proof",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "chaum_pedersen"
+              },
+              "name": "ChaumPedersenProof",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "swap_combined_schnorr_proof",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "schnorr_proof"
+              },
+              "name": "GeneralizedSchnorrProof",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "sum_swap_out_c1_schnorr_proof",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "schnorr_proof"
+              },
+              "name": "GeneralizedSchnorrProof",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "sum_swap_out_c2_schnorr_proof",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "texas_poker",
+                "name": "schnorr_proof"
+              },
+              "name": "GeneralizedSchnorrProof",
+              "type_arguments": []
+            }
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "reconstruct_proof"
+            },
+            "name": "ReconstructProof",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "ciphertext_from_bytes": {
+      "source_index": 20,
+      "index": 20,
+      "doc": " 从字节反序列化 ElGamalCiphertext（96 bytes = 48 c1 + 48 c2）",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "data",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": "u8"
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "texas_poker",
+              "name": "bls_elgamal"
+            },
+            "name": "ElGamalCiphertext",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "verify": {
+      "source_index": 21,
+      "index": 21,
+      "doc": " 验证 ReconstructProof\n cards: 明文牌点\n output_cards: 重建后的输出密文\n swap_out_cards: swap-out 牌密文\n user_readable_cards: 用户可读牌密文\n user_pk: 用户公钥\n t: Fiat-Shamir transcript",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "proof",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "ReconstructProof",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "cards",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "sui",
+                      "name": "group_ops"
+                    },
+                    "name": "Element",
+                    "type_arguments": [
+                      {
+                        "phantom": true,
+                        "argument": {
+                          "Datatype": {
+                            "module": {
+                              "address": "sui",
+                              "name": "bls12381"
+                            },
+                            "name": "G1",
+                            "type_arguments": []
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "output_cards",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "texas_poker",
+                      "name": "bls_elgamal"
+                    },
+                    "name": "ElGamalCiphertext",
+                    "type_arguments": []
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "swap_out_cards",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "texas_poker",
+                      "name": "bls_elgamal"
+                    },
+                    "name": "ElGamalCiphertext",
+                    "type_arguments": []
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "user_readable_cards",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "vector": {
+                  "Datatype": {
+                    "module": {
+                      "address": "texas_poker",
+                      "name": "bls_elgamal"
+                    },
+                    "name": "ElGamalCiphertext",
+                    "type_arguments": []
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "user_pk",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "group_ops"
+                  },
+                  "name": "Element",
+                  "type_arguments": [
+                    {
+                      "phantom": true,
+                      "argument": {
+                        "Datatype": {
+                          "module": {
+                            "address": "sui",
+                            "name": "bls12381"
+                          },
+                          "name": "G1",
+                          "type_arguments": []
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "bls_transcript"
+                  },
+                  "name": "Transcript",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "bool"
+      ]
+    }
+  },
+  "structs": {
+    "SwapOutCardProof": {
+      "index": 0,
+      "doc": " SwapOutCardProof：证明单张 swap-out 操作的正确性\n 证明 log_{delta_c1}(delta_c2) == log_G(user_pk) == user_sk",
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop",
+        "Store"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "user_readable_card": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "swap_out_card": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "chaum_pedersen_proof": {
+            "index": 2,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "chaum_pedersen"
+                },
+                "name": "ChaumPedersenProof",
+                "type_arguments": []
+              }
+            }
+          }
+        }
+      }
+    },
+    "ReconstructionDLEQProof": {
+      "index": 1,
+      "doc": " ReconstructionDLEQProof：盲化 DLEQ 证明\n 证明 points_out[i] = points_in[i] * blind（同一 blind）",
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop",
+        "Store"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "commitment": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "response": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "nonce": {
+            "index": 2,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          }
+        }
+      }
+    },
+    "ReconstructProof": {
+      "index": 2,
+      "doc": " ReconstructProof：重建证明\n 验证玩家从加密牌组中正确重建了可读牌",
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop",
+        "Store"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "swap_out_proofs": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "vector": {
+                "Datatype": {
+                  "module": {
+                    "address": "texas_poker",
+                    "name": "reconstruct_proof"
+                  },
+                  "name": "SwapOutCardProof",
+                  "type_arguments": []
+                }
+              }
+            }
+          },
+          "sum_c1_r_commit": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "sum_c2_r_commit": {
+            "index": 2,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "swap_sum_c1_commit": {
+            "index": 3,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "swap_sum_c2_commit": {
+            "index": 4,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "nonce": {
+            "index": 5,
+            "doc": null,
+            "type_": {
+              "vector": "u8"
+            }
+          },
+          "blind_dleq_proof": {
+            "index": 6,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "reconstruct_proof"
+                },
+                "name": "ReconstructionDLEQProof",
+                "type_arguments": []
+              }
+            }
+          },
+          "total_dleq_proof": {
+            "index": 7,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "chaum_pedersen"
+                },
+                "name": "ChaumPedersenProof",
+                "type_arguments": []
+              }
+            }
+          },
+          "swap_combined_schnorr_proof": {
+            "index": 8,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "schnorr_proof"
+                },
+                "name": "GeneralizedSchnorrProof",
+                "type_arguments": []
+              }
+            }
+          },
+          "sum_swap_out_c1_schnorr_proof": {
+            "index": 9,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "schnorr_proof"
+                },
+                "name": "GeneralizedSchnorrProof",
+                "type_arguments": []
+              }
+            }
+          },
+          "sum_swap_out_c2_schnorr_proof": {
+            "index": 10,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "texas_poker",
+                  "name": "schnorr_proof"
+                },
+                "name": "GeneralizedSchnorrProof",
+                "type_arguments": []
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "enums": {}
+}
