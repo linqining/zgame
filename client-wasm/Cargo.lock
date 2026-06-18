@@ -32,6 +32,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bitvec"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -153,6 +159,7 @@ dependencies = [
 name = "client-wasm"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clear_on_drop",
  "getrandom",
  "hex",
@@ -162,6 +169,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "subtle",
+ "sui-serialization",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
@@ -835,6 +843,16 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "sui-serialization"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "syn"

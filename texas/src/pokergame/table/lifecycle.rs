@@ -21,13 +21,14 @@ impl Table {
     pub fn end_without_showdown(&mut self) {
         let unfolded = self.unfolded_players();
         if let Some(winner) = unfolded.first() {
-            let win_amount = self.pot;
+            // Total win includes main pot + all side pots (B3 fix)
+            let total_win = self.pot + self.side_pots.iter().map(|sp| sp.amount).sum::<u64>();
             let winner_id = winner.id;
             let player_name = winner.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
             if let Some(seat) = self.seats.get_mut(&winner_id) {
-                seat.win_hand(win_amount);
+                seat.win_hand(total_win);
             }
-            self.win_messages.push(format!("{} wins ${:.2}", player_name, win_amount));
+            self.win_messages.push(format!("{} wins ${:.2}", player_name, total_win));
         }
         self.end_hand();
     }

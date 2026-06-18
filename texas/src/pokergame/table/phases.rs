@@ -10,10 +10,10 @@ impl Table {
         self.unfold_players();
         self.history = vec![];
         if self.active_players().len() > 1 {
-            self.button = Some(self.next_active_player(self.button.unwrap_or(1), 1));
+            self.button = self.next_active_player(self.button.unwrap_or(1), 1);
             self.set_turn();
             self.deal_preflop();
-            self.update_history();
+            // G5 修复：移除块内重复的 update_history() 调用，仅保留块外的统一调用
             self.set_blinds();
             self.hand_over = false;
             self.betting_round = Some(crate::pokergame::betting::BettingRound::new_preflop(self.min_bet * 2));
@@ -33,7 +33,7 @@ impl Table {
         self.turn = if active.len() <= 3 {
             self.button
         } else {
-            Some(self.next_active_player(self.button.unwrap_or(1), 3))
+            self.next_active_player(self.button.unwrap_or(1), 3)
         };
     }
 
@@ -41,16 +41,16 @@ impl Table {
         let is_heads_up = self.active_players().len() == 2;
         let button = self.button.unwrap_or(1);
 
-        self.small_blind = Some(if is_heads_up {
-            button
+        self.small_blind = if is_heads_up {
+            Some(button)
         } else {
             self.next_active_player(button, 1)
-        });
-        self.big_blind = Some(if is_heads_up {
+        };
+        self.big_blind = if is_heads_up {
             self.next_active_player(button, 1)
         } else {
             self.next_active_player(button, 2)
-        });
+        };
 
         let mut sb_amount: u64 = 0;
         let mut bb_amount: u64 = 0;
@@ -84,7 +84,9 @@ impl Table {
                     if let Some(player) = &seat.player{
                         if !seat.sitting_out {
                             tracing::info!("player {} is not sitting out,deal to {}", player.name, seat_id);
-                            self.mental_poker_game.deal_to_player(&player.pk_hex.clone(), 1).unwrap();
+                            if let Err(e) = self.mental_poker_game.deal_to_player(&player.pk_hex.clone(), 1) {
+                                tracing::error!("[deal_preflop] deal_to_player failed for player {} seat {}: {:?}", player.name, seat_id, e);
+                            }
                             seat.turn = self.turn == Some(seat_id);
                         }else{
                             tracing::info!("player {} is sitting out,no deal", player.name);

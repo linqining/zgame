@@ -12,6 +12,7 @@ use crate::sui_events::{parse_chain_event, SuiChainEvent};
 pub async fn subscribe_checkpoints(
     config: &Config,
     state: Arc<AppState>,
+    last_checkpoint: Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<(), String> {
     let package_id = &config.sui_package_id;
     if package_id.is_empty() {
@@ -37,7 +38,8 @@ pub async fn subscribe_checkpoints(
     };
     let request = SubscribeCheckpointsRequest::default().with_read_mask(read_mask);
 
-    tracing::info!("[sui_grpc] subscribing to checkpoint stream, filtering package {}", package_id);
+    let start_cp = last_checkpoint.load(std::sync::atomic::Ordering::SeqCst);
+    tracing::info!("[sui_grpc] subscribing to checkpoint stream (last processed={}), filtering package {}", start_cp, package_id);
 
     let response = subscription_client
         .subscribe_checkpoints(request)
@@ -94,10 +96,15 @@ pub async fn subscribe_checkpoints(
                     }
                 }
             }
-        }
 
-        // 记录已处理的检查点（可用于断点续传）
-        tracing::trace!("[sui_grpc] processed checkpoint {}", cursor);
+            // 记录已处理的检查点（可用于断点续传）
+            last_checkpoint.store(seq, std::sync::atomic::Ordering::SeqCst);
+            tracing::trace!("[sui_grpc] processed checkpoint {}", seq);
+        } else {
+            // checkpoint 为空时回退使用 cursor
+            last_checkpoint.store(cursor, std::sync::atomic::Ordering::SeqCst);
+            tracing::trace!("[sui_grpc] processed checkpoint {}", cursor);
+        }
     }
 
     tracing::warn!("[sui_grpc] checkpoint stream ended");
@@ -149,14 +156,57 @@ fn proto_value_to_serde(val: &prost_types::Value) -> serde_json::Value {
 pub async fn subscribe_with_reconnect(config: Config, state: Arc<AppState>) {
     let mut retry_delay = std::time::Duration::from_secs(1);
     let max_retry_delay = std::time::Duration::from_secs(60);
+    let last_checkpoint = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     loop {
-        match subscribe_checkpoints(&config, state.clone()).await {
+        match subscribe_checkpoints(&config, state.clone(), last_checkpoint.clone()).await {
             Ok(()) => {
-                tracing::warn!("[sui_grpc] stream ended normally, reconnecting...");
+                let cp = last_checkpoint.load(std::sync::atomic::Ordering::SeqCst);
+                tracing::warn!(
+                    "[sui_grpc] stream ended normally at checkpoint {}, reconnecting...",
+                    cp
+                );
+                // 正常结束后也尝试 backfill，避免最后一段事件丢失
+                if cp > 0 {
+                    tracing::info!(
+                        "[sui_grpc] backfilling from checkpoint {} before reconnecting...",
+                        cp
+                    );
+                    if let Err(e) = crate::sui_listener::backfill_from_checkpoint(
+                        &config,
+                        &state,
+                        cp,
+                    )
+                    .await
+                    {
+                        tracing::error!("[sui_grpc] backfill after normal end failed: {}", e);
+                    }
+                }
+                // G13 修复：成功结束后重置 retry_delay，避免正常断连后也使用退避后的长延迟
+                retry_delay = std::time::Duration::from_secs(1);
             }
             Err(e) => {
-                tracing::error!("[sui_grpc] subscription error: {}, reconnecting in {:?}", e, retry_delay);
+                let cp = last_checkpoint.load(std::sync::atomic::Ordering::SeqCst);
+                tracing::error!(
+                    "[sui_grpc] subscription error at checkpoint {}: {}, reconnecting in {:?}",
+                    cp, e, retry_delay
+                );
+                // C1 修复：重连前先 backfill 断连期间丢失的事件
+                if cp > 0 {
+                    tracing::info!(
+                        "[sui_grpc] backfilling from checkpoint {} before reconnecting...",
+                        cp
+                    );
+                    if let Err(e) = crate::sui_listener::backfill_from_checkpoint(
+                        &config,
+                        &state,
+                        cp,
+                    )
+                    .await
+                    {
+                        tracing::error!("[sui_grpc] backfill failed: {}", e);
+                    }
+                }
             }
         }
 
@@ -179,7 +229,7 @@ async fn handle_grpc_event(event: SuiChainEvent, state: &Arc<AppState>) {
                 table_id, player
             );
         }
-        SuiChainEvent::HandSettled { table_id, pot } => {
+        SuiChainEvent::HandSettled { table_id, pot, .. } => {
             tracing::info!(
                 "[sui_grpc] HandSettled: table={}, pot={}",
                 table_id, pot
@@ -190,7 +240,8 @@ async fn handle_grpc_event(event: SuiChainEvent, state: &Arc<AppState>) {
         }
     }
 
-    crate::relayer::process_event(&state.relayer_state, &state.config.fullnode_url, &event).await;
+    crate::relayer::process_event(&state.relayer_state, &state.config.fullnode_url, &state.config.sui_package_id, &event).await;
+    crate::relayer::apply_event_to_socket(state, &event).await;
 }
 
 #[cfg(test)]

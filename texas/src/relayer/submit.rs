@@ -36,6 +36,30 @@ fn base64_encode(input: &[u8]) -> String {
     engine.encode(input)
 }
 
+/// G9 修复：复用 sponsor 模块的全局 reqwest::Client，避免每次调用都创建新实例。
+fn shared_http_client() -> &'static reqwest::Client {
+    sponsor::shared_http_client()
+}
+
+/// 通过 Sui JSON-RPC 获取当前 epoch，用于设置交易过期时间。
+async fn get_current_epoch(config: &Config) -> Result<u64, String> {
+    let http = shared_http_client();
+    let result = sponsor::sui_jsonrpc(
+        http,
+        &config.fullnode_url,
+        "sui_getLatestSuiSystemState",
+        vec![],
+    )
+    .await?;
+    let epoch = result
+        .get("epoch")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .or_else(|| result.get("epoch").and_then(|v| v.as_u64()))
+        .ok_or("Missing epoch in system state")?;
+    Ok(epoch)
+}
+
 /// 从 `GasInfoResponse` 构建 [`GasPayment`]。
 ///
 /// `owner` 由调用方决定：赞助交易中为 sponsor 地址，tick 交易中为 sender（即 sponsor）。
@@ -82,7 +106,7 @@ async fn execute_tx(
     tx_bytes_b64: &str,
     signatures: Vec<String>,
 ) -> Result<String, String> {
-    let http = reqwest::Client::new();
+    let http = shared_http_client();
     let sigs_array: Vec<serde_json::Value> = signatures
         .into_iter()
         .map(serde_json::Value::String)
@@ -177,12 +201,15 @@ pub async fn submit_sponsored_tx(
     // 4. 构建 GasPayment
     let gas_payment = build_gas_payment(&gas_info, gas_owner, config.sponsor_gas_budget)?;
 
+    // F14: 获取当前 epoch，设置交易过期时间（当前 epoch + 2），避免交易无过期被重放
+    let current_epoch = get_current_epoch(config).await?;
+
     // 5. 构建完整 Transaction
     let transaction = Transaction {
         kind: tx_kind,
         sender,
         gas_payment,
-        expiration: TransactionExpiration::None,
+        expiration: TransactionExpiration::Epoch(current_epoch + 2),
     };
 
     // 6. BCS 序列化
@@ -228,7 +255,7 @@ pub async fn submit_tick_tx(
         &config.sui_package_id,
         table_id,
         &config.sui_clock_object_id,
-    );
+    )?;
 
     // 2. 序列化为 TransactionKind (base64)
     let tx_kind_b64 = ptb::serialize_tx_kind(pt)?;
@@ -248,12 +275,15 @@ pub async fn submit_tick_tx(
     // 6. 构建 GasPayment（owner = sponsor）
     let gas_payment = build_gas_payment(&gas_info, sender, config.sponsor_gas_budget)?;
 
+    // F14: 获取当前 epoch，设置交易过期时间（当前 epoch + 2），避免交易无过期被重放
+    let current_epoch = get_current_epoch(config).await?;
+
     // 7. 构建完整 Transaction
     let transaction = Transaction {
         kind: tx_kind,
         sender,
         gas_payment,
-        expiration: TransactionExpiration::None,
+        expiration: TransactionExpiration::Epoch(current_epoch + 2),
     };
 
     // 8. BCS 序列化
@@ -293,7 +323,7 @@ mod tests {
             free_chips_threshold: 0,
             free_chips_cooldown_secs: 0,
             max_players_per_table: 0,
-            sponsor_private_key: String::new(),
+            sponsor_private_key: zeroize::Zeroizing::new(String::new()),
             sponsor_gas_budget: 0,
             fullnode_url: String::new(),
             zklogin_salt_secret: String::new(),
@@ -303,6 +333,7 @@ mod tests {
             sui_event_provider: String::new(),
             sui_tick_interval_ms: 0,
             sui_clock_object_id: "0x6".to_string(),
+            sui_on_chain_enabled: false,
         }
     }
 

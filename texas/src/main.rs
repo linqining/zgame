@@ -12,6 +12,8 @@ mod sui_listener;
 mod sui_grpc;
 mod sui_query;
 mod relayer;
+#[cfg(test)]
+mod move_verify_tests;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,9 +57,9 @@ async fn main() -> std::io::Result<()> {
     let db = Database::new(&mongo_db).await;
 
     let mut initial_tables = HashMap::new();
-    initial_tables.insert(1, Table::new(1, "Table 1".to_string(), 10000, config.max_players_per_table));
-    initial_tables.insert(2, Table::new(2, "Table 2".to_string(), 20000, config.max_players_per_table));
-    initial_tables.insert(3, Table::new(3, "Table 3".to_string(), 50000, config.max_players_per_table));
+    initial_tables.insert(1, Table::new(1, "Table 1".to_string(), 10000, config.max_players_per_table, "0xc0c2c7e6dd9aaee5b3293869b698cff875a09f3c15af01c7062111ab7d8d3e0e".to_string()));
+    initial_tables.insert(2, Table::new(2, "Table 2".to_string(), 20000, config.max_players_per_table, "0x43aade11dde19ef6116d04c88f3b9a75c444fefcdd22d4e3691de251155949d8".to_string()));
+    initial_tables.insert(3, Table::new(3, "Table 3".to_string(), 50000, config.max_players_per_table, "0x54b3e41a7a34f07ef4f87031c1bbe76edbcafe3e4b8b16c959f53e016e3e409b".to_string()));
     for table in initial_tables.values_mut() {
         table.start_shuffle();
     }
@@ -80,6 +82,7 @@ async fn main() -> std::io::Result<()> {
         config: config.clone(),
         socket_state: socket_state.clone(),
         relayer_state: relayer_state.clone(),
+        processed_webhook_ids: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
     });
 
     // 克隆用于 Sui 监听器后台任务
@@ -111,6 +114,9 @@ async fn main() -> std::io::Result<()> {
     let app = Router::new()
         .nest("/api", api_routes)
         .route("/", routing::get(|| async { "Welcome to Vintage Poker (Rust)!" }))
+        // G17 TODO: 当前未实现 API 速率限制（rate limiting）。生产环境应引入
+        // tower_governor 或类似中间件对 /api/* 路由（尤其是 /auth/*、/chips/free、
+        // /sponsor/* 等敏感端点）添加 per-IP / per-user 限流，防止暴力破解与滥用。
         .layer(
             ServiceBuilder::new()
                 .map_request(move |mut req: axum::http::Request<axum::body::Body>| {

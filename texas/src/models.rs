@@ -121,15 +121,37 @@ impl Database {
     }
 
     pub async fn set_chips_with_cooldown(&self, id: &str, amount: i64) -> Option<User> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
+        let one_hour_ago = now - chrono::Duration::hours(1);
+        let now_str = now.to_rfc3339();
+        let one_hour_ago_str = one_hour_ago.to_rfc3339();
+
+        // F12: 原子操作 —— 在 filter 中加入冷却时间检查，避免 check-then-update 竞态
+        let filter = mongodb::bson::doc! {
+            "_id": id,
+            "$or": [
+                {"last_free_chips_at": {"$exists": false}},
+                {"last_free_chips_at": null},
+                {"last_free_chips_at": {"$lt": &one_hour_ago_str}}
+            ]
+        };
+        let update = mongodb::bson::doc! {
+            "$set": {"chips_amount": amount, "last_free_chips_at": &now_str}
+        };
+
         let result = self.users
-            .update_one(
-                mongodb::bson::doc! {"_id": id},
-                mongodb::bson::doc! {"$set": {"chips_amount": amount, "last_free_chips_at": &now}},
-            )
+            .update_one(filter, update)
             .await;
         match result {
-            Ok(_) => self.find_user_by_id(id).await,
+            Ok(update_result) if update_result.matched_count > 0 => {
+                // 冷却已过，更新成功，重新查询返回最新用户
+                self.find_user_by_id(id).await
+            }
+            Ok(_) => {
+                // matched_count == 0，冷却未过
+                tracing::debug!("Cooldown not elapsed for {}", id);
+                None
+            }
             Err(e) => {
                 tracing::error!("Failed to set chips for {}: {}", id, e);
                 None

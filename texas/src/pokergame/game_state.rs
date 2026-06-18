@@ -95,6 +95,32 @@ pub enum RevealPhase {
     RedealReveal,
 }
 
+impl RevealPhase {
+    /// 将链上 u8 reveal_phase 转换为 RevealPhase 枚举。
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(RevealPhase::HandReveal),
+            1 => Some(RevealPhase::CommunityReveal),
+            2 => Some(RevealPhase::ShowdownReveal),
+            3 => Some(RevealPhase::RedealReveal),
+            _ => None,
+        }
+    }
+
+    /// 将 Move 合约的 7 值 reveal_phase 映射为 Rust 内部 4 值 RevealPhase。
+    /// Move: 0=NONE, 1=PREFLOP, 2=REDEAL, 3=FLOP, 4=TURN, 5=RIVER, 6=SHOWDOWN
+    pub fn from_chain_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => None,
+            1 => Some(RevealPhase::HandReveal),
+            2 => Some(RevealPhase::RedealReveal),
+            3 | 4 | 5 => Some(RevealPhase::CommunityReveal),
+            6 => Some(RevealPhase::ShowdownReveal),
+            _ => None,
+        }
+    }
+}
+
 impl std::fmt::Display for RevealPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -208,19 +234,17 @@ impl<'de> Deserialize<'de> for PlayerRevealAssignment {
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub enum ReconstructPhase {
     #[default]
-    Initiated,
-    Voting,
-    Completed,
-    Forced,
+    None,
+    Collecting,
+    Complete,
 }
 
 impl std::fmt::Display for ReconstructPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReconstructPhase::Initiated => write!(f, "initiated"),
-            ReconstructPhase::Voting => write!(f, "voting"),
-            ReconstructPhase::Completed => write!(f, "completed"),
-            ReconstructPhase::Forced => write!(f, "forced"),
+            ReconstructPhase::None => write!(f, "none"),
+            ReconstructPhase::Collecting => write!(f, "collecting"),
+            ReconstructPhase::Complete => write!(f, "complete"),
         }
     }
 }

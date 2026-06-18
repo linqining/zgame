@@ -92,6 +92,10 @@ public fun verify(
     // 追加 commitment
     let commit_label = &b"gen_schnorr_commitment";
     let commitment_point = bls12381::g1_from_bytes(&proof.commitment);
+    // M-P17: 校验承诺点非 identity——identity 承诺削弱证明安全性
+    if (bls_scalar::g1_is_identity(&commitment_point)) {
+        return false
+    };
     bls_transcript::append_point(t, commit_label, &commitment_point);
 
     // 5. 提取挑战标量 c

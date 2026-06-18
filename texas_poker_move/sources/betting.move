@@ -17,6 +17,10 @@ const ACTION_CALL: u8 = 4;
 const ACTION_RAISE: u8 = 8;
 
 // ========== 下注轮 ==========
+// M-P11: actions_taken 统计所有动作（含 fold）。
+// 设计意图：用于判断 betting round 是否完成（所有活跃玩家都已行动）。
+// fold 虽然使玩家退出，但仍计入 actions_taken 以反映"该座位已处理"。
+// 如需单独统计非 fold 动作，应新增 active_actions_taken 字段。
 public struct BettingRound has store, drop {
     current_bet: u64,
     min_raise: u64,
@@ -63,13 +67,16 @@ public fun can_check(round: &BettingRound, seat_bet: u64): bool {
     chips_to_call(round, seat_bet) == 0
 }
 
-public fun can_call(round: &BettingRound, seat_bet: u64, _stack: u64): bool {
-    chips_to_call(round, seat_bet) > 0
+// M-P12: stack 参数用于校验玩家有筹码跟注（stack > 0）。
+// 原实现忽略 stack，现增加 stack > 0 检查以反映语义。
+public fun can_call(round: &BettingRound, seat_bet: u64, stack: u64): bool {
+    chips_to_call(round, seat_bet) > 0 && stack > 0
 }
 
 public fun can_raise(round: &BettingRound, seat_bet: u64, stack: u64): bool {
     let to_call = chips_to_call(round, seat_bet);
-    stack > to_call && (stack - to_call) >= round.min_raise
+    // M-D7 修复：玩家有筹码超出跟注部分即可加注（包括 all-in 小于 min_raise 的情况）
+    stack > to_call
 }
 
 // 获取可用动作（位掩码）
@@ -97,14 +104,22 @@ public fun process_raise(
     seat_bet: u64,
     stack: u64,
 ): u64 {
+    // M-D8 修复：在减法前添加 assert 校验，防止 u64 减法下溢
+    assert!(total_bet > round.current_bet, EInvalidRaiseAmount);
+    assert!(total_bet > seat_bet, EInvalidRaiseAmount);
     let raise_amount = total_bet - round.current_bet;
-    assert!(raise_amount >= round.min_raise, EInvalidRaiseAmount);
     let needed = total_bet - seat_bet;
     assert!(needed <= stack, ECannotRaise);
 
+    // M-D7 修复：允许 all-in 小于 min_raise，但不更新 min_raise 和 last_raiser_seat
+    // （不重新打开行动权），仅当非 all-in 时才强制 min_raise 检查并更新状态
+    if (needed < stack) {
+        assert!(raise_amount >= round.min_raise, EInvalidRaiseAmount);
+        round.min_raise = raise_amount;
+        round.last_raiser_seat = option::some(seat_id);
+    };
+
     round.current_bet = total_bet;
-    round.min_raise = raise_amount;
-    round.last_raiser_seat = option::some(seat_id);
     round.actions_taken = round.actions_taken + 1;
     needed
 }

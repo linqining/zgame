@@ -51,10 +51,11 @@ pub fn verify_simple_signature(
             tracing::debug!("[verify_sui_wallet_signature] secp256r1 signature detected");
             public_key.derive_address().to_string()
         }
-        _ => unreachable!(),
+        _ => return Err("Unsupported simple signature type".to_string()),
     };
 
-    let expected_normalized = normalize_address(expected_address);
+    let expected_normalized = normalize_address(expected_address)
+        .map_err(|e| format!("Invalid expected address: {}", e))?;
     if derived_address != expected_normalized {
         tracing::warn!("[verify_sui_wallet_signature] address mismatch: derived={} expected={}", derived_address, expected_normalized);
         return Err(format!("Address mismatch: derived {} but expected {}", derived_address, expected_normalized));
@@ -78,7 +79,7 @@ pub fn verify_simple_signature(
         sui_sdk_types::SimpleSignature::Secp256r1 { public_key, .. } => {
             hex::encode(public_key.as_bytes())
         }
-        _ => unreachable!(),
+        _ => return Err("Unsupported simple signature type".to_string()),
     };
 
     tracing::debug!("[verify_sui_wallet_signature] simple verification successful, address={}, pk_hex={}", derived_address, pk_hex);
@@ -111,7 +112,8 @@ pub async fn verify_zklogin_signature<'a, 'b>(
 
     // Derive address from the zkLogin public identifier
     let derived_addresses: Vec<sui_sdk_types::Address> = zklogin.inputs.public_identifier().derive_address().collect();
-    let expected_normalized = normalize_address(expected_address);
+    let expected_normalized = normalize_address(expected_address)
+        .map_err(|e| format!("Invalid expected address: {}", e))?;
 
     let derived_address = derived_addresses.iter()
         .find(|a| a.to_string() == expected_normalized)
@@ -147,7 +149,7 @@ pub async fn verify_zklogin_signature<'a, 'b>(
 
 /// Fetch a JWK from the OIDC provider's JWKS endpoint
 pub async fn fetch_jwk<'a>(iss: &'a str, kid: &'a str) -> Result<sui_sdk_types::Jwk, String> {
-    // Map issuer to JWKS URL
+    // E1: 维护 issuer 白名单，拒绝未知 issuer 以防止 SSRF
     let jwks_url = if iss.contains("google") {
         "https://www.googleapis.com/oauth2/v3/certs".to_string()
     } else if iss.contains("apple") {
@@ -156,12 +158,8 @@ pub async fn fetch_jwk<'a>(iss: &'a str, kid: &'a str) -> Result<sui_sdk_types::
         "https://www.facebook.com/.well-known/oauth/openid/keys/".to_string()
     } else if iss.contains("twitch") {
         "https://id.twitch.tv/oauth2/keys".to_string()
-    } else if iss.contains("microsoft") || iss.contains("login.microsoftonline") {
-        // Microsoft uses tenant-specific endpoints; try common discovery
-        format!("{}/.well-known/openid-configuration", iss)
     } else {
-        // Try OpenID discovery
-        format!("{}/.well-known/openid-configuration", iss)
+        return Err(format!("Unsupported issuer: {}", iss));
     };
 
     tracing::debug!("[fetch_jwk] fetching JWK from iss={}, kid={}, url={}", iss, kid, jwks_url);
@@ -203,10 +201,26 @@ pub async fn fetch_jwk<'a>(iss: &'a str, kid: &'a str) -> Result<sui_sdk_types::
     Err(format!("JWK with kid={} not found in JWKS from {}", kid, jwks_url))
 }
 
-pub fn normalize_address(addr: &str) -> String {
-    if addr.starts_with("0x") {
-        addr.to_lowercase()
+/// G19 修复：规范化 Sui 地址并校验格式。
+/// - 必须以 "0x" 开头（或补齐前缀）
+/// - 前缀后的部分必须是合法十六进制
+/// - 十六进制部分长度不超过 64（32 字节，Sui 地址长度）
+pub fn normalize_address(addr: &str) -> Result<String, String> {
+    let stripped = if let Some(rest) = addr.strip_prefix("0x") {
+        rest
     } else {
-        format!("0x{}", addr).to_lowercase()
+        addr
+    };
+    // 校验十六进制格式
+    if stripped.is_empty() {
+        return Err("empty address".to_string());
     }
+    if !stripped.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("invalid hex characters in address: {}", addr));
+    }
+    // 校验长度：Sui 地址为 32 字节 = 64 hex chars（允许短地址如 "6" 补零）
+    if stripped.len() > 64 {
+        return Err(format!("address too long ({} hex chars, max 64): {}", stripped.len(), addr));
+    }
+    Ok(format!("0x{}", stripped.to_lowercase()))
 }

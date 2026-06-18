@@ -432,20 +432,25 @@ impl Curve for Bls12381Curve {
     }
 
     fn base_h() -> G1Projective {
-        let mut h = Sha3_256::new();
-        h.update(b"texas_poker_independent_base_H");
-        let digest = h.finalize();
-        let s = BlsScalar::from_bytes_mod_order(&digest);
-        <G1Projective as Group>::generator() * s
+        // 兼容 Move 合约 bls_scalar::base_h()：
+        // 使用 hash_to_g1（RFC 9380 hash-to-curve）而非 G * hash(label)。
+        // 两者产生不同的点，必须与链上实现保持一致。
+        let label = b"texas_poker_independent_base_H";
+        G1Projective::hash_to_curve(label, b"", b"")
     }
 
     fn hash_to_scalar(digest: &[u8]) -> BlsScalar {
-        let mut h = Sha3_256::new();
-        h.update(digest);
-        let hash = h.finalize();
-        // from_bytes_mod_order handles modular reduction,
-        // so no need to manually clear bits.
-        BlsScalar::from_bytes_mod_order(&hash)
+        // 兼容 Move 合约 bls_scalar::hash_to_scalar：
+        // SHA3-256(data) → 清除 h[0] 最高2位 → scalar_from_bytes
+        //
+        // Move 端 bls12381::scalar_from_bytes 对字节做模 r 约简（始终成功），
+        // Rust 端使用 from_bytes_mod_order 做相同的模 r 约简。
+        // 清位（& 0x3F）与 Move 保持一致，虽然模约简本身已能处理任意输入，
+        // 但保留清位确保两端对同一输入产生相同标量。
+        let mut hash = Sha3_256::digest(digest);
+        hash[0] &= 0x3F;
+        let arr: [u8; 32] = hash.into();
+        BlsScalar::from_bytes_mod_order(&arr)
     }
 
     fn n_cards() -> usize {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::pokergame::actions;
 
 impl Table {
     pub fn handle_fold(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
@@ -92,13 +93,67 @@ impl Table {
         Some(ActionResult { seat_id, message: format!("{} raises to ${:.2}", player_name, amount) })
     }
 
-    pub fn add_to_pot(&mut self, amount: u64) {
-        if !self.side_pots.is_empty() {
-            let last_idx = self.side_pots.len() - 1;
-            self.side_pots[last_idx].amount += amount;
-        } else {
-            self.pot += amount;
+    /// D2 fix: handle all-in action. An all-in is a call or raise with all
+    /// remaining chips. If the player's total (bet + stack) exceeds the
+    /// current call amount, it acts as a raise; otherwise it's a call.
+    pub fn handle_allin(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
+        let seat = self.find_player_by_pk(pk)?;
+        let seat_id = seat.id;
+        let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+        let stack = seat.stack;
+        let current_bet_total = seat.bet + seat.stack; // total bet after going all-in
+        let added_to_pot = stack;
+
+        if stack == 0 {
+            return None; // nothing to all-in
         }
+
+        // Determine if this all-in is a raise or just a call
+        let call_amount = self.call_amount.unwrap_or(0);
+        let is_raise = current_bet_total > call_amount;
+
+        // Move all chips into bet
+        if let Some(seat) = self.seats.get_mut(&seat_id) {
+            seat.bet += seat.stack;
+            seat.stack = 0;
+            seat.turn = false;
+            seat.has_acted = true;
+            seat.last_action = Some(actions::RAISE.to_string());
+        }
+
+        if is_raise {
+            // All-in raise: update call_amount and min_raise
+            if let Some(ref mut betting) = self.betting_round {
+                betting.update_after_raise(current_bet_total, seat_id);
+            }
+            let raise_increment = current_bet_total.saturating_sub(call_amount);
+            // min_raise only increases if the raise meets the minimum;
+            // incomplete all-in raises don't increase min_raise.
+            if raise_increment >= self.min_raise.saturating_sub(call_amount) {
+                self.min_raise = current_bet_total + raise_increment;
+            }
+            self.call_amount = Some(current_bet_total);
+            // Reset has_acted for other active players
+            for seat in self.seats.values_mut() {
+                if seat.id != seat_id && !seat.folded && !seat.sitting_out && seat.stack > 0 {
+                    seat.has_acted = false;
+                }
+            }
+        } else {
+            // All-in call
+            if let Some(ref mut betting) = self.betting_round {
+                betting.update_after_call();
+            }
+        }
+
+        self.add_to_pot(added_to_pot);
+        Some(ActionResult { seat_id, message: format!("{} goes all-in for ${:.2}", player_name, added_to_pot) })
+    }
+
+    pub fn add_to_pot(&mut self, amount: u64) {
+        // New bets always go to self.pot, never to existing side_pots (B4 fix).
+        // side_pots are only populated by calculate_side_pots() at end of round.
+        self.pot += amount;
     }
 
     pub fn is_betting_round_complete(&self) -> bool {
@@ -152,7 +207,7 @@ impl Table {
         if folded || sitting_out || stack == 0 {
             // Turn is on a player who can't act — skip them and advance turn.
             // Return a special marker so the caller knows to re-advance.
-            self.turn = Some(self.next_unfolded_player(turn_seat_id, 1));
+            self.turn = self.next_unfolded_player(turn_seat_id, 1);
             self.betting_timeout_start = Some(std::time::Instant::now());
             for i in 1..=self.max_players {
                 if let Some(seat) = self.seats.get_mut(&i) {

@@ -10,3 +10,16 @@ build/
 client/dist/*
 client/.env
 client/.env.production
+.sui_config/
+.move_home/
+texas_poker_move/package_summaries/*
+.move_home/*
+move_git_backup/*
+
+# Sui CLI local config (contains keystores with private keys)
+.sui_config/
+
+# Keystores / private keys
+*.keystore
+vin_game_simulator/keys.json
+**/keys.json

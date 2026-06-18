@@ -4,10 +4,12 @@ use crate::pokergame::evaluator::best_hand;
 
 impl Table {
     pub fn calculate_side_pots(&mut self) {
-        // Collect (seat_id, bet) for all unfolded players with bets.
-        let mut player_bets: Vec<(u32, u64)> = self.seats.values()
-            .filter(|s| !s.folded && s.bet > 0)
-            .map(|s| (s.id, s.bet))
+        // Collect (seat_id, bet, folded) for ALL players with bets, including folded.
+        // Folded players' chips are included in pot amounts (they contributed),
+        // but only unfolded players are eligible to win.
+        let mut player_bets: Vec<(u32, u64, bool)> = self.seats.values()
+            .filter(|s| s.bet > 0)
+            .map(|s| (s.id, s.bet, s.folded))
             .collect();
 
         if player_bets.is_empty() {
@@ -15,28 +17,44 @@ impl Table {
         }
 
         // Sort by bet ascending — the foundation of the layered pot algorithm.
-        player_bets.sort_by_key(|(_, bet)| *bet);
+        player_bets.sort_by_key(|(_, bet, _)| *bet);
 
-        self.side_pots.clear();
+        // Don't clear side_pots — preserve side pots from previous rounds.
+        // New side pots from this round are appended.
         let mut prev_level: u64 = 0;
+        let mut new_side_pots_total: u64 = 0;
+        let mut is_first_layer = true;
 
         for i in 0..player_bets.len() {
             let current_bet = player_bets[i].1;
             if current_bet > prev_level {
                 let increment = current_bet - prev_level;
-                // All players at or above this bet level are eligible for this pot.
-                let eligible: Vec<u32> = player_bets[i..].iter().map(|(id, _)| *id).collect();
-                let pot_amount = increment * eligible.len() as u64;
+                // All players at or above this bet level contributed to this layer.
+                let contributors: Vec<u32> = player_bets[i..].iter().map(|(id, _, _)| *id).collect();
+                let pot_amount = increment * contributors.len() as u64;
+                // Only unfolded contributors are eligible to win this layer.
+                let eligible: Vec<u32> = player_bets[i..].iter()
+                    .filter(|(_, _, folded)| !*folded)
+                    .map(|(id, _, _)| *id)
+                    .collect();
 
-                if self.side_pots.is_empty() {
-                    // First layer = main pot
-                    self.pot = pot_amount;
-                } else {
+                if is_first_layer {
+                    // First layer = main pot. The amount is already in self.pot
+                    // via add_to_pot() during betting — don't add again (B1 fix).
+                    // G3 修复：同步更新 main_pot 字段，使其与实际主底池金额一致
+                    self.main_pot = pot_amount;
+                    is_first_layer = false;
+                } else if !eligible.is_empty() {
+                    // Side pot layer — move amount from self.pot to side_pots.
                     self.side_pots.push(SidePot { amount: pot_amount, players: eligible });
+                    new_side_pots_total += pot_amount;
                 }
                 prev_level = current_bet;
             }
         }
+        // Move new side pot amounts out of self.pot so that self.pot holds
+        // only the main pot. Total pot = self.pot + sum(side_pots).
+        self.pot = self.pot.saturating_sub(new_side_pots_total);
     }
 
 
@@ -84,8 +102,10 @@ impl Table {
         if comm_revealed_cards.len() < 5 { return results; }
         tracing::info!("comm_revealed_cards: {:?}", comm_revealed_cards);
         for seat in self.seats.values() {
-            if seat.player.is_none() { continue; }
-            let seat_player = seat.player.as_ref().unwrap();
+            let seat_player = match seat.player.as_ref() {
+                Some(p) => p,
+                None => continue,
+            };
             let revealed_cards = match player_revealed_map.get(&seat_player.pk_hex.0){
                 Some(rc) => rc,
                 None => continue,
@@ -134,7 +154,24 @@ impl Table {
             .into_iter()
             .filter(|(id, _)| eligible_ids.contains(id))
             .collect();
-        if eligible_results.is_empty() { return; }
+        if eligible_results.is_empty() {
+            // F5 fix: No reveal cards available — split evenly among all eligible
+            // instead of silently dropping the pot.
+            let win_amount = amount / eligible_ids.len() as u64;
+            let remainder = amount % eligible_ids.len() as u64;
+            for (idx, winner_id) in eligible_ids.iter().enumerate() {
+                let extra = if idx < remainder as usize { 1 } else { 0 };
+                if let Some(seat) = self.seats.get_mut(winner_id) {
+                    let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+                    seat.win_hand(win_amount + extra);
+                    if win_amount + extra > 0 {
+                        self.win_messages.push(format!("{} wins ${:.2}", player_name, win_amount + extra));
+                    }
+                }
+            }
+            self.update_history();
+            return;
+        }
         let best_rank = &eligible_results[0].1;
         let winners: Vec<u32> = eligible_results
             .iter()

@@ -83,6 +83,8 @@ const ENotLeaveable: vector<u8> = b"Not in leaveable state";
 const ENotJoinable: vector<u8> = b"Not in join state";
 #[error]
 const ELeaveProofMissing: vector<u8> = b"Leave proof is missing";
+#[error]
+const EPotNotFullyDistributed: vector<u8> = b"Pot was not fully distributed";
 
 
 
@@ -100,6 +102,7 @@ public struct Seat has store, drop {
     is_waiting: bool,                   // 本局不参与，等下一局开始
     left_during_hand: bool,             // 本局中途离开（被踢），total_bet 保留供 side pot 计算
     pk: vector<u8>,                     // 玩家 ElGamal 公钥 (G1 compressed bytes)
+    refunded: bool,                     // total_bet 是否已退款，避免重复退款
 }
 
 // ========== 洗牌状态 ==========
@@ -223,6 +226,16 @@ public fun card_rank(card: &PlayingCard): u8 { card.rank }
 
 /// 获取牌的 suit (0-3)
 public fun card_suit(card: &PlayingCard): u8 { card.suit }
+
+// M-D10 修复：PlayingCard 花色编码（0=Club,1=Diamond,2=Heart,3=Spade）
+// 与 card.move 花色编码（SPADES=0,HEARTS=1,DIAMONDS=2,CLUBS=3）不一致，
+// 转换时需要做映射
+fun playing_card_suit_to_card_suit(s: u8): u8 {
+    if (s == 0) { card::clubs() }         // PlayingCard 0=Club → Card CLUBS=3
+    else if (s == 1) { card::diamonds() } // 1=Diamond → 2
+    else if (s == 2) { card::hearts() }   // 2=Heart → 1
+    else { card::spades() }               // 3=Spade → 0
+}
 
 // ========== 管理员能力对象 ==========
 public struct AdminCap has key, store {
@@ -493,6 +506,7 @@ fun empty_seat(): Seat {
         is_waiting: false,
         left_during_hand: false,
         pk: vector[],
+        refunded: false,
     }
 }
 
@@ -508,6 +522,7 @@ fun init_seat(seat: &mut Seat, player: address, stack: u64, pk: vector<u8>, is_w
     seat.acted_this_round = false;
     seat.is_waiting = is_waiting;
     seat.pk = pk;
+    seat.refunded = false;
 }
 
 fun reset_seat(seat: &mut Seat) {
@@ -522,6 +537,7 @@ fun reset_seat(seat: &mut Seat) {
     seat.acted_this_round = false;
     seat.left_during_hand = false;
     seat.pk = vector[];
+    seat.refunded = false;
 }
 
 // ========== 创建空协议状态 ==========
@@ -594,7 +610,7 @@ public  fun create_table(
         deck_state: DeckState {
             encrypted: vector[],
             aggregated_pk: vector[],
-            plaintext: vector[],
+            plaintext: table_serialization::generate_plaintext_bytes(),
             cards_dealt: 0,
             decrypted_cards: vector[],
         },
@@ -666,7 +682,7 @@ public  fun join_and_shuffle(
 
         // 使用共享 Transcript 验证 remask + shuffle
         let mut transcript = zk_verifier::new_mask_shuffle_transcript();
-        let pk_point = zk_verifier::deserialize_pk(&pk);
+        // 复用外层已反序列化的 pk_point，避免重复 deserialize
         zk_verifier::verify_remask_with_transcript_or_abort(&table.deck_state.encrypted, &output_cts, &pk_point, &remask_proof, &mut transcript);
 
         // 验证 shuffle proof（使用同一个 transcript）
@@ -785,6 +801,14 @@ public  fun leave_table(
     let player = table.seats[seat_index].player;
     assert!(!is_playing(table) ||(is_playing(table) && table.seats[seat_index].is_waiting),ENotLeaveable );
 
+    // 移除 aggregated_pk 中该玩家的公钥（waiting 玩家 pk 未加入 aggregated_pk，不应移除）
+    let pk = table.seats[seat_index].pk;
+    let was_waiting = table.seats[seat_index].is_waiting;
+    if (pk.length() > 0 && !was_waiting) {
+        table.deck_state.aggregated_pk = table_serialization::remove_pk_from_aggregated(
+            &table.deck_state.aggregated_pk, &pk);
+    };
+
     reset_seat(&mut table.seats[seat_index]);
     table_events::emit_player_left(object::id(table), seat_index, player)
 }
@@ -814,8 +838,7 @@ fun do_start_hand(table: &mut Table) {
         table.round_state == table_constants::round_waiting() ,
         EInvalidRoundState
     );
-    assert!(table.seats.length() >= table_constants::min_players_to_start(), ENotEnoughPlayers);
-    clear_waiting_players(table);
+    assert!(count_active_occupied(&table.seats) >= table_constants::min_players_to_start(), ENotEnoughPlayers);
 
     move_button(table);
     table_events::emit_hand_started(
@@ -925,8 +948,11 @@ fun refund_all_bets(table: &mut Table) {
     while (i < table.seats.length()) {
         let seat = &mut table.seats[i];
         if (seat.occupied) {
-            seat.stack = seat.stack + seat.total_bet;
-        } else if (seat.left_during_hand && seat.total_bet > 0) {
+            if (!seat.refunded && seat.total_bet > 0) {
+                seat.stack = seat.stack + seat.total_bet;
+                seat.refunded = true;
+            };
+        } else if (seat.left_during_hand && !seat.refunded && seat.total_bet > 0) {
             // 已踢出的玩家退还 total_bet（stack 已在 kick 时退还）
             table_events::emit_player_refund(
                 table_id,
@@ -935,6 +961,7 @@ fun refund_all_bets(table: &mut Table) {
                 seat.total_bet,
                 table_events::refund_type_bet_only(),
             );
+            seat.refunded = true;
         };
         seat.bet = 0;
         seat.total_bet = 0;
@@ -1228,6 +1255,13 @@ fun on_betting_timeout(table: &mut Table) {
 
 
 // ========== Tick 函数（链下 relayer 定期调用） ==========
+// M-P4: tick 为 permissionless 设计——任何人都可以调用。
+// Gas 攻击风险分析：
+//   - tick 内部所有操作均基于 Clock timestamp 的超时检查，无实际状态变更除非超时；
+//   - 超时处理（fold/reset）是游戏逻辑必需，不会对调用者产生收益；
+//   - 调用者需支付 gas 但无法获取筹码优势，因此无经济激励滥用；
+//   - 如未来需要限制调用频率，可基于 table.timestamps.last_tick_at 添加最小间隔检查。
+// 当前实现接受 permissionless 模型，依赖链下 relayer 竞争调用。
 public  fun tick(table: &mut Table, clock: &Clock) {
     let now = clock.timestamp_ms();
 
@@ -1293,7 +1327,7 @@ public  fun tick(table: &mut Table, clock: &Clock) {
 
     // ===== 正常 tick 逻辑 =====
     if (table.round_state == table_constants::round_waiting()) {
-        if (table.seats.length() >= table_constants::min_players_to_start()){
+        if (count_active_occupied(&table.seats) >= table_constants::min_players_to_start()){
             // 检查是否可以开始
             do_start_hand(table);
         };
@@ -1593,10 +1627,11 @@ public  fun submit_reconstruct_deck(
 
     let seat_index = find_seat_index(&table.seats, sender);
     assert!(is_in_list(&table.reconstruct_state.pending_players, seat_index), EReconstructAlreadySubmitted);
-    assert!(output_cards.length() == table.deck_state.plaintext.length(), EInvalidReconstructDeckSize);
 
     // 反序列化
     let output_cts = zk_verifier::deserialize_ciphertexts(&output_cards);
+    assert!(output_cts.length() == table.deck_state.plaintext.length(), EInvalidReconstructDeckSize);
+
     let swap_cts = zk_verifier::deserialize_ciphertexts(&swap_cards);
     let readable_cts = zk_verifier::deserialize_ciphertexts(&user_readable_cards);
     let reconstruct_proof = table_serialization::deserialize_reconstruct_proof(&proof_bytes);
@@ -1779,6 +1814,16 @@ fun settle_hand(table: &mut Table) {
 
     let pot = table.pot;
     table_events::emit_hand_settled(object::id(table), pot, all_winners);
+
+    // 验证 pot 已全部分配：main_pot + 所有 side_pots 之和应等于 table.pot
+    let mut total_distributed = main_pot;
+    let mut si = 0;
+    while (si < side_pots.length()) {
+        total_distributed = total_distributed + side_pots[si].amount();
+        si = si + 1;
+    };
+    assert!(total_distributed == table.pot, EPotNotFullyDistributed);
+
     reset_for_next_hand(table);
     table.timestamps.hand_complete_at = 0;
 }
@@ -2420,7 +2465,7 @@ fun write_decrypted_cards_to_community(table: &mut Table) {
         // 只处理完全解密的公共牌（owner_seat_index 为 MAX_U64 且有 plaintext_bytes）
         if (dc.plaintext_bytes.length() > 0 && dc.owner_seat_index == 0xFFFFFFFFFFFFFFFF) {
             let playing_card = plaintext_to_playing_card(&table.deck_state.plaintext, &dc.plaintext_bytes);
-            let card = card::new(card_suit(&playing_card), card_rank(&playing_card));
+            let card = card::new(playing_card_suit_to_card_suit(card_suit(&playing_card)), card_rank(&playing_card));
             table.community_cards.push_back(card);
             card_indices.push_back(dc.encrypted_card_index);
             card_ranks.push_back(card_rank(&playing_card));
@@ -2457,7 +2502,7 @@ fun write_decrypted_cards_to_hands(table: &mut Table) {
             let seat_idx = dc.owner_seat_index;
             if (seat_idx < table.seats.length()) {
                 let playing_card = plaintext_to_playing_card(&table.deck_state.plaintext, &dc.plaintext_bytes);
-                let card = card::new(card_suit(&playing_card), card_rank(&playing_card));
+                let card = card::new(playing_card_suit_to_card_suit(card_suit(&playing_card)), card_rank(&playing_card));
                 table.seats[seat_idx].hand.push_back(card);
             };
         };
@@ -2476,6 +2521,10 @@ fun distribute_pot(table: &mut Table, pot_amount: u64, folded: &vector<bool>): v
     if (winner_count > 0) {
         let share = pot_amount / winner_count;
         let remainder = pot_amount % winner_count;
+        // M-P2: 余数分配策略——remainder 统一分配给 winners[0]。
+        // 这是有意设计：winners[0] 是首个发现的最优手牌持有者（按座位顺序），
+        // 余数金额极小（< winner_count，通常 < 9 chip），不影响公平性。
+        // 替代方案（按座位顺序/随机分配）会增加复杂度而无实质收益。
         let mut w = 0;
         while (w < winner_count) {
             let idx = winners[w];
@@ -2490,6 +2539,28 @@ fun distribute_pot(table: &mut Table, pot_amount: u64, folded: &vector<bool>): v
                 option::none(),
             );
             w = w + 1;
+        };
+    } else {
+        // Fallback: 无赢家时将筹码均分给所有未 fold 的活跃玩家
+        let mut eligible_seats = vector[];
+        let mut e = 0;
+        while (e < table.seats.length()) {
+            if (table.seats[e].occupied && !folded[e]) {
+                eligible_seats.push_back(e);
+            };
+            e = e + 1;
+        };
+        let n = eligible_seats.length();
+        if (n > 0) {
+            let share = pot_amount / n;
+            let remainder = pot_amount % n;
+            let mut i = 0;
+            while (i < n) {
+                let seat_id = eligible_seats[i];
+                let amount = share + if (i == 0) { remainder } else { 0 };
+                table.seats[seat_id].stack = table.seats[seat_id].stack + amount;
+                i = i + 1;
+            };
         };
     };
     winners
@@ -2522,6 +2593,29 @@ fun distribute_side_pot(table: &mut Table, sp: &SidePot, folded: &vector<bool>):
             );
             w = w + 1;
         };
+    } else {
+        // Fallback: 无赢家时将筹码均分给该 side pot 中未 fold 的 eligible 玩家
+        let mut eligible_unfolded = vector[];
+        let mut e = 0;
+        while (e < eligible.length()) {
+            let seat_id = eligible[e];
+            if (table.seats[seat_id].occupied && !folded[seat_id]) {
+                eligible_unfolded.push_back(seat_id);
+            };
+            e = e + 1;
+        };
+        let n = eligible_unfolded.length();
+        if (n > 0) {
+            let share = pot_amount / n;
+            let remainder = pot_amount % n;
+            let mut i = 0;
+            while (i < n) {
+                let seat_id = eligible_unfolded[i];
+                let amount = share + if (i == 0) { remainder } else { 0 };
+                table.seats[seat_id].stack = table.seats[seat_id].stack + amount;
+                i = i + 1;
+            };
+        };
     };
     winners
 }
@@ -2537,9 +2631,10 @@ fun find_winners(
     let mut i = 0;
     while (i < seats.length()) {
         let seat = &seats[i];
-        if (seat.occupied && !folded[i] && seat.hand.length() == table_constants::cards_per_player()) {
+        if (seat.occupied && !folded[i] && seat.total_bet > 0 && seat.hand.length() == table_constants::cards_per_player()) {
             let all_cards = combine_cards(&seat.hand, community_cards);
-            if (all_cards.length() >= 5) {
+            // M-P5: best_hand 断言 cards.length() == 7，这里必须用 == 7 而非 >= 5
+            if (all_cards.length() == 7) {
                 let rank = hand_evaluator::best_hand(&all_cards);
                 if (best_rank.is_none()) {
                     best_rank = option::some(rank);
@@ -2575,7 +2670,8 @@ fun find_winners_in_eligible(
         let seat = &seats[idx];
         if (seat.occupied && !folded[idx] && seat.hand.length() == table_constants::cards_per_player()) {
             let all_cards = combine_cards(&seat.hand, community_cards);
-            if (all_cards.length() >= 5) {
+            // M-P5: best_hand 断言 cards.length() == 7，这里必须用 == 7 而非 >= 5
+            if (all_cards.length() == 7) {
                 let rank = hand_evaluator::best_hand(&all_cards);
                 if (best_rank.is_none()) {
                     best_rank = option::some(rank);
@@ -2644,7 +2740,7 @@ fun find_next_active_seat(seats: &vector<Seat>, from: u64, max: u64): u64 {
         i = i + 1;
         count = count + 1;
     };
-    from
+    abort ENotEnoughPlayers
 }
 
 
@@ -2695,7 +2791,7 @@ fun reset_for_next_hand(table: &mut Table) {
         seat.acted_this_round = false;
         if (seat.is_waiting){
             let new_aggregated_pk = table_serialization::add_pk_to_aggregated(&table.deck_state.aggregated_pk, &seat.pk);
-            table.deck_state.aggregated_pk = new_aggregated_pk;  
+            table.deck_state.aggregated_pk = new_aggregated_pk;
         };
         seat.is_waiting = false;
         seat.left_during_hand = false;

@@ -15,9 +15,8 @@ pub use game::MentalPokerGame;
 pub use rounds::{ShuffleRound, MaskAndShuffleRound, LeaveGameRound, JoinGameAndShuffleRound};
 pub use expel::{ExpelRecord, ExpelSessionPhase, ExpelSummary, ExpelStateResponse};
 
-// Re-export new_plain_text for tests
-#[cfg(test)]
-pub(crate) use game::new_plain_text;
+// Re-export new_plain_text for external use (e.g., testnet verify tests)
+pub use game::new_plain_text;
 
 #[cfg(test)]
 mod tests {
@@ -25,7 +24,7 @@ mod tests {
     use crate::crypto::{BASE_G, Scalar, EcPoint, ElGamalCiphertext, DefaultCurve, N_CARDS};
     use crate::zk_shuffle::reveal_token_proof::{RevealTokenAndProof, ExpelHandState};
     use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
-    use crate::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+    use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript, MerlinTranscript};
     use crate::crypto::curve::{Curve, CurveScalar, CurvePoint};
     use rand_core::OsRng;
 
@@ -207,8 +206,9 @@ mod tests {
         // 1. 先验证 remask_proof（吸收 remask 数据到 transcript）
         // 2. 再验证 shuffle_proof（在 remask 数据之后继续吸收 shuffle 数据）
 
+        // 兼容 Move 合约：验证时使用与 prove 相同的 FiatShamirTranscript 和协议名
         // remask proof 应通过
-        let mut transcript = MerlinTranscript::new(b"poker_protocol_mask_shuffle");
+        let mut transcript = FiatShamirTranscript::new(b"zk_mask_shuffle_proof_v1");
         assert!(round.remask_proof.verify(&input, &round.mask_cards, &player_pk, &mut transcript),
             "remask proof should verify");
 

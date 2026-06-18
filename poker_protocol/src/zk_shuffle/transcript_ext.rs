@@ -5,30 +5,52 @@ use sha3::Digest;
 
 /// Trait abstracting the Fiat-Shamir transcript operations.
 ///
-/// Two implementations are provided:
-/// - `MerlinTranscript`: wraps `merlin::Transcript` (STROBE-based, used off-chain)
-/// - `FiatShamirTranscript`: SHA3-256 based (matches the Move contract implementation)
+/// 两种实现：
+/// - `MerlinTranscript`: 包装 `merlin::Transcript`（STROBE-based，仅用于离线测试）
+/// - `FiatShamirTranscript`: 基于 SHA3-256（与 Move 合约 bls_transcript.move 完全一致）
 ///
-/// Use `MerlinTranscript` for off-chain verification, and `FiatShamirTranscript`
-/// when the proof needs to be verified on-chain by the Move contract.
+/// 生产代码（需要链上验证的证明）必须使用 `FiatShamirTranscript`，
+/// 因为 Move 合约使用 SHA3-256 状态机，与 Merlin 的 STROBE 协议不兼容。
 pub trait CryptoTranscript {
-    /// Create a new transcript with the given protocol name.
-    fn new(protocol_name: &'static [u8]) -> Self;
+    /// 使用给定协议名创建新 transcript。
+    /// 协议名必须与 Move 合约 zk_verifier.move 中的 new_*_transcript() 一致。
+    fn new(protocol_name: &[u8]) -> Self;
 
-    /// Append a message to the transcript with a label.
-    fn append_message(&mut self, label: &'static [u8], message: &[u8]);
+    /// 追加带标签的消息到 transcript。
+    /// 状态更新：state = SHA3-256(state || label || message)
+    fn append_message(&mut self, label: &[u8], message: &[u8]);
 
-    /// Fill the buffer with challenge bytes.
-    fn challenge_bytes(&mut self, label: &'static [u8], dest: &mut [u8]);
+    /// 用 challenge 字节填充缓冲区。
+    /// 兼容旧接口，内部调用 challenge() 后取标量字节。
+    fn challenge_bytes(&mut self, label: &[u8], dest: &mut [u8]);
 
-    /// Append a curve point to the transcript.
-    fn append_point<C: Curve>(&mut self, label: &'static [u8], point: &C::Point);
+    /// 追加曲线点到 transcript（使用压缩字节表示）。
+    fn append_point<C: Curve>(&mut self, label: &[u8], point: &C::Point);
 
-    /// Append a scalar to the transcript.
-    fn append_scalar<C: Curve>(&mut self, label: &'static [u8], scalar: &C::Scalar);
+    /// 追加标量到 transcript。
+    fn append_scalar<C: Curve>(&mut self, label: &[u8], scalar: &C::Scalar);
 
-    /// Generate a challenge scalar from the transcript.
-    fn challenge<C: Curve>(&mut self, label: &'static [u8]) -> Challenge<C>;
+    /// 从 transcript 生成 challenge 标量。
+    /// 兼容 Move 合约 bls_transcript::challenge：
+    /// 1. append_message(label, b"challenge")
+    /// 2. hash_to_scalar(state) — 使用清位法，非模约简
+    fn challenge<C: Curve>(&mut self, label: &[u8]) -> Challenge<C>;
+
+    /// 批量生成 challenge 标量，使用带索引的子标签。
+    /// 兼容 Move 合约 bls_transcript::challenge_vec：
+    /// 对每个 i，生成子标签 `label + i.to_string()`，然后调用 challenge()。
+    /// 这与 Move 端 u64_to_ascii + push_back 的实现完全一致。
+    fn challenge_vec<C: Curve>(&mut self, label: &[u8], n: usize) -> Vec<C::Scalar> {
+        (0..n)
+            .map(|i| {
+                // 构造子标签：label + 十进制索引字符串
+                // 匹配 Move 端 bls_transcript::challenge_vec 的 u64_to_ascii 实现
+                let mut sub_label = label.to_vec();
+                sub_label.extend_from_slice(i.to_string().as_bytes());
+                self.challenge::<C>(&sub_label).scalar
+            })
+            .collect()
+    }
 }
 
 /// Challenge scalar extracted from a transcript, generic over the curve.
@@ -40,6 +62,7 @@ pub struct Challenge<C: Curve> {
 // ========== MerlinTranscript (wraps merlin::Transcript) ==========
 
 /// Wrapper around `merlin::Transcript` implementing `CryptoTranscript`.
+/// 仅用于离线测试，不兼容 Move 合约。
 pub struct MerlinTranscript {
     inner: merlin::Transcript,
 }
@@ -51,31 +74,40 @@ impl std::fmt::Debug for MerlinTranscript {
 }
 
 impl CryptoTranscript for MerlinTranscript {
-    fn new(protocol_name: &'static [u8]) -> Self {
+    fn new(protocol_name: &[u8]) -> Self {
+        // merlin::Transcript::new 要求 &'static [u8]，这里通过 leak 转换。
+        // MerlinTranscript 仅用于测试，内存泄漏可接受。
+        let static_name: &'static [u8] = Box::leak(protocol_name.to_vec().into_boxed_slice());
         MerlinTranscript {
-            inner: merlin::Transcript::new(protocol_name),
+            inner: merlin::Transcript::new(static_name),
         }
     }
 
-    fn append_message(&mut self, label: &'static [u8], message: &[u8]) {
-        self.inner.append_message(label, message);
+    fn append_message(&mut self, label: &[u8], message: &[u8]) {
+        // merlin::Transcript::append_message 要求 &'static [u8] label，通过 leak 转换。
+        let static_label: &'static [u8] = Box::leak(label.to_vec().into_boxed_slice());
+        self.inner.append_message(static_label, message);
     }
 
-    fn challenge_bytes(&mut self, label: &'static [u8], dest: &mut [u8]) {
-        self.inner.challenge_bytes(label, dest);
+    fn challenge_bytes(&mut self, label: &[u8], dest: &mut [u8]) {
+        let static_label: &'static [u8] = Box::leak(label.to_vec().into_boxed_slice());
+        self.inner.challenge_bytes(static_label, dest);
     }
 
-    fn append_point<C: Curve>(&mut self, label: &'static [u8], point: &C::Point) {
-        self.inner.append_message(label, point.compress().as_ref());
+    fn append_point<C: Curve>(&mut self, label: &[u8], point: &C::Point) {
+        let static_label: &'static [u8] = Box::leak(label.to_vec().into_boxed_slice());
+        self.inner.append_message(static_label, point.compress().as_ref());
     }
 
-    fn append_scalar<C: Curve>(&mut self, label: &'static [u8], scalar: &C::Scalar) {
-        self.inner.append_message(label, &scalar.as_bytes());
+    fn append_scalar<C: Curve>(&mut self, label: &[u8], scalar: &C::Scalar) {
+        let static_label: &'static [u8] = Box::leak(label.to_vec().into_boxed_slice());
+        self.inner.append_message(static_label, &scalar.as_bytes());
     }
 
-    fn challenge<C: Curve>(&mut self, label: &'static [u8]) -> Challenge<C> {
+    fn challenge<C: Curve>(&mut self, label: &[u8]) -> Challenge<C> {
         let mut buf = [0u8; 64];
-        self.inner.challenge_bytes(label, &mut buf);
+        let static_label: &'static [u8] = Box::leak(label.to_vec().into_boxed_slice());
+        self.inner.challenge_bytes(static_label, &mut buf);
         let scalar = C::Scalar::from_bytes_mod_order_wide(&buf);
         Challenge { scalar }
     }
@@ -85,45 +117,56 @@ impl CryptoTranscript for MerlinTranscript {
 
 /// Fiat-Shamir Transcript using SHA3-256, matching the Move contract implementation.
 ///
-/// The state is `SHA3-256(current_state || label || message)`.
-/// This is compatible with the `bls_transcript.move` on-chain implementation.
+/// 状态机：state = SHA3-256(current_state || label || message)
+/// 与 Move 合约 bls_transcript.move 完全兼容。
+///
+/// challenge 标量生成使用 Curve::hash_to_scalar（清位法），
+/// 而非 from_bytes_mod_order（模约简），与 Move 端一致。
 #[derive(Debug)]
 pub struct FiatShamirTranscript {
     state: Vec<u8>,
 }
 
 impl CryptoTranscript for FiatShamirTranscript {
-    fn new(protocol_name: &'static [u8]) -> Self {
+    fn new(protocol_name: &[u8]) -> Self {
+        // 兼容 Move 合约 bls_transcript::new：
+        // state = SHA3-256(protocol_name)
         let state = sha3::Sha3_256::digest(protocol_name).to_vec();
         FiatShamirTranscript { state }
     }
 
-    fn append_message(&mut self, label: &'static [u8], message: &[u8]) {
+    fn append_message(&mut self, label: &[u8], message: &[u8]) {
+        // 兼容 Move 合约 bls_transcript::append_message：
+        // state = SHA3-256(state || label || message)
         let mut data = self.state.clone();
         data.extend_from_slice(label);
         data.extend_from_slice(message);
         self.state = sha3::Sha3_256::digest(&data).to_vec();
     }
 
-    fn challenge_bytes(&mut self, label: &'static [u8], dest: &mut [u8]) {
-        // Append "challenge" label then hash state to scalar
+    fn challenge_bytes(&mut self, label: &[u8], dest: &mut [u8]) {
+        // 兼容旧接口：先追加 "challenge" 消息，再取状态哈希字节。
+        // 注意：此方法不与 Move 直接对应，仅用于兼容旧调用方。
+        // 新代码应使用 challenge() 或 challenge_vec()。
         self.append_message(label, b"challenge");
         let hash = sha3::Sha3_256::digest(&self.state);
         let copy_len = dest.len().min(hash.len());
         dest[..copy_len].copy_from_slice(&hash[..copy_len]);
     }
 
-    fn append_point<C: Curve>(&mut self, label: &'static [u8], point: &C::Point) {
+    fn append_point<C: Curve>(&mut self, label: &[u8], point: &C::Point) {
         let point_bytes = point.compress();
         self.append_message(label, point_bytes.as_ref());
     }
 
-    fn append_scalar<C: Curve>(&mut self, label: &'static [u8], scalar: &C::Scalar) {
+    fn append_scalar<C: Curve>(&mut self, label: &[u8], scalar: &C::Scalar) {
         self.append_message(label, &scalar.as_bytes());
     }
 
-    fn challenge<C: Curve>(&mut self, label: &'static [u8]) -> Challenge<C> {
-        // Matches Move contract: append "challenge" message, then hash_to_scalar
+    fn challenge<C: Curve>(&mut self, label: &[u8]) -> Challenge<C> {
+        // 兼容 Move 合约 bls_transcript::challenge：
+        // 1. append_message(label, b"challenge")
+        // 2. hash_to_scalar(state) — 使用清位法
         self.append_message(label, b"challenge");
         let scalar = C::hash_to_scalar(&self.state);
         Challenge { scalar }

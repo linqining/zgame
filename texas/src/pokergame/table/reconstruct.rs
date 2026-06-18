@@ -26,35 +26,7 @@ impl Table {
         Ok(())
     }
 
-    pub fn vote_reconstruct(&mut self, voter_pk: &GamePkHex, vote: bool) -> Result<ReconstructPhase, String> {
-        if !self.reconstruct_state.is_active {
-            return Err("No reconstruct in progress".to_string());
-        }
-        if self.reconstruct_state.completed_players.contains(voter_pk) {
-            return Err("Player already voted".to_string());
-        }
-
-        if vote {
-            self.reconstruct_state.completed_players.push(voter_pk.clone());
-            tracing::info!("[RECONSTRUCT] Player {} voted to reconstruct, votes: {}",
-                voter_pk, self.reconstruct_state.completed_players.len());
-
-            if self.reconstruct_state.completed_players.len() >= self.reconstruct_state.pending_players.len() {
-                tracing::info!("[RECONSTRUCT] Vote passed, reconstruct player {}",
-                    self.reconstruct_state.pending_players.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","));
-                return Ok(ReconstructPhase::Completed);
-            }
-        } else {
-            self.reconstruct_state.reset();
-            tracing::info!("[RECONSTRUCT] Vote rejected by {}", voter_pk);
-            return Ok(ReconstructPhase::Initiated);
-        }
-
-        Ok(ReconstructPhase::Voting)
-    }
-
-
-    pub fn check_reconstruct_timeout(&mut self) -> Option<GamePkHex> {
+    pub fn check_reconstruct_timeout(&mut self) -> Option<Vec<GamePkHex>> {
         if !self.reconstruct_state.is_active {
             return None;
         }
@@ -64,19 +36,18 @@ impl Table {
         };
 
         if timeout_start.elapsed().as_secs() >= self.reconstruct_state.timeout_seconds {
-            let mut not_voted = Vec::new();
+            // 移除未提交 deck 的玩家
+            let mut not_submitted = Vec::new();
             for player_pk in self.reconstruct_state.pending_players.iter() {
-                if !self.reconstruct_state.completed_players.contains(player_pk) {
-                    not_voted.push(player_pk.clone());
-                }
+                not_submitted.push(player_pk.clone());
             }
-            tracing::warn!("[RECONSTRUCT] Reconstruct timeout for player {:?}", not_voted.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","));
-            for player_pk in not_voted {
-                self.remove_player_by_pk(&player_pk);
+            tracing::warn!("[RECONSTRUCT] Reconstruct timeout for players: {:?}",
+                not_submitted.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","));
+            for player_pk in &not_submitted {
+                self.remove_player_by_pk(player_pk);
             }
-            //todo 通知玩家被踢出
             self.reconstruct_state.reset();
-            return None;
+            return Some(not_submitted);
         }
         None
     }
@@ -85,9 +56,12 @@ impl Table {
         if !self.reconstruct_state.is_active {
             return false;
         }
-        if self.reconstruct_state.completed_players.len() >= self.reconstruct_state.pending_players.len() {
+        // D1 fix: use pending_players.is_empty() instead of
+        // completed_players.len() >= pending_players.len(), which is always
+        // true when pending is empty but also true in other wrong cases.
+        if self.reconstruct_state.pending_players.is_empty() {
             tracing::info!("[RECONSTRUCT] Executing reconstruct for players: {:?}",
-                self.reconstruct_state.pending_players);
+                self.reconstruct_state.completed_players);
             self.reconstruct_state.reset();
             return true;
         }
@@ -119,12 +93,14 @@ impl Table {
             .map(|c| c.to_ciphertext())
             .collect::<Result<Vec<_>, _>>()?;
         let proof = proof.to_proof()?;
-        let user_readable_cards = self.reconstruct_state.player_readable_cards.get(player_pk_hex);
-        if user_readable_cards.is_none() {
-            return Err("Player not found in reconstruct state".to_string());
-        }
-        let user_readable_cards = user_readable_cards.unwrap();
-        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::MerlinTranscript::new(b"zk_poker_reconstruct");
+        let user_readable_cards = match self.reconstruct_state.player_readable_cards.get(player_pk_hex) {
+            Some(c) => c,
+            None => return Err("Player not found in reconstruct state".to_string()),
+        };
+        // 兼容 Move 合约 reconstruct_proof::verify 与 poker_protocol 生产代码：
+        // 必须使用 FiatShamirTranscript（SHA3-256 状态机）和协议名 zk_reconstruct_proof_v1，
+        // 与 prove 端保持一致，否则 transcript 状态不一致导致验证失败。
+        let mut transcript = poker_protocol::zk_shuffle::transcript_ext::FiatShamirTranscript::new(b"zk_reconstruct_proof_v1");
         if proof.verify(&self.reconstruct_state.cards, &output_cards,
         &swap_cards, &user_readable_cards.readable_cards,
         &player, &mut transcript).is_err(){

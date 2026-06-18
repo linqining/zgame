@@ -41,6 +41,9 @@ public fun compare(a: &HandRank, b: &HandRank): u8 {
 }
 
 fun compare_kickers(a: &vector<u8>, b: &vector<u8>): u8 {
+    // M-P6: 校验长度一致——同一 category 的 HandRank 应有相同 kickers 长度。
+    // 不一致则视为非法输入，abort 防止错误的比较结果。
+    assert!(a.length() == b.length(), EInvalidCardCount);
     let len = if (a.length() < b.length()) { a.length() } else { b.length() };
     let mut i = 0;
     while (i < len) {
@@ -54,8 +57,29 @@ fun compare_kickers(a: &vector<u8>, b: &vector<u8>): u8 {
 }
 
 // ========== 从7张牌中选最优5张 ==========
+
+// M-P8: 校验牌组中无重复牌（防御性编程）
+fun cards_are_unique(cards: &vector<Card>): bool {
+    let n = cards.length();
+    let mut i = 0;
+    while (i < n) {
+        let mut j = i + 1;
+        while (j < n) {
+            if (card::equals(&cards[i], &cards[j])) {
+                return false
+            };
+            j = j + 1;
+        };
+        i = i + 1;
+    };
+    true
+}
+
 public fun best_hand(cards: &vector<Card>): HandRank {
     assert!(cards.length() == 7, EInvalidCardCount);
+    // M-P8: 防御性校验——确保 7 张牌唯一（无重复）。
+    // 调用方应保证牌组来自合法 deck，此处为深度防御。
+    assert!(cards_are_unique(cards), EInvalidCardCount);
 
     let mut best = eval5i(cards, 0, 1, 2, 3, 4);
     best = update_best(cards, &best, 0, 1, 2, 3, 5);
@@ -101,6 +125,8 @@ fun eval5i(
 // ========== 评估5张牌 (公共 API，保持兼容) ==========
 public fun evaluate_five(cards: &vector<Card>): HandRank {
     assert!(cards.length() == 5, EInvalidCardCount);
+    // M-P8: 防御性校验——确保 5 张牌唯一（无重复）
+    assert!(cards_are_unique(cards), EInvalidCardCount);
     // 复用优化后的按索引评估逻辑
     evaluate_five_impl(
         cards[0], cards[1], cards[2], cards[3], cards[4]
@@ -119,6 +145,8 @@ fun evaluate_five_by_indices(
 fun evaluate_five_impl(c0: Card, c1: Card, c2: Card, c3: Card, c4: Card): HandRank {
     // 单次遍历：构建点数计数数组 (索引 0=点数2, 12=点数14)
     let mut counts = vector[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8];
+    // M-P7: Move 2024 edition 中 u8 无 .into() 方法，保留 as u64 转换。
+    // as 在 Move 2024 中仍为合法的数值转换语法，此处为安全的拓宽转换（u8 → u64）。
     *(vector::borrow_mut(&mut counts, (c0.rank() - 2) as u64)) = counts[(c0.rank() - 2) as u64] + 1;
     *(vector::borrow_mut(&mut counts, (c1.rank() - 2) as u64)) = counts[(c1.rank() - 2) as u64] + 1;
     *(vector::borrow_mut(&mut counts, (c2.rank() - 2) as u64)) = counts[(c2.rank() - 2) as u64] + 1;

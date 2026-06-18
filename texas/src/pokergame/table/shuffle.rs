@@ -1,6 +1,6 @@
 use super::*;
 use crate::pokergame::player::truncate_name;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 
 impl Table {
     pub fn is_all_players_shuffled(&self) -> bool {
@@ -92,16 +92,20 @@ impl Table {
             .filter(|pk| !already_completed.contains(pk))
             .collect();
         tracing::info!("[SHUFFLE] Init pending players: {:?}", self.shuffle_state.pending_players);
+        // G8 修复：原 else if 分支不可达（pending 非空时 first() 必返回 Some）。
+        // 将"所有玩家已完成洗牌则跳过"的逻辑移到 is_empty 分支内。
         if self.shuffle_state.pending_players.is_empty() {
-            tracing::warn!("[SHUFFLE] Init pending players is empty");
+            if self.complete_shuffle_player_count() >= MIN_START_NUM as usize {
+                self.shuffle_state.is_active = false;
+                self.transition_to(RoundState::ShuffleComplete);
+                tracing::info!("[SHUFFLE] All players already completed shuffle, skipping");
+            } else {
+                tracing::warn!("[SHUFFLE] Init pending players is empty");
+            }
             return;
         }
         if let Some(first_pk) = self.shuffle_state.pending_players.first() {
             self.set_current_shuffler(first_pk.clone());
-        } else if self.complete_shuffle_player_count() >= MIN_START_NUM as usize {
-            self.shuffle_state.is_active = false;
-            self.transition_to(RoundState::ShuffleComplete);
-            tracing::info!("[SHUFFLE] All players already completed shuffle, skipping");
         }
     }
 
@@ -114,10 +118,10 @@ impl Table {
     }
 
     pub fn set_current_shuffler(&mut self, player_pk: GamePkHex) {
-        self.shuffle_state.current_player_pk = Some(player_pk);
+        self.shuffle_state.current_player_pk = Some(player_pk.clone());
         self.shuffle_state.timeout_start = Some(std::time::Instant::now());
         tracing::info!("[SHUFFLE] Now waiting for player {} to shuffle (timeout: {}s)",
-            self.shuffle_state.current_player_pk.as_ref().unwrap(), self.shuffle_state.timeout_seconds);
+            player_pk, self.shuffle_state.timeout_seconds);
     }
 
     pub fn check_shuffle_timeout(&mut self) -> Option<GamePkHex> {
@@ -191,7 +195,9 @@ impl Table {
 
         if is_join_before_start {
             let round = round_json.to_mask_and_shuffle_round().map_err(|e| JoinError::Crypto(e))?;
-            let mut transcript = MerlinTranscript::new(b"poker_protocol_mask_shuffle");
+            // 兼容 Move 合约 remask_proof::verify 与 poker_protocol 生产代码：
+            // 必须使用 FiatShamirTranscript 和协议名 zk_mask_shuffle_proof_v1。
+            let mut transcript = FiatShamirTranscript::new(b"zk_mask_shuffle_proof_v1");
             let input_cards = self.mental_poker_game.deck_encrypted.iter().map(|c| c.clone()).collect::<Vec<_>>();
             if !round.remask_proof.verify( &input_cards,
             &round.mask_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
@@ -265,7 +271,9 @@ impl Table {
         let proof = shuffle_proof.to_proof()?;
         let current_agg_pk = self.mental_poker_game.key_manager.get_aggregated_pk();
         let input_cards = self.mental_poker_game.deck_encrypted.clone();
-        let mut transcript = MerlinTranscript::new(b"poker_protocol_player_shuffle");
+        // 兼容 Move 合约 shuffle_proof::verify 与 poker_protocol 生产代码：
+        // 必须使用 FiatShamirTranscript 和协议名 zk_shuffle_proof_v1。
+        let mut transcript = FiatShamirTranscript::new(b"zk_shuffle_proof_v1");
         if proof.verify(
             &input_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),
             &output_cards.iter().map(|c| c.clone()).collect::<Vec<_>>(),

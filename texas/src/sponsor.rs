@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::auth;
 use crate::config::Config;
 use crate::handlers::{err_resp, get_token_from_headers, AppState};
+use crate::wallet_auth;
 
 // ============================================================
 // zkLogin Salt Service
@@ -97,7 +98,7 @@ fn decode_jwt_payload_unverified(jwt: &str) -> Result<(String, String), String> 
 #[derive(Deserialize)]
 pub struct ZkLoginAuthRequest {
     address: String,
-    signature: String,
+    signature: sui_sdk_types::UserSignature,
     message: String,
     provider: Option<String>,
     email: Option<String>,
@@ -120,6 +121,17 @@ pub async fn zklogin_auth(
         }
         Err(e) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
     };
+
+    // 验证签名：确保 signature 对 message 有效，且签名地址与 body.address 一致
+    match wallet_auth::verify_sui_wallet_signature(&body.message, &body.signature, &body.address).await {
+        Ok(_) => {
+            tracing::debug!("[zklogin_auth] signature verified, address={}", body.address);
+        }
+        Err(e) => {
+            tracing::warn!("[zklogin_auth] signature verification failed, address={}, error={}", body.address, e);
+            return err_resp(StatusCode::UNAUTHORIZED, &e);
+        }
+    }
 
     let address = body.address.clone();
     let user_id = format!("zklogin:{}", address);
@@ -209,7 +221,8 @@ pub(crate) async fn fetch_gas_info(config: &Config) -> Result<GasInfoResponse, S
     let sponsor_address: sui_sdk_types::Address = public_key.derive_address();
     let sponsor_address_str = sponsor_address.to_string();
 
-    let http = reqwest::Client::new();
+    // G9 修复：复用全局 reqwest::Client，避免每次调用都创建新实例
+    let http = shared_http_client();
 
     // Get gas coins via JSON-RPC
     let coins_resp = sui_jsonrpc(
@@ -276,7 +289,7 @@ pub async fn sponsor_transaction(
     Extension(state): Extension<Arc<AppState>>,
     req: Body,
 ) -> Response {
-    let _claims = match verify_auth(&headers, &state.config.jwt_secret) {
+    let claims = match verify_auth(&headers, &state.config.jwt_secret) {
         Ok(c) => c,
         Err(resp) => return resp,
     };
@@ -295,6 +308,55 @@ pub async fn sponsor_transaction(
         Ok(v) => v,
         Err(e) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
     };
+
+    // A6: 校验 tx_bytes —— 反序列化并验证 sender 与 gas budget
+    let tx_bytes_bytes = match base64_decode(&body.tx_bytes) {
+        Ok(b) => b,
+        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid tx_bytes: {}", e)),
+    };
+    let tx_data: sui_sdk_types::Transaction = match bcs::from_bytes(&tx_bytes_bytes) {
+        Ok(t) => t,
+        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid tx_bytes format"),
+    };
+
+    // 校验 sender 与 JWT claims 中的用户地址一致
+    let user = match state.db.find_user_by_id(&claims.user.id).await {
+        Some(u) => u,
+        None => return err_resp(StatusCode::UNAUTHORIZED, "User not found"),
+    };
+    let sender_str = tx_data.sender.to_string();
+    // G19 修复：normalize_address 现在返回 Result，需处理校验失败
+    let expected_sender = match wallet_auth::normalize_address(&user.address) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[sponsor_transaction] invalid user address: {}", e);
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid user address");
+        }
+    };
+    let actual_sender = match wallet_auth::normalize_address(&sender_str) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[sponsor_transaction] invalid tx sender address: {}", e);
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid sender address");
+        }
+    };
+    if actual_sender != expected_sender {
+        tracing::warn!(
+            "[sponsor_transaction] sender mismatch: tx_sender={}, user_address={}",
+            actual_sender, expected_sender
+        );
+        return err_resp(StatusCode::FORBIDDEN, "Sender mismatch");
+    }
+
+    // 校验 gas budget 不超过配置上限
+    let max_budget = state.config.sponsor_gas_budget;
+    if tx_data.gas_payment.budget > max_budget {
+        tracing::warn!(
+            "[sponsor_transaction] gas budget too high: {} > {}",
+            tx_data.gas_payment.budget, max_budget
+        );
+        return err_resp(StatusCode::FORBIDDEN, "Gas budget too high");
+    }
 
     match sign_transaction_as_sponsor(&state.config, &body.tx_bytes).await {
         Ok(signature) => {
@@ -352,6 +414,19 @@ pub(crate) async fn sign_transaction_as_sponsor(
 // ============================================================
 // Helper functions
 // ============================================================
+
+/// G9 修复：全局复用 reqwest::Client，避免每次调用都创建新实例
+/// （每次新建 Client 都会建立连接池、TLS 上下文，开销显著）。
+static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+pub(crate) fn shared_http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 /// Parse the sponsor's Ed25519 private key from a string.
 ///

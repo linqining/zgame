@@ -37,14 +37,11 @@ impl<C: Curve> ZKShuffleProof<C> {
             transcript.append_point::<C>(b"output c1", &i.c1);
             transcript.append_point::<C>(b"output c2", &i.c2);
         }
-        let scalars: Vec<C::Scalar> = (0..n)
-            .map(|_| {
-                let mut buf = [0u8; 64];
-                transcript.challenge_bytes(b"rho_challenge", &mut buf);
-                C::Scalar::from_bytes_mod_order_wide(&buf)
-            })
-            .collect();
-        scalars
+        // 兼容 Move 合约 bls_transcript::challenge_vec：
+        // 使用带索引的子标签 "rho_challenge0", "rho_challenge1", ...
+        // 而非旧实现中重复使用相同 label "rho_challenge" + challenge_bytes。
+        // 两者产生不同的 challenge 标量，必须与链上实现一致。
+        transcript.challenge_vec::<C>(b"rho_challenge", n)
     }
 
     pub fn prove(

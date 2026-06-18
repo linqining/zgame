@@ -82,6 +82,10 @@ impl BettingRound {
 
 
 
+    /// G7 修复：使用 has_acted 而非 actions_taken 判断是否所有玩家都已行动。
+    /// actions_taken 仅是计数器，无法反映每个玩家是否都行动过（如玩家加入/离开、
+    /// 加注后重置等场景下计数会失真）。has_acted 在每次行动后置 true，在加注后
+    /// 由调用方重置其他玩家，能准确反映"本轮是否所有人都行动过"。
     pub fn is_complete(&self, seats: &[&Seat]) -> bool {
         let active_players: Vec<&&Seat> = seats
             .iter()
@@ -91,9 +95,11 @@ impl BettingRound {
         if active_players.is_empty() {
             return true;
         }
-        if self.actions_taken < active_players.len() {
+        // 所有活跃玩家都必须已行动过
+        if !active_players.iter().all(|s| s.has_acted) {
             return false;
         }
+        // 且所有活跃玩家的下注都等于当前下注（或已 all-in）
         active_players.iter().all(|s| s.bet == self.current_bet || s.stack == 0)
     }
 

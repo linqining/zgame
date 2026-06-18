@@ -13,7 +13,7 @@ use crate::pokergame::side_pot::SidePot;
 use poker_protocol::z_poker::{MentalPokerGame, GameConfig};
 use poker_protocol::crypto::{EcPoint, ElGamalCiphertext, Scalar};
 use poker_protocol::z_poker::convert::{ecpoint_to_hex, scalar_to_hex};
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 use poker_protocol::crypto::CurvePoint;
 use poker_protocol::crypto::CurveScalar;
 const MIN_START_NUM: u32 = 3;
@@ -59,6 +59,100 @@ pub enum RoundState {
     ShowdownReveal,
     Showdown,
     HandComplete,
+}
+
+impl RoundState {
+    /// 将链上 u8 round_state 转换为 RoundState 枚举。
+    /// 判别值与枚举声明顺序一致（0=Waiting, 1=Shuffling, ... 13=HandComplete）。
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(RoundState::Waiting),
+            1 => Some(RoundState::Shuffling),
+            2 => Some(RoundState::ShuffleComplete),
+            3 => Some(RoundState::PreFlopReveal),
+            4 => Some(RoundState::PreFlop),
+            5 => Some(RoundState::FlopReveal),
+            6 => Some(RoundState::Flop),
+            7 => Some(RoundState::TurnReveal),
+            8 => Some(RoundState::Turn),
+            9 => Some(RoundState::RiverReveal),
+            10 => Some(RoundState::River),
+            11 => Some(RoundState::ShowdownReveal),
+            12 => Some(RoundState::Showdown),
+            13 => Some(RoundState::HandComplete),
+            _ => None,
+        }
+    }
+
+    /// 将 Move 合约的三维并行状态组合映射为 Rust 内部单一维度 RoundState 枚举。
+    ///
+    /// Move 三维状态:
+    /// - round_state: 0=WAITING, 2=PREFLOP, 3=FLOP, 4=TURN, 5=RIVER, 6=SHOWDOWN
+    /// - shuffle_phase: 0=NONE, 1=WAITING, 2=RECONSTRUCT, 3=BEFORE_PREFLOP
+    /// - reveal_phase: 0=NONE, 1=PREFLOP, 2=REDEAL, 3=FLOP, 4=TURN, 5=RIVER, 6=SHOWDOWN
+    /// - reconstruct_phase: 0=NONE, 1=COLLECTING, 2=COMPLETE
+    pub fn from_chain_state(
+        round_u8: u8,
+        shuffle_phase_u8: u8,
+        reveal_phase_u8: u8,
+        reconstruct_phase_u8: u8,
+    ) -> RoundState {
+        // 0. 优先判断 reconstruct 阶段（reconstruct_phase=1 表示正在收集）
+        //    reconstruct 期间不应映射为 Shuffling
+        if reconstruct_phase_u8 == 1 {
+            // reconstruct 期间保持当前 round_state 对应的状态
+            // 不映射为 Shuffling
+            return match round_u8 {
+                0 => RoundState::Waiting,
+                2 => RoundState::PreFlop,
+                3 => RoundState::Flop,
+                4 => RoundState::Turn,
+                5 => RoundState::River,
+                6 => RoundState::Showdown,
+                _ => RoundState::Waiting,
+            };
+        }
+
+        // 1. Shuffle phase 优先（仅 BEFORE_PREFLOP=3 → Shuffling）
+        //    RECONSTRUCT=2 不再映射为 Shuffling（由步骤 0 处理）
+        if shuffle_phase_u8 == 3 {
+            return RoundState::Shuffling;
+        }
+
+        // 2. Reveal phase 非 NONE 时映射到对应 *Reveal 状态
+        if reveal_phase_u8 != 0 {
+            return match reveal_phase_u8 {
+                1 => RoundState::PreFlopReveal,
+                2 => {
+                    // REDEAL: 根据当前 round_state 返回对应 *Reveal
+                    match round_u8 {
+                        2 => RoundState::PreFlopReveal,
+                        3 => RoundState::FlopReveal,
+                        4 => RoundState::TurnReveal,
+                        5 => RoundState::RiverReveal,
+                        6 => RoundState::ShowdownReveal,
+                        _ => RoundState::Waiting, // round_u8=0 或未知值时返回 Waiting
+                    }
+                }
+                3 => RoundState::FlopReveal,
+                4 => RoundState::TurnReveal,
+                5 => RoundState::RiverReveal,
+                6 => RoundState::ShowdownReveal,
+                _ => RoundState::Waiting,
+            };
+        }
+
+        // 3. 正常 round_state 映射（shuffle_phase=0 且 reveal_phase=0）
+        match round_u8 {
+            0 => RoundState::Waiting,
+            2 => RoundState::PreFlop,
+            3 => RoundState::Flop,
+            4 => RoundState::Turn,
+            5 => RoundState::River,
+            6 => RoundState::Showdown,
+            _ => RoundState::Waiting,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +241,11 @@ pub struct Table {
     pub waiting_players: HashMap<GamePkHex, PlayerWithProof>,
     #[serde(skip)]
     pub pk_to_seat: HashMap<GamePkHex, u32>,
+    /// 链上 Table 对象的 Object ID（hex 字符串）。
+    /// 由 relayer 在 `sync_table_state` 中匹配到链上 table 后设置。
+    /// 上链模式下用户操作构建 PTB 时需要此字段；为 None 表示尚未与链上 table 关联。
+    #[serde(skip)]
+    pub chain_table_id: Option<String>,
 }
 
 impl Table {
@@ -192,6 +291,8 @@ impl Table {
 
     /// Transition to a new round state with validity checking.
     /// Logs a warning if the transition is not in the valid transition table.
+    /// G4 修复：对严重非法转换（如 Waiting → Showdown）直接 panic，
+    /// 其他非法转换在 debug 构建中 panic，release 中仅记录 warn。
     pub fn transition_to(&mut self, new_state: RoundState) {
         let from = self.round_state;
         let valid = matches!((from, new_state),
@@ -228,12 +329,26 @@ impl Table {
         );
         tracing::info!("Transition from {:?} to {:?}", from, new_state);
         if !valid {
+            // 严重非法转换：从 Waiting 直接跳到 Showdown/HandComplete 等终局状态，
+            // 这类转换不可能由正常游戏流程触发，直接 panic 暴露 bug。
+            let severe = matches!((from, new_state),
+                (RoundState::Waiting, RoundState::Showdown | RoundState::HandComplete) |
+                (RoundState::HandComplete, RoundState::Showdown | RoundState::PreFlop |
+                 RoundState::Flop | RoundState::Turn | RoundState::River) |
+                (RoundState::Showdown, RoundState::PreFlop | RoundState::Flop |
+                 RoundState::Turn | RoundState::River)
+            );
+            if severe {
+                panic!("[transition_to] severe illegal state transition: {:?} -> {:?}", from, new_state);
+            }
             tracing::warn!("Invalid state transition: {:?} -> {:?}", from, new_state);
+            // debug 构建中对所有非法转换 panic，便于开发期及早发现状态机 bug
+            debug_assert!(valid, "Invalid state transition: {:?} -> {:?}", from, new_state);
         }
         self.round_state = new_state;
     }
 
-    pub fn new(id: u32, name: String, limit: u64, max_players: u32) -> Self {
+    pub fn new(id: u32, name: String, limit: u64, max_players: u32, chain_table_id: String) -> Self {
         let seats = Self::init_seats(max_players);
         Self {
             id,
@@ -272,6 +387,7 @@ impl Table {
             }),
             waiting_players: HashMap::new(),
             pk_to_seat: HashMap::new(),
+            chain_table_id: Some(chain_table_id),
         }
     }
 

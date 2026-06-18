@@ -59,6 +59,11 @@ public fun verify(
     let comm_b = bls12381::g1_from_bytes(&proof.commitment_b);
     let s = bls12381::scalar_from_bytes(&proof.response);
 
+    // M-P17: 校验承诺点非 identity——identity 承诺削弱证明安全性
+    if (bls_scalar::g1_is_identity(&comm_a) || bls_scalar::g1_is_identity(&comm_b)) {
+        return false
+    };
+
     // 3. Transcript 追加
     bls_transcript::append_point(t, &b"cp_G1", g1);
     bls_transcript::append_point(t, &b"cp_G2", g2);

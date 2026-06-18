@@ -1,6 +1,6 @@
 use super::*;
 use poker_protocol::crypto::EcPoint;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 use crate::pokergame::game_state::LeaveGameRoundJson;
 
 impl Table {
@@ -56,7 +56,9 @@ impl Table {
         }
 
         // Verify the LeaveProof
-        let mut transcript = MerlinTranscript::new(b"poker_protocol_leave");
+        // 兼容 Move 合约 leave_proof::verify 与 poker_protocol 生产代码：
+        // 必须使用 FiatShamirTranscript 和协议名 zk_leave_proof_v1。
+        let mut transcript = FiatShamirTranscript::new(b"zk_leave_proof_v1");
         if !leave_round.leave_proof.verify(&leave_round.input_cards, &leave_round.output_cards, player_pk, &mut transcript) {
             return Err("Invalid leave proof".to_string());
         }
@@ -164,41 +166,48 @@ impl Table {
     }
 
     pub fn unfolded_players(&self) -> Vec<&Seat> {
-        self.seats.values().filter(|s| !s.folded).collect()
+        // F10 fix: exclude sitting_out players
+        self.seats.values().filter(|s| !s.folded && !s.sitting_out).collect()
     }
 
     pub fn active_players(&self) -> Vec<&Seat> {
         self.seats.values().filter(|s| !s.sitting_out && !s.is_waiting).collect()
     }
 
-    pub fn next_player_by_filter<F>(&self, player: u32, places: u32, filter: F) -> u32
+    /// F2 fix: return Option<u32> instead of an arbitrary seat when no match.
+    /// Returns None if no matching seat is found within one full lap.
+    pub fn next_player_by_filter<F>(&self, player: u32, places: u32, filter: F) -> Option<u32>
     where
         F: Fn(&Seat) -> bool,
     {
+        if places == 0 {
+            return Some(player);
+        }
         let mut count = 0u32;
         let mut current = player;
-        let mut iterations = 0u32;
-        while count < places {
+        for _ in 0..self.max_players {
             current = if current >= self.max_players { 1 } else { current + 1 };
             if let Some(seat) = self.seats.get(&current) {
                 if filter(seat) {
                     count += 1;
+                    if count >= places {
+                        return Some(current);
+                    }
                 }
             }
-            iterations += 1;
-            if iterations > self.max_players * 2 {
-                tracing::warn!("[next_player_by_filter] infinite loop detected, breaking");
-                return current;
-            }
         }
-        current
+        tracing::warn!("[next_player_by_filter] no matching seat found from player {} (places={})", player, places);
+        None
     }
 
-    pub fn next_unfolded_player(&self, player: u32, places: u32) -> u32 {
-        self.next_player_by_filter(player, places, |seat| !seat.folded && !seat.sitting_out)
+    /// F3 fix: exclude all-in players (stack == 0) in addition to folded/sitting_out.
+    pub fn next_unfolded_player(&self, player: u32, places: u32) -> Option<u32> {
+        self.next_player_by_filter(player, places, |seat| {
+            !seat.folded && !seat.sitting_out && seat.stack > 0
+        })
     }
 
-    pub fn next_active_player(&self, player: u32, places: u32) -> u32 {
+    pub fn next_active_player(&self, player: u32, places: u32) -> Option<u32> {
         self.next_player_by_filter(player, places, |seat| !seat.sitting_out && !seat.is_waiting)
     }
 

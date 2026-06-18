@@ -6,8 +6,219 @@ use socketioxide::{
 };
 
 use crate::auth;
+use crate::config::Config;
 use crate::pokergame::player::truncate_name;
 use super::*;
+
+/// 为用户操作构建 PTB 并序列化为 tx_kind_b64。
+///
+/// 根据 `action` 类型选择对应的 PTB 构建器（fold/check/call/raise），
+/// 使用 `config.sui_package_id` 作为包 ID，`chain_table_id` 作为链上 Table Object ID，
+/// 然后通过 `ptb::serialize_tx_kind` 序列化为可供前端钱包签名的 base64 字符串。
+fn build_action_ptb_for_user(
+    config: &Config,
+    chain_table_id: &str,
+    seat_index: u64,
+    action: &str,
+    amount: Option<u64>,
+) -> Result<String, String> {
+    use crate::relayer::ptb;
+    let pt = match action {
+        "fold" => ptb::build_fold_ptb(&config.sui_package_id, chain_table_id, seat_index)?,
+        "check" => ptb::build_check_ptb(&config.sui_package_id, chain_table_id, seat_index)?,
+        "call" => ptb::build_call_ptb(&config.sui_package_id, chain_table_id, seat_index)?,
+        "raise" => ptb::build_raise_ptb(
+            &config.sui_package_id,
+            chain_table_id,
+            seat_index,
+            amount.unwrap_or(0),
+        )?,
+        _ => return Err(format!("unknown action: {}", action)),
+    };
+    ptb::serialize_tx_kind(pt)
+}
+
+/// 尝试以 on-chain 模式处理用户操作。
+///
+/// 返回 `true` 表示已通过 on-chain 流程处理（或已拒绝），调用方应跳过本地处理；
+/// 返回 `false` 表示未处理，调用方应执行本地处理。
+///
+/// 行为：
+/// - 当 `config.sui_on_chain_enabled` 为 `false` 时直接返回 `false`（保持本地模式）。
+/// - 当 `sui_on_chain_enabled` 为 `true` 时，**始终返回 `true`**（不修改本地内存）：
+///   - 若能解析 `pk_hex` / `seat_index` / `chain_table_id`：构建 PTB，emit
+///     `action_signing_request` 给前端签名上链，等待 relayer 事件同步回本地。
+///   - 若任何步骤失败：emit `error` 事件告知前端，**不回退本地处理**。
+async fn try_on_chain_action(
+    socket: &SocketRef,
+    state: &Arc<SocketState>,
+    table_id: u32,
+    action: &str,
+    amount: Option<u64>,
+) -> bool {
+    if !state.config.sui_on_chain_enabled {
+        return false;
+    }
+
+    let socket_id = socket.id.to_string();
+
+    // 1. 查找 pk_hex 和 seat_index
+    let (pk_hex, seat_index, chain_table_id) = {
+        let gs = state.state.read().await;
+        let player = gs.players.get(&socket_id);
+        let table = gs.tables.get(&table_id);
+        let pk_hex = player.and_then(|p| {
+            table.and_then(|t| t.get_pk_hex_by_wallet_address(&p.wallet_address.0))
+        });
+        let seat_index = pk_hex
+            .as_ref()
+            .and_then(|pk| table.and_then(|t| t.pk_to_seat.get(pk).copied()));
+        let chain_table_id = table.and_then(|t| t.chain_table_id.clone());
+        match (pk_hex, seat_index, chain_table_id) {
+            (Some(pk), Some(seat), Some(cid)) => (pk, seat, cid),
+            _ => {
+                tracing::warn!(
+                    "[on_chain_action] cannot resolve pk_hex/seat_index/chain_table_id for socket_id={}, table_id={}, action={}",
+                    socket_id,
+                    table_id,
+                    action
+                );
+                let _ = socket.emit(
+                    "error",
+                    &serde_json::json!({
+                        "msg": format!("on-chain mode: cannot resolve player seat or chain table id for action {}", action),
+                        "action": action,
+                        "table_id": table_id,
+                    }),
+                );
+                // 上链模式下不回退本地处理，直接返回 true（不修改本地内存）
+                return true;
+            }
+        }
+    };
+
+    // 2. 构建 PTB 并序列化
+    let tx_kind_b64 = match build_action_ptb_for_user(
+        &state.config,
+        &chain_table_id,
+        seat_index as u64,
+        action,
+        amount,
+    ) {
+        Ok(b64) => b64,
+        Err(e) => {
+            tracing::warn!(
+                "[on_chain_action] failed to build PTB for action={}, table_id={}, error={}",
+                action,
+                table_id,
+                e
+            );
+            let _ = socket.emit(
+                "error",
+                &serde_json::json!({
+                    "msg": format!("on-chain mode: failed to build PTB: {}", e),
+                    "action": action,
+                    "table_id": table_id,
+                }),
+            );
+            // 上链模式下不回退本地处理
+            return true;
+        }
+    };
+
+    // 3. emit action_signing_request 给前端，由前端钱包签名后回传签名提交赞助交易
+    let payload = serde_json::json!({
+        "action": action,
+        "table_id": table_id,
+        "seat_index": seat_index,
+        "tx_kind_b64": tx_kind_b64,
+        "amount": amount,
+        "pk_hex": pk_hex.0,
+    });
+    tracing::info!(
+        "[on_chain_action] emit action_signing_request: action={}, table_id={}, seat_index={}",
+        action,
+        table_id,
+        seat_index
+    );
+    let _ = socket.emit("action_signing_request", &payload);
+    true
+}
+
+/// A3 修复：验证 socket 发送者拥有所声称的 pk_hex。
+///
+/// 通过 socket_id 查找 player 的 wallet_address，再通过 table 查找该 wallet_address 对应的 pk_hex，
+/// 与请求中声称的 pk_hex 比较。验证失败时 emit error 事件并返回 false。
+async fn verify_socket_sender(
+    socket: &SocketRef,
+    state: &Arc<SocketState>,
+    table_id: u32,
+    claimed_pk_hex: &GamePkHex,
+) -> bool {
+    let socket_id = socket.id.to_string();
+    let expected_pk = {
+        let gs = state.state.read().await;
+        let wallet = gs.players.get(&socket_id).map(|p| p.wallet_address.clone());
+        wallet.and_then(|wa| {
+            gs.tables.get(&table_id).and_then(|t| t.get_pk_hex_by_wallet_address(&wa.0))
+        })
+    };
+    match expected_pk {
+        Some(pk) if &pk == claimed_pk_hex => true,
+        Some(pk) => {
+            tracing::warn!(
+                "[verify_socket_sender] pk_hex mismatch: socket_id={}, table_id={}, expected={}, claimed={}",
+                socket_id, table_id, pk, claimed_pk_hex
+            );
+            let _ = socket.emit("error", &serde_json::json!({"msg": "pk_hex does not belong to sender"}));
+            false
+        }
+        None => {
+            tracing::warn!(
+                "[verify_socket_sender] cannot resolve pk_hex for socket_id={}, table_id={}",
+                socket_id, table_id
+            );
+            let _ = socket.emit("error", &serde_json::json!({"msg": "Cannot verify sender identity"}));
+            false
+        }
+    }
+}
+
+/// A3 修复：验证 socket 发送者拥有所声称的 seat_id。
+///
+/// 用于 REBUY 等不带 pk_hex 的事件：通过 socket_id 查找 player 的 wallet_address，
+/// 再验证 table 中 seat_id 的 player.wallet_address 与之一致。
+async fn verify_socket_sender_seat(
+    socket: &SocketRef,
+    state: &Arc<SocketState>,
+    table_id: u32,
+    seat_id: u32,
+) -> bool {
+    let socket_id = socket.id.to_string();
+    let wallet_match = {
+        let gs = state.state.read().await;
+        let wallet = gs.players.get(&socket_id).map(|p| p.wallet_address.clone());
+        match wallet {
+            Some(wa) => {
+                gs.tables.get(&table_id)
+                    .and_then(|t| t.seats.get(&seat_id))
+                    .and_then(|seat| seat.player.as_ref())
+                    .map_or(false, |gp| gp.wallet_address.0 == wa.0)
+            }
+            None => false,
+        }
+    };
+    if !wallet_match {
+        tracing::warn!(
+            "[verify_socket_sender_seat] seat ownership mismatch: socket_id={}, table_id={}, seat_id={}",
+            socket_id, table_id, seat_id
+        );
+        let _ = socket.emit("error", &serde_json::json!({"msg": "Seat does not belong to sender"}));
+        false
+    } else {
+        true
+    }
+}
 
 pub fn register_handlers(io: &SocketIo) {
     io.ns("/", async move |socket: SocketRef, io: SocketIo, State(state): State<Arc<SocketState>>| {
@@ -271,26 +482,34 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
     });
 
     socket.on(actions::FOLD, async move |s: SocketRef, Data::<u32>(table_id), _io: SocketIo, State(state): State<Arc<SocketState>>| {
-        send_simple_action(&s, &state, table_id, "fold").await;
+        if !try_on_chain_action(&s, &state, table_id, "fold", None).await {
+            send_simple_action(&s, &state, table_id, "fold").await;
+        }
     });
 
     socket.on(actions::CHECK, async move |s: SocketRef, Data::<u32>(table_id), _io: SocketIo, State(state): State<Arc<SocketState>>| {
-        send_simple_action(&s, &state, table_id, "check").await;
+        if !try_on_chain_action(&s, &state, table_id, "check", None).await {
+            send_simple_action(&s, &state, table_id, "check").await;
+        }
     });
 
     socket.on(actions::CALL, async move |s: SocketRef, Data::<u32>(table_id), _io: SocketIo, State(state): State<Arc<SocketState>>| {
-        send_simple_action(&s, &state, table_id, "call").await;
+        if !try_on_chain_action(&s, &state, table_id, "call", None).await {
+            send_simple_action(&s, &state, table_id, "call").await;
+        }
     });
 
     socket.on(actions::RAISE, async move |s: SocketRef, Data::<RaisePayload>(payload), _io: SocketIo, State(state): State<Arc<SocketState>>| {
-        let socket_id = s.id.to_string();
-        let pk_hex = {
-            let gs = state.state.read().await;
-            gs.players.get(&socket_id)
-                .and_then(|p| gs.tables.get(&payload.table_id).and_then(|t| t.get_pk_hex_by_wallet_address(&p.wallet_address.0)))
-        };
-        if let (Some(pk_hex), Some(sender)) = (pk_hex, state.get_action_sender(payload.table_id).await) {
-            let _ = sender.send(ActionRequest { pk_hex, action: "raise".to_string(), amount: Some(payload.amount) }).await;
+        if !try_on_chain_action(&s, &state, payload.table_id, "raise", Some(payload.amount)).await {
+            let socket_id = s.id.to_string();
+            let pk_hex = {
+                let gs = state.state.read().await;
+                gs.players.get(&socket_id)
+                    .and_then(|p| gs.tables.get(&payload.table_id).and_then(|t| t.get_pk_hex_by_wallet_address(&p.wallet_address.0)))
+            };
+            if let (Some(pk_hex), Some(sender)) = (pk_hex, state.get_action_sender(payload.table_id).await) {
+                let _ = sender.send(ActionRequest { pk_hex, action: "raise".to_string(), amount: Some(payload.amount) }).await;
+            }
         }
     });
 
@@ -352,6 +571,23 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         tracing::info!("[SIT_DOWN_V2] Received from {}: table_id={}, seat_id={}, amount={}, pk_hex={}, user_id={}",
             socket_id, payload.table_id, payload.seat_id, payload.amount, payload.pk_hex, user_id);
 
+        // E3 修复：校验 amount > 0，避免 0 或负值导致的逻辑错误
+        if payload.amount == 0 {
+            tracing::warn!("[SIT_DOWN_V2] Invalid amount=0 from socket_id={}", socket_id);
+            let _ = s.emit("error", &serde_json::json!({"msg": "Amount must be positive"}));
+            return;
+        }
+
+        // E3 修复：使用 i64::try_from 避免 u64 -> i64 转换溢出
+        let deduct = match i64::try_from(payload.amount) {
+            Ok(v) => -v,
+            Err(_) => {
+                tracing::warn!("[SIT_DOWN_V2] Amount too large for i64: {}", payload.amount);
+                let _ = s.emit("error", &serde_json::json!({"msg": "Amount too large"}));
+                return;
+            }
+        };
+
         let player_pk = match hex_to_ecpoint(&**payload.pk_hex) {
             Ok(pk) => pk,
             Err(e) => {
@@ -397,6 +633,21 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         let player_id = player.id.clone();
         let player_name = truncate_name(&player.name, 12);
 
+        // E3 修复：检查用户余额是否足够
+        let db_user = state.db.find_user_by_id(&player_id).await;
+        if let Some(ref user) = db_user {
+            if user.chips_amount < payload.amount as i64 {
+                tracing::warn!(
+                    "[SIT_DOWN_V2] Insufficient chips: user_id={}, balance={}, required={}",
+                    player_id,
+                    user.chips_amount,
+                    payload.amount
+                );
+                let _ = s.emit("error", &serde_json::json!({"msg": "Insufficient chips"}));
+                return;
+            }
+        }
+
         let result = state.join_player_and_shuffle(
             payload.table_id,
             player,
@@ -409,13 +660,24 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
 
         match result {
             Ok((all_complete, join_result)) => {
-                let _ = state.db.update_chips(&player_id, -(payload.amount as i64)).await;
+                // E3 修复：使用预先校验过的 deduct 值，避免溢出
+                let _ = state.db.update_chips(&player_id, deduct).await;
 
                 let msg = match join_result {
                     JoinResult::JoinedAndShuffled => format!("{} sat down in Seat {} and shuffled", player_name, payload.seat_id),
                     JoinResult::JoinedWaiting => format!("{} sat down in Seat {}, waiting for next hand", player_name, payload.seat_id),
                 };
                 broadcast::broadcast_to_table(&io, &state, payload.table_id, Some(&msg)).await;
+
+                // ZK 可视化：remask 证明验证成功（join_and_shuffle 中 remask_proof 已验证）
+                state.broadcast_crypto_event(
+                    payload.table_id,
+                    broadcast::CryptoEventType::Remask,
+                    payload.pk_hex.to_string(),
+                    None,
+                    true,
+                    Some("remask proof verified".to_string()),
+                ).await;
 
                 if all_complete {
                     tracing::info!("[SIT_DOWN_V2] All players shuffled, starting game loop for table {}", payload.table_id);
@@ -424,12 +686,44 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             }
             Err(e) => {
                 tracing::warn!("[SIT_DOWN_V2] Failed to join and shuffle: {}", e);
+                // ZK 可视化：remask 证明验证失败
+                state.broadcast_crypto_event(
+                    payload.table_id,
+                    broadcast::CryptoEventType::Remask,
+                    payload.pk_hex.to_string(),
+                    None,
+                    false,
+                    Some(format!("remask proof verification failed: {}", e)),
+                ).await;
             }
         }
     });
 
     socket.on(actions::REBUY, async move |s: SocketRef, Data::<RebuyPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let socket_id = s.id.to_string();
+
+        // E3 修复：校验 amount > 0
+        if payload.amount == 0 {
+            tracing::warn!("[REBUY] Invalid amount=0 from socket_id={}", socket_id);
+            let _ = s.emit("error", &serde_json::json!({"msg": "Amount must be positive"}));
+            return;
+        }
+
+        // E3 修复：使用 i64::try_from 避免 u64 -> i64 转换溢出
+        let deduct = match i64::try_from(payload.amount) {
+            Ok(v) => -v,
+            Err(_) => {
+                tracing::warn!("[REBUY] Amount too large for i64: {}", payload.amount);
+                let _ = s.emit("error", &serde_json::json!({"msg": "Amount too large"}));
+                return;
+            }
+        };
+
+        // A3 修复：验证发送者拥有该 seat_id
+        if !verify_socket_sender_seat(&s, &state, payload.table_id, payload.seat_id).await {
+            return;
+        }
+
         let chips_deduct = {
             let mut gs = state.state.write().await;
 
@@ -440,7 +734,31 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         };
 
         if let Some(pid) = chips_deduct {
-            let _ = state.db.update_chips(&pid, -(payload.amount as i64)).await;
+            // E3 修复：检查余额
+            let db_user = state.db.find_user_by_id(&pid).await;
+            if let Some(ref user) = db_user {
+                if user.chips_amount < payload.amount as i64 {
+                    tracing::warn!(
+                        "[REBUY] Insufficient chips: user_id={}, balance={}, required={}",
+                        pid,
+                        user.chips_amount,
+                        payload.amount
+                    );
+                    let _ = s.emit("error", &serde_json::json!({"msg": "Insufficient chips"}));
+                    // 余额不足，回滚 rebuy_player 的座位状态变更
+                    let mut gs = state.state.write().await;
+                    if let Some(table) = gs.tables.get_mut(&payload.table_id) {
+                        // 简单回滚：从 seat stack 中减去刚加的 amount
+                        if let Some(seat) = table.seats.get_mut(&payload.seat_id) {
+                            seat.stack = seat.stack.saturating_sub(payload.amount);
+                        }
+                    }
+                    broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
+                    return;
+                }
+            }
+            // E3 修复：使用预先校验过的 deduct 值
+            let _ = state.db.update_chips(&pid, deduct).await;
         }
 
         broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
@@ -451,6 +769,11 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         let table_id = payload.table_id;
         let pk_hex = GamePkHex::new(payload.pk_hex.to_lowercase());
         tracing::info!("[STAND_UP] Received from {}: table_id={}, pk_hex={}", socket_id, table_id, pk_hex);
+
+        // A3 修复：验证发送者拥有所声称的 pk_hex
+        if !verify_socket_sender(&s, &state, table_id, &pk_hex).await {
+            return;
+        }
 
         let player_pk = match hex_to_ecpoint(&**pk_hex) {
             Ok(pk) => pk,
@@ -489,7 +812,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             gs.players.get(&socket_id).map(|p| p.id.clone())
         };
 
-        let (stand_msg, need_clear) = {
+        let (stand_msg, need_clear, leave_proof_verified) = {
             let mut gs = state.state.write().await;
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 let msg = table.find_player_by_pk(&pk_hex)
@@ -505,22 +828,38 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 }
 
                 // Verify leave proof and remove player
-                match table.leave_player_with_proof(&pk_hex, &player_pk, &payload.leave_round) {
+                let verified = match table.leave_player_with_proof(&pk_hex, &player_pk, &payload.leave_round) {
                     Ok(()) => {
                         tracing::info!("[STAND_UP] Leave proof verified, player {} removed", pk_hex);
+                        true
                     }
                     Err(e) => {
                         tracing::warn!("[STAND_UP] Leave proof verification failed: {}, falling back to remove_player_by_pk", e);
                         table.remove_player_by_pk(&pk_hex);
+                        false
                     }
-                }
+                };
 
                 let clear = table.active_players().len() == 1;
-                (msg, clear)
-            } else { (None, false) }
+                (msg, clear, verified)
+            } else { (None, false, false) }
         };
 
         broadcast::broadcast_to_table(&io, &state, table_id, stand_msg.as_deref()).await;
+
+        // ZK 可视化：leave 证明验证结果
+        state.broadcast_crypto_event(
+            table_id,
+            broadcast::CryptoEventType::Leave,
+            pk_hex.0.clone(),
+            None,
+            leave_proof_verified,
+            Some(if leave_proof_verified {
+                "leave proof verified".to_string()
+            } else {
+                "leave proof verification failed".to_string()
+            }),
+        ).await;
 
         let tables_info = state.get_current_tables().await;
         let players_info = state.get_current_players().await;
@@ -571,6 +910,11 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 tracing::info!("[SHUFFLE_SUBMIT] request received, pk_hex={}, table_id={}", payload.pk_hex, payload.table_id);
                 let pk_hex = GamePkHex::new(payload.pk_hex.to_lowercase());
 
+                // A3 修复：验证发送者拥有所声称的 pk_hex
+                if !verify_socket_sender(&s, &state, payload.table_id, &pk_hex).await {
+                    return;
+                }
+
                 let player = {
                     let gs = state.state.read().await;
                     gs.players.get(&socket_id).cloned()
@@ -591,9 +935,27 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                         tracing::debug!("[SHUFFLE_SUBMIT] shuffle submitted and verified, pk_hex={}, table_id={}", pk_hex, payload.table_id);
                         state.send_shuffle_notice(payload.table_id).await;
                         broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
+                        // ZK 可视化：shuffle 证明验证成功
+                        state.broadcast_crypto_event(
+                            payload.table_id,
+                            broadcast::CryptoEventType::Shuffle,
+                            pk_hex.0.clone(),
+                            None,
+                            true,
+                            Some("shuffle proof verified".to_string()),
+                        ).await;
                     }
                     Err(e) => {
                         tracing::warn!("[SHUFFLE_SUBMIT] shuffle verification failed, pk_hex={}, table_id={}, error={}", pk_hex, payload.table_id, e);
+                        // ZK 可视化：shuffle 证明验证失败
+                        state.broadcast_crypto_event(
+                            payload.table_id,
+                            broadcast::CryptoEventType::Shuffle,
+                            pk_hex.0.clone(),
+                            None,
+                            false,
+                            Some(format!("shuffle proof verification failed: {}", e)),
+                        ).await;
                     }
                 }
             }
@@ -610,17 +972,28 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         let pk_hex = GamePkHex::new(payload.pk_hex.to_lowercase());
         tracing::info!("[RECONSTRUCT_SUBMIT] request received, pk_hex={}, table_id={}", pk_hex, payload.table_id);
 
+        // A3 修复：验证发送者拥有所声称的 pk_hex
+        if !verify_socket_sender(&s, &state, payload.table_id, &pk_hex).await {
+            return;
+        }
+
         let _wallet_address = {
             let gs = state.state.read().await;
             gs.players.get(&socket_id).map(|p| p.wallet_address.to_string())
         }.unwrap_or_default();
 
 
-        let (all_complete, reconstruct_payload) = {
+        let (all_complete, reconstruct_payload, proof_verified) = {
             let mut gs = state.state.write().await;
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
 
-                let is_complete = table.submit_reconstruct_deck(&pk_hex, payload.output_cards.clone(), payload.swap_cards.clone(), payload.proof).map_err(|e| tracing::error!("[RECONSTRUCT_SUBMIT] Error: {}", e)).unwrap_or(false);
+                let (is_complete, verified) = match table.submit_reconstruct_deck(&pk_hex, payload.output_cards.clone(), payload.swap_cards.clone(), payload.proof) {
+                    Ok(complete) => (complete, true),
+                    Err(e) => {
+                        tracing::error!("[RECONSTRUCT_SUBMIT] Error: {}", e);
+                        (false, false)
+                    }
+                };
                 if is_complete {
                     let reconstruct_payload = ReconstructResultPayload {
                         table_id: payload.table_id,
@@ -628,12 +1001,12 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                         reconstructed: true,
                     };
                     let _ = table.start_shuffle();
-                    (is_complete, Some(reconstruct_payload))
+                    (is_complete, Some(reconstruct_payload), verified)
                 } else {
-                    (is_complete, None)
+                    (is_complete, None, verified)
                 }
             } else {
-                (false, None)
+                (false, None, false)
             }
         };
 
@@ -645,23 +1018,35 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             tracing::info!("[RECONSTRUCT_SUBMIT] All players completed reconstruct for table {}", payload.table_id);
         }
         broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
+
+        // ZK 可视化：reconstruct 证明验证结果
+        state.broadcast_crypto_event(
+            payload.table_id,
+            broadcast::CryptoEventType::Reconstruct,
+            pk_hex.0.clone(),
+            None,
+            proof_verified,
+            Some(if proof_verified {
+                "reconstruct proof verified".to_string()
+            } else {
+                "reconstruct proof verification failed".to_string()
+            }),
+        ).await;
     });
 
     socket.on(actions::REVEAL_SUBMIT, async move |s: SocketRef, Data::<RevealSubmitPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let socket_id = s.id.to_string();
-        let result = {
+        let wallet_address = {
             let gs = state.state.read().await;
-            if let Some(player) = gs.players.get(&socket_id){
-                Some(player.wallet_address.to_string())
-            } else {
-                None
+            gs.players.get(&socket_id).map(|p| p.wallet_address.to_string())
+        };
+        let wallet_address = match wallet_address {
+            Some(w) => w,
+            None => {
+                tracing::warn!("[REVEAL_SUBMIT] Player {} not found", socket_id);
+                return;
             }
         };
-        if result.is_none() {
-            tracing::warn!("[REVEAL_SUBMIT] Player {} not found", socket_id);
-            return;
-        }
-        let wallet_address = result.unwrap();
         let all_complete = {
             let mut gs = state.state.write().await;
             if let Some(table) = gs.tables.get_mut(&payload.table_id) {
@@ -677,10 +1062,15 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
         broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
     });
 
-    socket.on(actions::REDEAL_REQUEST, async move |_s: SocketRef, Data::<RedealRequestPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
+    socket.on(actions::REDEAL_REQUEST, async move |s: SocketRef, Data::<RedealRequestPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
         let player_pk = GamePkHex::new(payload.player_pk.to_lowercase());
         tracing::info!("[REDEAL_REQUEST] Player {} requests redeal for {} failed cards on table {}",
             player_pk, payload.failed_card_indices.len(), payload.table_id);
+
+        // A3 修复：验证发送者拥有所声称的 player_pk
+        if !verify_socket_sender(&s, &state, payload.table_id, &player_pk).await {
+            return;
+        }
 
         // 执行 redeal
         let redealt_indices = {
@@ -743,56 +1133,6 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             }
         }
     });
-
-    socket.on(actions::RECONSTRUCT_VOTE, async move |s: SocketRef, Data::<ReconstructVotePayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
-        let socket_id = s.id.to_string();
-        let wallet_address = {
-            let gs = state.state.read().await;
-            gs.players.get(&socket_id).map(|p| p.wallet_address.to_string())
-        };
-        let wallet_address = match wallet_address {
-            Some(wallet_address) => wallet_address,
-            None => {
-                tracing::warn!("[RECONSTRUCT_VOTE] Player {} not found", socket_id);
-                return;
-            }
-        };
-        let result = {
-            let mut gs = state.state.write().await;
-            if let Some(table) = gs.tables.get_mut(&payload.table_id) {
-                let pk_hex_opt = table.get_pk_hex_by_wallet_address(&wallet_address);
-                if pk_hex_opt.is_none() {
-                    Err("Player pk not found".to_string())
-                } else {
-                    let pk_hex = pk_hex_opt.unwrap();
-                    table.vote_reconstruct(&pk_hex, payload.vote)
-                }
-            } else {
-                Err("Table not found".to_string())
-            }
-        };
-
-        match result {
-            Ok(phase) => {
-                let reconstruct_payload = {
-                    let gs = state.state.read().await;
-                    gs.tables.get(&payload.table_id).map(|t| ReconstructResultPayload {
-                        table_id: payload.table_id,
-                        completed_players: t.reconstruct_state.completed_players.clone(),
-                        reconstructed: phase == ReconstructPhase::Completed,
-                    })
-                };
-                if let Some(p) = reconstruct_payload {
-                    let _ = io.to(table_room_name(payload.table_id)).emit(actions::RECONSTRUCT_RESULT, &p).await;
-                }
-                broadcast::broadcast_to_table(&io, &state, payload.table_id, None).await;
-            }
-            Err(e) => {
-                tracing::warn!("[EXPEL_VOTE] Failed: {}", e);
-            }
-        }
-    });
-
 
     socket.on_disconnect(async move |s: SocketRef, io: SocketIo, State(state): State<Arc<SocketState>>| {
         let socket_id = s.id.to_string();

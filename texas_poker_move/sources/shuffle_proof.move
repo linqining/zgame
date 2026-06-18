@@ -74,11 +74,16 @@ public fun new(
 /// output_cts: 洗牌后的密文数组
 /// pk: 玩家公钥 G * sk
 /// t: Fiat-Shamir transcript
+///
+/// M-D13 说明：此证明结构为非标准的自定义 Schnorr 方案，并非 Bayer-Groth 等标准
+/// shuffle-proof 协议。完整修复需要重新设计证明系统。作为临时缓解措施，
+/// base_points 中不再包含 G 和 pk 作为自由基点（可被攻击者利用），改为使用
+/// 输入密文作为基点，确保所有基点都绑定到具体密文。
 public fun verify(
     proof: &ShuffleProof,
     input_cts: &vector<ElGamalCiphertext>,
     output_cts: &vector<ElGamalCiphertext>,
-    pk: &group_ops::Element<G1>,
+    _pk: &group_ops::Element<G1>,
     t: &mut Transcript,
 ): bool {
     let n = input_cts.length();
@@ -146,7 +151,8 @@ public fun verify(
     };
 
     // 4. Verify combined Schnorr proof (prevents c1/c2 swap attack)
-    // Build combined base_points: [output[0].c1, output[0].c2, output[1].c1, output[1].c2, ..., G, pk]
+    // M-D13 修复：移除 G 和 pk 作为自由基点，改用输入密文作为基点
+    // Build combined base_points: [output[0].c1, output[0].c2, ..., output[n-1].c1, output[n-1].c2, input[0].c1, input[0].c2]
     let mut combined_base_points = vector[];
     i = 0;
     while (i < n) {
@@ -155,8 +161,9 @@ public fun verify(
         combined_base_points.push_back(*bls_elgamal::c2(output_ct));
         i = i + 1;
     };
-    combined_base_points.push_back(bls12381::g1_generator());
-    combined_base_points.push_back(*pk);
+    let input_ct_0 = vector::borrow(input_cts, 0);
+    combined_base_points.push_back(*bls_elgamal::c1(input_ct_0));
+    combined_base_points.push_back(*bls_elgamal::c2(input_ct_0));
 
     // R = sum_c1_commit + sum_c2_commit
     let combined_r = bls12381::g1_add(&proof_sum_c1, &proof_sum_c2);
@@ -166,7 +173,8 @@ public fun verify(
     };
 
     // 5. Verify c1-only Schnorr proof
-    // Build c1 base_points: [output[0].c1, output[1].c1, ..., G]
+    // M-D13 修复：移除 G 作为自由基点，改用输入密文 c1 作为基点
+    // Build c1 base_points: [output[0].c1, output[1].c1, ..., input[0].c1]
     let mut c1_base_points = vector[];
     i = 0;
     while (i < n) {
@@ -174,7 +182,7 @@ public fun verify(
         c1_base_points.push_back(*bls_elgamal::c1(output_ct));
         i = i + 1;
     };
-    c1_base_points.push_back(bls12381::g1_generator());
+    c1_base_points.push_back(*bls_elgamal::c1(vector::borrow(input_cts, 0)));
 
     // R = sum_c1_commit
     if (!schnorr_proof::verify(&proof.sum_c1_schnorr_proof, &c1_base_points, &proof_sum_c1, t)) {
@@ -182,7 +190,8 @@ public fun verify(
     };
 
     // 6. Verify c2-only Schnorr proof
-    // Build c2 base_points: [output[0].c2, output[1].c2, ..., pk]
+    // M-D13 修复：移除 pk 作为自由基点，改用输入密文 c2 作为基点
+    // Build c2 base_points: [output[0].c2, output[1].c2, ..., input[0].c2]
     let mut c2_base_points = vector[];
     i = 0;
     while (i < n) {
@@ -190,7 +199,7 @@ public fun verify(
         c2_base_points.push_back(*bls_elgamal::c2(output_ct));
         i = i + 1;
     };
-    c2_base_points.push_back(*pk);
+    c2_base_points.push_back(*bls_elgamal::c2(vector::borrow(input_cts, 0)));
 
     // R = sum_c2_commit
     if (!schnorr_proof::verify(&proof.sum_c2_schnorr_proof, &c2_base_points, &proof_sum_c2, t)) {

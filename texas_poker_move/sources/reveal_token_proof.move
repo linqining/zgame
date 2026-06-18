@@ -62,12 +62,26 @@ public fun verify(
     };
 
     // 4. 创建独立 transcript
+    // M-P14: TODO 安全改进——当前 RevealTokenProof 无 nonce 字段且使用独立 transcript，
+    // 存在重放风险（同一 proof 可能在不同上下文重用）。
+    // 建议改进：
+    //   1) 在 RevealTokenProof 结构体中新增 nonce: vector<u8> 字段；
+    //   2) 将 nonce 追加到 transcript（bls_transcript::append_message(&mut t, &b"nonce", &proof.nonce)）；
+    //   3) 在 table 层维护已使用 nonce 集合，拒绝重复 nonce。
+    // 当前未实现是因为改动会破坏已发布的 proof 结构和 table.move 的验证流程，
+    // 需要协调客户端同步升级。短期依赖 reveal_token 绑定到具体 encrypted_card 来缓解。
     let mut t = bls_transcript::new(&b"reveal_token_proof_v3");
 
     // 反序列化证明元素
     let t1 = bls12381::g1_from_bytes(&proof.commitment_t1);
     let t2 = bls12381::g1_from_bytes(&proof.commitment_t2);
     let s = bls12381::scalar_from_bytes(&proof.response_s);
+
+    // M-P17: 校验反序列化后的承诺点非 identity——identity 承诺意味着零承诺，
+    // 可能让等式 G * s == T1 + pk * c 在 s == c * sk 时平凡成立，削弱证明安全性。
+    if (bls_scalar::g1_is_identity(&t1) || bls_scalar::g1_is_identity(&t2)) {
+        return false
+    };
 
     // 5. 追加到 transcript: pk, c1, c2, reveal_token, t1, t2
     bls_transcript::append_point(&mut t, &b"pk", expected_pk);

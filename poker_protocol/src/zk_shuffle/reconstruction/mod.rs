@@ -149,10 +149,10 @@ impl<C: Curve> ReconstructProof<C> {
         // 首先要证明swap_out_cards 是由user_readable_cards 一一 替换出来的
         // 其次 sum依然满足dleq关系（要用fiat生成随机数线性组合）
 
-        // This nonce ensures each proof is unique even with identical inputs
+        // 兼容 Move 合约 reconstruct_proof::verify：
+        // Move 不在 transcript 开头追加 ReconstructProof.nonce，
+        // nonce 仅作为结构体字段存在（防重放），不参与 Fiat-Shamir 计算。
         let nonce = C::Scalar::random(&mut OsRng);
-        // The nonce binds this proof to a unique instance
-        transcript.append_scalar::<C>(b"reconstruct_proof_nonce", &nonce);
 
         // 步骤一：证明swap_out_cards 是由user_readable_cards 一一 替换出来的
         let mut swap_out_cards_proofs: Vec<SwapOutCardProof<C>> = Vec::new();
@@ -161,23 +161,21 @@ impl<C: Curve> ReconstructProof<C> {
             let swap_out_card_proof = SwapOutCardProof::prove(user_readable_card.clone(), swap_out_card.1.clone(), user_sk, user_pk, transcript)?;
             swap_out_cards_proofs.push(swap_out_card_proof);
         }
+        // 兼容 Move 合约：标签为 reconstruct_card（非 reconstruct_proof_card）
         for card in &cards {
-            transcript.append_point::<C>(b"reconstruct_proof_card", card);
+            transcript.append_point::<C>(b"reconstruct_card", card);
+        }
+        // 兼容 Move 合约：先追加所有 c1（标签 reconstruct_output_c1），再追加所有 c2（标签 reconstruct_output_c2）
+        for output_card in &output_cards {
+            transcript.append_point::<C>(b"reconstruct_output_c1", &output_card.c1);
         }
         for output_card in &output_cards {
-            transcript.append_point::<C>(b"reconstruct_proof_output_card", &output_card.c1);
-            transcript.append_point::<C>(b"reconstruct_proof_output_card", &output_card.c2);
+            transcript.append_point::<C>(b"reconstruct_output_c2", &output_card.c2);
         }
 
         // 步骤二：计算 sum(output_cards *ri) 作为commitment
-        // 使用 transcript 生成 output_cards.len() 个随机 scalar
-        let scalars: Vec<C::Scalar> = (0..output_cards.len())
-            .map(|_| {
-                let mut buf = [0u8; 64];
-                transcript.challenge_bytes(b"rho_challenge", &mut buf);
-                C::Scalar::from_bytes_mod_order_wide(&buf)
-            })
-            .collect();
+        // 兼容 Move 合约：使用 challenge_vec 生成 rho_i（标签 reconstruct_rho），而非 challenge_bytes 循环
+        let scalars: Vec<C::Scalar> = transcript.challenge_vec::<C>(b"reconstruct_rho", output_cards.len());
         // 计算 sum(output_cards * rho_i), 这里引入rho是为了避免c1交换攻击
         // 使用 vartime_multiscalar_mul 优化计算
         let points_c1: Vec<C::Point> = output_cards.iter().map(|oc| oc.c1).collect();
@@ -312,8 +310,9 @@ impl<C: Curve> ReconstructProof<C> {
         transcript: &mut impl CryptoTranscript,
     ) -> Result<(), VerificationError>
     {
-        // The nonce binds this proof to a unique instance
-        transcript.append_scalar::<C>(b"reconstruct_proof_nonce", &self.nonce);
+        // 兼容 Move 合约 reconstruct_proof::verify：
+        // Move 不在 transcript 开头追加 ReconstructProof.nonce，
+        // nonce 仅作为结构体字段存在（防重放），不参与 Fiat-Shamir 计算。
         // 步骤一：验证 swap_out_cards_proofs - 每个 swap_out_card 都是由对应的 user_readable_card 替换出来的
         // SECURITY FIX (V3): 验证每个 swap_out_card_proof 中的 user_pk 与预期的 user_pk 一致
         // 防止攻击者使用不同的 user_pk 伪造 swap 证明
@@ -344,22 +343,21 @@ impl<C: Curve> ReconstructProof<C> {
                 transcript,
             ).map_err(|_| VerificationError::InvalidProofAtPosition(i))?;
         }
+        // 兼容 Move 合约：标签为 reconstruct_card（非 reconstruct_proof_card）
         for card in cards {
-            transcript.append_point::<C>(b"reconstruct_proof_card", card);
+            transcript.append_point::<C>(b"reconstruct_card", card);
+        }
+        // 兼容 Move 合约：先追加所有 c1（标签 reconstruct_output_c1），再追加所有 c2（标签 reconstruct_output_c2）
+        for output_card in output_cards {
+            transcript.append_point::<C>(b"reconstruct_output_c1", &output_card.c1);
         }
         for output_card in output_cards {
-            transcript.append_point::<C>(b"reconstruct_proof_output_card", &output_card.c1);
-            transcript.append_point::<C>(b"reconstruct_proof_output_card", &output_card.c2);
+            transcript.append_point::<C>(b"reconstruct_output_c2", &output_card.c2);
         }
 
         // 步骤二：重新生成相同的随机 scalars（rho_i）用于验证
-        let scalars: Vec<C::Scalar> = (0..output_cards.len())
-            .map(|_| {
-                let mut buf = [0u8; 64];
-                transcript.challenge_bytes(b"rho_challenge", &mut buf);
-                C::Scalar::from_bytes_mod_order_wide(&buf)
-            })
-            .collect();
+        // 兼容 Move 合约：使用 challenge_vec 生成 rho_i（标签 reconstruct_rho），而非 challenge_bytes 循环
+        let scalars: Vec<C::Scalar> = transcript.challenge_vec::<C>(b"reconstruct_rho", output_cards.len());
 
         // 计算 sum(output_cards.c1 * rho_i) 和 sum((output_cards.c2 - cards) * rho_i)
         let points_c1: Vec<C::Point> = output_cards.iter().map(|oc| oc.c1).collect();

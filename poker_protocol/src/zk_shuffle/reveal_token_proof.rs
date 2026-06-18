@@ -142,13 +142,15 @@ impl<C: Curve> RevealTokenProof<C>
         t2: &C::Point,
         transcript: &mut impl CryptoTranscript,
     ) -> C::Scalar {
+        // 标签与 Move 合约 reveal_token_proof.move 完全一致
         transcript.append_point::<C>(b"pk", pk);
         transcript.append_point::<C>(b"c1", &encrypted_card.c1);
         transcript.append_point::<C>(b"c2", &encrypted_card.c2);
         transcript.append_point::<C>(b"reveal_token", reveal_token);
         transcript.append_point::<C>(b"t1", t1);
         transcript.append_point::<C>(b"t2", t2);
-        transcript.challenge::<C>(b"reveal_token_challenge").scalar
+        // 兼容 Move 合约：challenge label 为 b"challenge"（非 b"reveal_token_challenge"）
+        transcript.challenge::<C>(b"challenge").scalar
     }
 }
 

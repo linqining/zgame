@@ -63,7 +63,8 @@ impl Table {
             is_active: true,
             phase: RevealPhase::CommunityReveal,
             current_card_index: 0,
-            total_cards_per_player: 2,
+            // G6 修复：community reveal 阶段不揭示玩家手牌，total_cards_per_player 应为 0
+            total_cards_per_player: 0,
             total_community_cards: self.mental_poker_game.community_cards_encrypted.len(),
             timeout_start: Some(std::time::Instant::now()),
             timeout_seconds: 10,
@@ -80,23 +81,24 @@ impl Table {
             tracing::error!("[start_hand_card_reveal_phase] Reveal phase already active");
             return;
         }
+        // F4 fix: only include players who are actually in the mental poker game,
+        // so pending_players stays consistent with player_assignments.
         let player_pks: Vec<GamePkHex> = self.seats.values()
             .filter(|s| !s.folded )
             .filter_map(|s| s.player.as_ref().map(|p| p.pk_hex.clone()))
+            .filter(|pk| self.mental_poker_game.players.contains_key(pk.as_str()))
             .collect();
         let mut player_assignments = HashMap::new();
         for seat in self.seats.values() {
             if seat.folded { continue; }
             if let Some(player) = &seat.player {
-                if !self.mental_poker_game.players.contains_key(player.pk_hex.as_str()) {
-                    continue;
+                if let Some(men_player) = self.mental_poker_game.players.get(player.pk_hex.as_str()) {
+                    let hand_cards = men_player.hand_encrypted.iter().map(|f| f.encrypted_card.clone()).collect();
+                    player_assignments.insert(player.pk_hex.clone(), PlayerRevealAssignment {
+                        hand_card: hand_cards,
+                        community_card: vec![],
+                    });
                 }
-                let men_player = self.mental_poker_game.players.get(player.pk_hex.as_str()).unwrap();
-                let hand_cards = men_player.hand_encrypted.iter().map(|f| f.encrypted_card.clone()).collect();
-                player_assignments.insert(player.pk_hex.clone(), PlayerRevealAssignment {
-                    hand_card: hand_cards,
-                    community_card: vec![],
-                });
             }
         }
         self.reveal_token_state = RevealTokenState {

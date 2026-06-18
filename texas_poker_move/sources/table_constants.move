@@ -11,6 +11,10 @@ const N_CARDS: u64 = 52;
 
 // ========== Round State 常量 ==========
 const ROUND_WAITING: u8 = 0;
+// M-P3: 值 1 为保留值（ROUND_RESERVED），用于未来可能的中间状态扩展。
+// 当前跳过 1 直接使用 2..6，保持 enum 语义稳定，避免破坏已发布数据。
+#[allow(unused_const)]
+const ROUND_RESERVED: u8 = 1; // Reserved for future use
 const ROUND_PREFLOP: u8 = 2;
 const ROUND_FLOP: u8 = 3;
 const ROUND_TURN: u8 = 4;

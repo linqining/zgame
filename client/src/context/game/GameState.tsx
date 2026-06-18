@@ -2,6 +2,13 @@ import React, { useContext, useEffect, useState, useCallback, useRef, useMemo } 
 import { useNavigate } from 'react-router-dom';
 import { compute_aggregate_key } from '@linqining/client-wasm';
 import {
+  submitJoinAndShuffle,
+  submitFold,
+  submitCheck,
+  submitCall,
+  submitRaise,
+} from '../../sui/suiGameActions';
+import {
   CALL,
   CHECK,
   FOLD,
@@ -684,11 +691,14 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
       const deckEncryptedJson = JSON.stringify(deckEncrypted);
       console.log('SIT_DOWN_V2', tableId, seatId, amount, pkHex, aggPkHex);
-      const joinResult = wrapCryptoOp(() => {
+      const joinResultRaw = wrapCryptoOp(() => {
         const result = keys.join_game_and_shuffle(deckEncryptedJson, aggPkHex);
         if (!result) throw new Error('join_game_and_shuffle returned null');
-        return typeof result === 'string' ? JSON.parse(result) : result;
-      }, 'join_game_and_shuffle') as JoinAndShuffleResult;
+        return result;
+      }, 'join_game_and_shuffle') as string | object;
+      // 保留原始 JSON 字符串用于 Sui 链上提交，解析后用于 socket 事件
+      const joinResultJson = typeof joinResultRaw === 'string' ? joinResultRaw : JSON.stringify(joinResultRaw);
+      const joinResult = typeof joinResultRaw === 'string' ? JSON.parse(joinResultRaw) : joinResultRaw as JoinAndShuffleResult;
 
       const maskAndShuffleRound = {
         mask_cards: joinResult.mask_and_shuffle_round.mask_cards,
@@ -700,6 +710,19 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       console.log('SIT_DOWN_V2', tableId, seatId, amount, pkHex, pkProof, maskAndShuffleRound, keys.get_pk_hex(), localStorage.token);
       socket?.emit(SIT_DOWN_V2, { token, tableId, seatId, amount, pkHex, pkProof, maskAndShuffleRound });
       addMessage('Joined table and shuffled successfully');
+
+      // 如果有对应的 Sui 链上 Table，同时提交赞助交易上链
+      if (table.suiTableId) {
+        submitJoinAndShuffle(table.suiTableId, seatId, amount, joinResultJson)
+          .then((result) => {
+            if (result.success) {
+              console.log('[SitDown] Sui join_and_shuffle submitted:', result.digest);
+            } else {
+              console.error('[SitDown] Sui join_and_shuffle failed:', result.error);
+            }
+          })
+          .catch((err) => console.error('[SitDown] Sui submit error:', err));
+      }
     } catch (e) {
       const err = e as Error;
       console.error('[SitDown] join_and_shuffle failed:', e);
@@ -754,24 +777,60 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     currentTableRef &&
       currentTableRef.current &&
       socket?.emit(FOLD, currentTableRef.current.id);
+    // 提交到 Sui 链上
+    const table = currentTableRef.current;
+    if (table?.suiTableId && seatId !== null) {
+      submitFold(table.suiTableId, seatId)
+        .then((r) => r.success
+          ? console.log('[Sui] fold:', r.digest)
+          : console.error('[Sui] fold failed:', r.error))
+        .catch((e) => console.error('[Sui] fold error:', e));
+    }
   };
 
   const check = () => {
     currentTableRef &&
       currentTableRef.current &&
       socket?.emit(CHECK, currentTableRef.current.id);
+    // 提交到 Sui 链上
+    const table = currentTableRef.current;
+    if (table?.suiTableId && seatId !== null) {
+      submitCheck(table.suiTableId, seatId)
+        .then((r) => r.success
+          ? console.log('[Sui] check:', r.digest)
+          : console.error('[Sui] check failed:', r.error))
+        .catch((e) => console.error('[Sui] check error:', e));
+    }
   };
 
   const call = () => {
     currentTableRef &&
       currentTableRef.current &&
       socket?.emit(CALL, currentTableRef.current.id);
+    // 提交到 Sui 链上
+    const table = currentTableRef.current;
+    if (table?.suiTableId && seatId !== null) {
+      submitCall(table.suiTableId, seatId)
+        .then((r) => r.success
+          ? console.log('[Sui] call:', r.digest)
+          : console.error('[Sui] call failed:', r.error))
+        .catch((e) => console.error('[Sui] call error:', e));
+    }
   };
 
   const raise = (amount: number) => {
     currentTableRef &&
       currentTableRef.current &&
       socket?.emit(RAISE, { tableId: currentTableRef.current.id, amount });
+    // 提交到 Sui 链上
+    const table = currentTableRef.current;
+    if (table?.suiTableId && seatId !== null) {
+      submitRaise(table.suiTableId, seatId, amount)
+        .then((r) => r.success
+          ? console.log('[Sui] raise:', r.digest)
+          : console.error('[Sui] raise failed:', r.error))
+        .catch((e) => console.error('[Sui] raise error:', e));
+    }
   };
 
   const sittingOut = () => {

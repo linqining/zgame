@@ -85,6 +85,8 @@ export interface SidePot {
 
 export interface Table {
   id: string;
+  /** 链上 Sui Table 对象 ID（如果该表有对应的链上对象） */
+  suiTableId?: string;
   seats: Record<number, Seat>;
   roundState: RoundStateType;
   shuffleState: ShuffleState | null;
@@ -140,4 +142,18 @@ export interface GameContextType {
   sittingOut: () => void;
   sittingIn: () => void;
   expelInitiate: (tableId: string, targetPlayerPk: string) => void;
+}
+
+// ===== ZK 密码学事件（用于可视化面板） =====
+export type CryptoEventType = 'shuffle' | 'remask' | 'reveal_token' | 'leave' | 'reconstruct';
+
+export interface CryptoEvent {
+  type: 'crypto_event';
+  event_type: CryptoEventType;
+  player_pk: string;
+  card_index: number | null;
+  tx_digest: string | null;
+  verified: boolean;
+  timestamp: number;
+  message?: string;
 }

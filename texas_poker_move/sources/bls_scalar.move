@@ -13,9 +13,14 @@ const MSM_MAX: u64 = 32;
 
 /// 将任意数据哈希为 BLS12-381 标量
 /// SHA3-256(data) → 32 bytes，清除最高2位确保 < 曲线阶
+///
+/// M-P18: 字节序说明——SHA3-256 输出为大端序字节流。
+/// h[0] 是最高有效字节（MSB），清除 h[0] 的高 2 位（& 0x3F）即可将值限制在 2^254 以下。
+/// 注意：BLS12-381 曲线阶 r ≈ 2^255，清除高 2 位后值 < 2^254 < r，确保标量合法。
+/// 此处不是小端序——若误用小端序应清除 h[31] 而非 h[0]，但 SHA3 输出为大端，故清除 h[0] 正确。
 public fun hash_to_scalar(data: &vector<u8>): group_ops::Element<Scalar> {
     let mut h = hash::sha3_256(*data);
-    // 清除最高2位，确保值 < 2^254 < BLS12-381 曲线阶
+    // 清除最高2位（大端序下 h[0] 的最高 2 位），确保值 < 2^254 < BLS12-381 曲线阶
     let first = *(vector::borrow(&h, 0));
     *(vector::borrow_mut(&mut h, 0)) = first & 0x3F;
     bls12381::scalar_from_bytes(&h)

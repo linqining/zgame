@@ -4,7 +4,9 @@ use crate::crypto::{
 use crate::zk_shuffle::ShuffleProof;
 use crate::zk_shuffle::remask_proof::{RemaskProof, remask_ciphertext};
 use crate::zk_shuffle::leave_proof::{LeaveProof, leave_ciphertext};
-use crate::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+// 兼容 Move 合约：生产代码使用 FiatShamirTranscript（SHA3-256），
+// 而非 FiatShamirTranscript（STROBE），因为 Move 合约使用 SHA3-256 状态机。
+use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 use crate::crypto::curve::CurveScalar;
 use crate::z_poker::key_manager::PKOwnershipProof;
 use rand_core::{OsRng, RngCore, CryptoRng};
@@ -85,7 +87,7 @@ impl MaskAndShuffleRound {
         rng: &mut (impl RngCore + CryptoRng),
     ) -> Self {
         // 创建共享 transcript，绑定 remask_proof 和 shuffle_proof
-        let mut transcript = MerlinTranscript::new(b"poker_protocol_mask_shuffle");
+        let mut transcript = FiatShamirTranscript::new(b"zk_mask_shuffle_proof_v1");
 
         let mut mask_cards: Vec<ElGamalCiphertext> = vec![];
         for i in 0..input_cards.len() {
@@ -124,7 +126,7 @@ impl LeaveGameRound {
             .map(|ct| leave_ciphertext(ct, player_sk, player_pk, &mut rng).unwrap())
             .collect();
 
-        let mut transcript = MerlinTranscript::new(b"poker_protocol_leave");
+        let mut transcript = FiatShamirTranscript::new(b"zk_leave_proof_v1");
         let leave_proof = LeaveProof::<DefaultCurve>::prove(input_cards, &output_cards, player_sk, player_pk, &mut transcript);
 
         Self {

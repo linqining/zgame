@@ -58,17 +58,23 @@ impl<C: Curve> ReconstructionDLEQProof<C> {
             return Err(VerificationError::InvalidDLEQProof);
         }
         let nonce = C::Scalar::random(&mut OsRng);
-        transcript.append_scalar::<C>(b"recon_dleq_nonce", &nonce);
-        for point in points_in {
-            transcript.append_point::<C>(b"recon_dleq_point", point);
+        // 兼容 Move 合约 reconstruct_proof::verify 中 blind_dleq_proof 的 transcript 标签：
+        // Move 使用 reconstruct_blind_nonce / reconstruct_blind_in_{i} / reconstruct_blind_out_{i}
+        // / reconstruct_base_coeff / reconstruct_blind_commitment / reconstruct_blind_challenge。
+        transcript.append_scalar::<C>(b"reconstruct_blind_nonce", &nonce);
+        for (i, point) in points_in.iter().enumerate() {
+            let label = format!("reconstruct_blind_in_{}", i);
+            transcript.append_point::<C>(label.as_bytes(), point);
         }
-        for point in points_out {
-            transcript.append_point::<C>(b"recon_dleq_point", point);
+        for (i, point) in points_out.iter().enumerate() {
+            let label = format!("reconstruct_blind_out_{}", i);
+            transcript.append_point::<C>(label.as_bytes(), point);
         }
-        let base_coefficient = transcript.challenge::<C>(b"recon_dleq_coefficient").scalar;
+        let base_coefficient = transcript.challenge::<C>(b"reconstruct_base_coeff").scalar;
 
+        // 兼容 Move 合约：系数从 base^0 = 1 开始（Move: points_in[0] + points_in[1]*base_coeff）
         let mut sum_point_total = C::Point::identity();
-        let mut coefficient = base_coefficient;
+        let mut coefficient = C::Scalar::one();
         for point in points_in {
             sum_point_total = sum_point_total + *point * coefficient;
             coefficient = coefficient * base_coefficient;
@@ -80,8 +86,8 @@ impl<C: Curve> ReconstructionDLEQProof<C> {
 
         let w = C::Scalar::random(&mut OsRng);
         let commitment = sum_point_total * w;
-        transcript.append_point::<C>(b"recon_dleq_A", &commitment);
-        let c = transcript.challenge::<C>(b"recon_dleq_challenge").scalar;
+        transcript.append_point::<C>(b"reconstruct_blind_commitment", &commitment);
+        let c = transcript.challenge::<C>(b"reconstruct_blind_challenge").scalar;
         let response = w + a * c;
         Ok(Self {
             commitment,
@@ -100,26 +106,30 @@ impl<C: Curve> ReconstructionDLEQProof<C> {
         if self.commitment.is_identity() {
             return Err(VerificationError::InvalidDLEQProof);
         }
-        transcript.append_scalar::<C>(b"recon_dleq_nonce", &self.nonce);
-        for point in points_in {
-            transcript.append_point::<C>(b"recon_dleq_point", point);
+        // 兼容 Move 合约 reconstruct_proof::verify 中 blind_dleq_proof 的 transcript 标签。
+        transcript.append_scalar::<C>(b"reconstruct_blind_nonce", &self.nonce);
+        for (i, point) in points_in.iter().enumerate() {
+            let label = format!("reconstruct_blind_in_{}", i);
+            transcript.append_point::<C>(label.as_bytes(), point);
         }
-        for point in points_out {
-            transcript.append_point::<C>(b"recon_dleq_point", point);
+        for (i, point) in points_out.iter().enumerate() {
+            let label = format!("reconstruct_blind_out_{}", i);
+            transcript.append_point::<C>(label.as_bytes(), point);
         }
-        let base_coefficient = transcript.challenge::<C>(b"recon_dleq_coefficient").scalar;
+        let base_coefficient = transcript.challenge::<C>(b"reconstruct_base_coeff").scalar;
 
+        // 兼容 Move 合约：系数从 base^0 = 1 开始
         let mut sum_point_in_total = C::Point::identity();
         let mut sum_point_out_total = C::Point::identity();
 
-        let mut coefficient = base_coefficient;
+        let mut coefficient = C::Scalar::one();
         for (point_in, point_out) in points_in.iter().zip(points_out) {
             sum_point_in_total = sum_point_in_total + *point_in * coefficient;
             sum_point_out_total = sum_point_out_total + *point_out * coefficient;
             coefficient = coefficient * base_coefficient;
         }
-        transcript.append_point::<C>(b"recon_dleq_A", &self.commitment);
-        let c = transcript.challenge::<C>(b"recon_dleq_challenge").scalar;
+        transcript.append_point::<C>(b"reconstruct_blind_commitment", &self.commitment);
+        let c = transcript.challenge::<C>(b"reconstruct_blind_challenge").scalar;
         let lhs1 = sum_point_in_total * self.response;
         let rhs1 = self.commitment + sum_point_out_total * c;
         if lhs1 == rhs1 {

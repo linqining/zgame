@@ -8,7 +8,9 @@ use axum::{
 };
 use base64::Engine;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::sync::RwLock as TokioRwLock;
 
 use crate::auth;
 use crate::config::Config;
@@ -17,6 +19,7 @@ use crate::pokergame::player::{Player, WalletAddress};
 use crate::pokergame::game_state::SubmitRevealTokenJson;
 use crate::relayer::RelayerState;
 use crate::socket::SocketState;
+use crate::socket::broadcast::CryptoEventType;
 use crate::pokergame::game_state::RevealPhase;
 
 use poker_protocol::z_poker::protocol::ClientPlayer;
@@ -30,7 +33,13 @@ pub struct AppState {
     pub config: Config,
     pub socket_state: Arc<SocketState>,
     pub relayer_state: Arc<RelayerState>,
+    /// C3 修复：已处理的 webhook 事件 ID 集合，用于重放保护。
+    /// 使用 tokio RwLock 因为 webhook handler 是 async 且需要持有锁跨越 await。
+    pub processed_webhook_ids: Arc<TokioRwLock<HashSet<String>>>,
 }
+
+/// processed_webhook_ids 的最大容量，超过后清空重建。
+const MAX_PROCESSED_WEBHOOK_IDS: usize = 10000;
 
 #[derive(Deserialize,Debug)]
 struct LoginRequest {
@@ -61,7 +70,7 @@ fn user_to_response(user: &crate::models::User) -> serde_json::Value {
         user_type: user.user_type,
         created: user.created.clone(),
     };
-    serde_json::to_value(&resp).unwrap()
+    serde_json::to_value(&resp).unwrap_or_else(|_| serde_json::json!({}))
 }
 
 pub async fn get_current_user(
@@ -157,7 +166,7 @@ pub async fn get_table(
     match state.socket_state.get_client_table(table_id).await {
         Some(client_table) => {
             tracing::debug!("[get_table] table found, table_id={}", table_id);
-            (StatusCode::OK, Json(serde_json::to_value(client_table).unwrap())).into_response()
+            (StatusCode::OK, Json(serde_json::to_value(client_table).unwrap_or_else(|_| serde_json::json!({})))).into_response()
         }
         None => {
             tracing::warn!("[get_table] table not found, table_id={}", table_id);
@@ -172,9 +181,11 @@ pub async fn join_game(
     Path(game_id): Path<String>,
     req: Request<Body>,
 ) -> Response {
-    if let Err(resp) = verify_auth(&headers, &state.config.jwt_secret) {
-        return resp;
-    }
+    // A2 修复：join_game 也需要验证认证，并校验 pk_hex 归属
+    let claims = match verify_auth(&headers, &state.config.jwt_secret) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
     tracing::debug!("[join_game] request received, game_id={}", game_id);
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
@@ -201,6 +212,26 @@ pub async fn join_game(
             return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id");
         }
     };
+
+    // A2 修复：加载用户并验证 pk_hex 归属
+    let user = match state.db.find_user_by_id(&claims.user.id).await {
+        Some(u) => u,
+        None => {
+            tracing::warn!("[join_game] user not found, user_id={}", claims.user.id);
+            return err_resp(StatusCode::UNAUTHORIZED, "User not found");
+        }
+    };
+    let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
+    let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
+    if user_pk != req_pk {
+        tracing::warn!(
+            "[join_game] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
+            claims.user.id,
+            user_pk,
+            req_pk
+        );
+        return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
+    }
 
     let pk_hex = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
 
@@ -278,13 +309,27 @@ pub async fn player_action(
     };
 
     // Verify that the authenticated user owns the pk_hex
-    let _user = match state.db.find_user_by_id(&claims.user.id).await {
+    let user = match state.db.find_user_by_id(&claims.user.id).await {
         Some(u) => u,
         None => {
             tracing::warn!("[player_action] user not found, user_id={}", claims.user.id);
             return err_resp(StatusCode::UNAUTHORIZED, "User not found");
         }
     };
+
+    // A2 修复：验证请求中的 pk_hex 属于已认证用户
+    // User.address 存储的是用户绑定的 pk_hex（钱包登录时为 pk_hex，注册时为生成的 pk_hex）
+    let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
+    let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
+    if user_pk != req_pk {
+        tracing::warn!(
+            "[player_action] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
+            claims.user.id,
+            user_pk,
+            req_pk
+        );
+        return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
+    }
 
 
     let sender = match state.socket_state.get_action_sender(table_id).await {
@@ -324,9 +369,10 @@ pub async fn submit_reveal_token(
     Path(game_id): Path<String>,
     req: Request<Body>,
 ) -> Response {
-    if let Err(resp) = verify_auth(&headers, &state.config.jwt_secret) {
-        return resp;
-    }
+    let claims = match verify_auth(&headers, &state.config.jwt_secret) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
     tracing::debug!("[submit_reveal_token] request received, game_id={}", game_id);
     let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
         Ok(b) => b,
@@ -353,6 +399,26 @@ pub async fn submit_reveal_token(
             return err_resp(StatusCode::BAD_REQUEST, "Invalid game_id");
         }
     };
+
+    // A2 修复：验证请求中的 pk_hex 属于已认证用户
+    let user = match state.db.find_user_by_id(&claims.user.id).await {
+        Some(u) => u,
+        None => {
+            tracing::warn!("[submit_reveal_token] user not found, user_id={}", claims.user.id);
+            return err_resp(StatusCode::UNAUTHORIZED, "User not found");
+        }
+    };
+    let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
+    let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
+    if user_pk != req_pk {
+        tracing::warn!(
+            "[submit_reveal_token] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
+            claims.user.id,
+            user_pk,
+            req_pk
+        );
+        return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
+    }
 
     let player_pk = match hex_to_ecpoint(&body.pk_hex) {
         Ok(pt) => pt,
@@ -401,8 +467,28 @@ pub async fn submit_reveal_token(
 
     if let Err(e) = state.socket_state.submit_reveal_tokens_for_pk(table_id, &pk_hex, tokens).await {
         tracing::warn!("[submit_reveal_token] submit failed, table_id={}, pk_hex={}, error={}", table_id, pk_hex, e);
+        // ZK 可视化：reveal_token 证明验证失败
+        state.socket_state.broadcast_crypto_event(
+            table_id,
+            CryptoEventType::RevealToken,
+            body.pk_hex.clone(),
+            None,
+            false,
+            Some(format!("reveal_token proof verification failed: {}", e)),
+        ).await;
         return err_resp(StatusCode::BAD_REQUEST, &e);
     }
+
+    // ZK 可视化：reveal_token 证明验证成功
+    // 注意：reveal_token 为批量提交（一次多个 token），card_index 暂传 null。
+    state.socket_state.broadcast_crypto_event(
+        table_id,
+        CryptoEventType::RevealToken,
+        body.pk_hex.clone(),
+        None,
+        true,
+        Some("reveal_token proof verified".to_string()),
+    ).await;
 
     // todo 发送完成通知
     let all_complete = match state.socket_state.mark_reveal_complete_for_pk(table_id, &pk_hex).await {
@@ -708,26 +794,18 @@ pub async fn free_chips(
             tracing::debug!("[free_chips] token verified, user_id={}", claims.user.id);
             match state.db.find_user_by_id(&claims.user.id).await {
                 Some(user) if user.chips_amount < 1000 => {
-                    // Check cooldown: 1 hour between free chips
-                    if let Some(last_at) = &user.last_free_chips_at {
-                        if let Ok(last_time) = last_at.parse::<chrono::DateTime<chrono::Utc>>() {
-                            let elapsed = chrono::Utc::now() - last_time;
-                            if elapsed.num_seconds() < 3600 {
-                                tracing::warn!("[free_chips] cooldown active, user_id={}, last_at={}", user.id, last_at);
-                                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Please wait before claiming free chips again"}]}))).into_response();
-                            }
-                        }
-                    }
+                    // F12: 使用原子操作避免竞态绕过冷却
+                    // set_chips_with_cooldown 内部在 update filter 中包含冷却时间检查，
+                    // 只有冷却已过才会匹配并更新，避免 check-then-update 竞态
                     tracing::debug!("[free_chips] user eligible, user_id={}, current_chips={}", user.id, user.chips_amount);
-                    state.db.set_chips_with_cooldown(&user.id, state.config.initial_chips_amount).await;
-                    match state.db.find_user_by_id(&user.id).await {
+                    match state.db.set_chips_with_cooldown(&user.id, state.config.initial_chips_amount).await {
                         Some(updated) => {
                             tracing::debug!("[free_chips] chips updated, user_id={}, new_chips={}", updated.id, updated.chips_amount);
                             (StatusCode::OK, Json(user_to_response(&updated))).into_response()
                         }
                         None => {
-                            tracing::error!("[free_chips] failed to reload user after chips update, user_id={}", user.id);
-                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                            tracing::warn!("[free_chips] cooldown active or update failed, user_id={}", user.id);
+                            (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"errors": [{"msg": "Please wait before claiming free chips again"}]}))).into_response()
                         }
                     }
                 }
@@ -774,7 +852,7 @@ pub async fn refresh_sui_table(
     Extension(state): Extension<Arc<AppState>>,
     Path(table_id): Path<String>,
 ) -> Response {
-    match crate::sui_query::fetch_table_summary(&state.config.fullnode_url, &table_id).await {
+    match crate::sui_query::fetch_table_summary(&state.config.fullnode_url, &state.config.sui_package_id, &table_id).await {
         Ok(summary) => {
             state.relayer_state.insert(table_id, summary.clone());
             (StatusCode::OK, Json(summary)).into_response()
@@ -835,15 +913,15 @@ pub async fn build_action_ptb(
     let seat_index = req.seat_index;
 
     let ptb_result: Result<_, String> = match req.action.as_str() {
-        "fold" => Ok(crate::relayer::ptb::build_fold_ptb(package_id, table_id, seat_index)),
-        "check" => Ok(crate::relayer::ptb::build_check_ptb(package_id, table_id, seat_index)),
-        "call" => Ok(crate::relayer::ptb::build_call_ptb(package_id, table_id, seat_index)),
+        "fold" => crate::relayer::ptb::build_fold_ptb(package_id, table_id, seat_index),
+        "check" => crate::relayer::ptb::build_check_ptb(package_id, table_id, seat_index),
+        "call" => crate::relayer::ptb::build_call_ptb(package_id, table_id, seat_index),
         "raise" => {
             let total_bet = match req.total_bet {
                 Some(v) => v,
                 None => return err_resp(StatusCode::BAD_REQUEST, "Missing total_bet for raise action"),
             };
-            Ok(crate::relayer::ptb::build_raise_ptb(package_id, table_id, seat_index, total_bet))
+            crate::relayer::ptb::build_raise_ptb(package_id, table_id, seat_index, total_bet)
         }
         "join_and_shuffle" => {
             let buy_in = match req.buy_in {
@@ -875,7 +953,7 @@ pub async fn build_action_ptb(
                 Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid shuffle_proof_bytes: {}", e)),
                 None => return err_resp(StatusCode::BAD_REQUEST, "Missing shuffle_proof_bytes for join_and_shuffle action"),
             };
-            Ok(crate::relayer::ptb::build_join_and_shuffle_ptb(
+            crate::relayer::ptb::build_join_and_shuffle_ptb(
                 package_id,
                 table_id,
                 seat_index,
@@ -885,7 +963,7 @@ pub async fn build_action_ptb(
                 output_cards,
                 remask_proof_bytes,
                 shuffle_proof_bytes,
-            ))
+            )
         }
         other => {
             return err_resp(StatusCode::BAD_REQUEST, &format!("Unknown action: {}", other));
@@ -909,9 +987,28 @@ pub async fn build_action_ptb(
 
 /// POST /api/sui/tables/:table_id/tick — 手动提交 tick 交易
 pub async fn manual_tick(
+    headers: HeaderMap,
     Extension(state): Extension<Arc<AppState>>,
     Path(table_id): Path<String>,
 ) -> Response {
+    // A5: 添加认证校验
+    if let Err(resp) = verify_auth(&headers, &state.config.jwt_secret) {
+        return resp;
+    }
+
+    // 检查 active_count，空桌或单桌不提交 tick，避免浪费 gas
+    let active_count = state
+        .relayer_state
+        .get(&table_id)
+        .map(|s| s.meta.active_count)
+        .unwrap_or(0);
+    if active_count < 2 {
+        return err_resp(
+            StatusCode::OK,
+            &format!("Skip tick: active_count={} (< 2)", active_count),
+        );
+    }
+
     match crate::relayer::submit::submit_tick_tx(&state.config, &table_id).await {
         Ok(digest) => (StatusCode::OK, Json(serde_json::json!({ "digest": digest }))).into_response(),
         Err(e) => err_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("Tick failed: {}", e)),

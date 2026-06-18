@@ -3,7 +3,6 @@
 //! Change `DefaultCurve` to switch the entire project to a different curve.
 //! All downstream modules reference types through these aliases.
 
-use sha2::{Sha256, Digest};
 use std::hash::{Hash, Hasher};
 
 use crate::crypto::curve::{Curve, CurvePoint, Bls12381Curve, ElGamalCiphertextGeneric};
@@ -70,23 +69,25 @@ pub fn hash_to_scalar(digest: &[u8]) -> Scalar {
     DefaultCurve::hash_to_scalar(digest)
 }
 
+/// 兼容 Move 合约 bls_scalar::derive_scalar_from_card_and_sk：
+/// 输入 c1*sk 和 c2*sk 的压缩字节，直接拼接后 hash_to_scalar。
+/// 无域名分隔符前缀，无 SHA-256 预哈希（Move 端只有一层 SHA3-256）。
 pub fn derive_scalar_from_card_and_sk(user_card: &ElGamalCiphertext, user_sk: &Scalar) -> Scalar {
-    let mut h = Sha256::new();
-    h.update(b"derive_scalar_from_card_and_sk_v1:");
-    h.update((user_card.c1 * user_sk).compress().as_ref());
-    h.update((user_card.c2 * user_sk).compress().as_ref());
-    let digest = h.finalize();
-    hash_to_scalar(&digest)
+    let c1_sk = user_card.c1 * user_sk;
+    let c2_sk = user_card.c2 * user_sk;
+    let mut data = c1_sk.compress().as_ref().to_vec();
+    data.extend_from_slice(c2_sk.compress().as_ref());
+    hash_to_scalar(&data)
 }
 
+/// 兼容 Move 合约 bls_scalar::derive_scalar_from_card_and_pk：
+/// 输入 c1、c2、pk 的压缩字节，直接拼接后 hash_to_scalar。
+/// 无域名分隔符前缀，无 SHA-256 预哈希（Move 端只有一层 SHA3-256）。
 pub fn derive_scalar_from_card_and_pk(user_card: &ElGamalCiphertext, user_pk: &EcPoint) -> Scalar {
-    let mut h = Sha256::new();
-    h.update(b"derive_scalar_from_card_and_pk_v1:");
-    h.update(user_card.c1.compress().as_ref());
-    h.update(user_card.c2.compress().as_ref());
-    h.update(user_pk.compress().as_ref());
-    let digest = h.finalize();
-    hash_to_scalar(&digest)
+    let mut data = user_card.c1.compress().as_ref().to_vec();
+    data.extend_from_slice(user_card.c2.compress().as_ref());
+    data.extend_from_slice(user_pk.compress().as_ref());
+    hash_to_scalar(&data)
 }
 
 lazy_static::lazy_static! {

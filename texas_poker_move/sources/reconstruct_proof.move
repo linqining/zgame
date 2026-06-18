@@ -129,6 +129,8 @@ public fun new(
 
 /// 从字节反序列化 ElGamalCiphertext（96 bytes = 48 c1 + 48 c2）
 public fun ciphertext_from_bytes(data: &vector<u8>): ElGamalCiphertext {
+    // M-P16: 校验输入长度为 96 字节（48 c1 + 48 c2），防止越界访问
+    assert!(data.length() == 96, 0);
     let mut c1_bytes = vector[];
     let mut c2_bytes = vector[];
     let mut i = 0;
@@ -312,6 +314,10 @@ public fun verify(
 
     // 4.6 追加 commitment 到 transcript
     let blind_commitment = bls12381::g1_from_bytes(&proof.blind_dleq_proof.commitment);
+    // M-P17: 校验承诺点非 identity——identity 承诺削弱证明安全性
+    if (bls_scalar::g1_is_identity(&blind_commitment)) {
+        return false
+    };
     bls_transcript::append_point(t, &b"reconstruct_blind_commitment", &blind_commitment);
 
     // 4.7 提取挑战 c
@@ -340,6 +346,10 @@ public fun verify(
     };
     let swap_sum_c1_commit_pt = bls12381::g1_from_bytes(&proof.swap_sum_c1_commit);
     let swap_sum_c2_commit_pt = bls12381::g1_from_bytes(&proof.swap_sum_c2_commit);
+    // M-P17: 校验承诺点非 identity——identity 承诺削弱证明安全性
+    if (bls_scalar::g1_is_identity(&swap_sum_c1_commit_pt) || bls_scalar::g1_is_identity(&swap_sum_c2_commit_pt)) {
+        return false
+    };
     let combined_r = bls12381::g1_add(&swap_sum_c1_commit_pt, &swap_sum_c2_commit_pt);
 
     if (!schnorr_proof::verify(

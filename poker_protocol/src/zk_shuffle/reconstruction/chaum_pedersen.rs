@@ -39,11 +39,13 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
             return Err(VerificationError::IdentityBasePoint);
         }
 
+        // 兼容 Move 合约 chaum_pedersen::prove/verify 的 transcript 标签：
+        // Move 使用 cp_G1/cp_G2/cp_P1/cp_P2，Rust 须保持一致。
         // Append public values to transcript
-        transcript.append_point::<C>(b"chaum_g1", &G1);
-        transcript.append_point::<C>(b"chaum_g2", &G2);
-        transcript.append_point::<C>(b"chaum_p1", &P1);
-        transcript.append_point::<C>(b"chaum_p2", &P2);
+        transcript.append_point::<C>(b"cp_G1", &G1);
+        transcript.append_point::<C>(b"cp_G2", &G2);
+        transcript.append_point::<C>(b"cp_P1", &P1);
+        transcript.append_point::<C>(b"cp_P2", &P2);
 
         // Generate random nonce w
         let w = C::Scalar::random(&mut OsRng);
@@ -53,11 +55,11 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
         let commitment_b = G2 * w;
 
         // Append commitments to transcript
-        transcript.append_point::<C>(b"chaum_commitment_a", &commitment_a);
-        transcript.append_point::<C>(b"chaum_commitment_b", &commitment_b);
+        transcript.append_point::<C>(b"cp_commitment_a", &commitment_a);
+        transcript.append_point::<C>(b"cp_commitment_b", &commitment_b);
 
         // Get challenge scalar from transcript
-        let c = transcript.challenge::<C>(b"chaum_challenge").scalar;
+        let c = transcript.challenge::<C>(b"cp_challenge").scalar;
 
         // Compute response: s = w + c*x
         let response = w + s * c;
@@ -91,18 +93,20 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
             return Err(VerificationError::IdentityBasePoint);
         }
 
+        // 兼容 Move 合约 chaum_pedersen::verify 的 transcript 标签：
+        // Move 使用 cp_G1/cp_G2/cp_P1/cp_P2，Rust 须保持一致。
         // Append public values to transcript
-        transcript.append_point::<C>(b"chaum_g1", &G1);
-        transcript.append_point::<C>(b"chaum_g2", &G2);
-        transcript.append_point::<C>(b"chaum_p1", &P1);
-        transcript.append_point::<C>(b"chaum_p2", &P2);
+        transcript.append_point::<C>(b"cp_G1", &G1);
+        transcript.append_point::<C>(b"cp_G2", &G2);
+        transcript.append_point::<C>(b"cp_P1", &P1);
+        transcript.append_point::<C>(b"cp_P2", &P2);
 
         // Append commitments to transcript
-        transcript.append_point::<C>(b"chaum_commitment_a", &self.commitment_a);
-        transcript.append_point::<C>(b"chaum_commitment_b", &self.commitment_b);
+        transcript.append_point::<C>(b"cp_commitment_a", &self.commitment_a);
+        transcript.append_point::<C>(b"cp_commitment_b", &self.commitment_b);
 
         // Get challenge scalar from transcript
-        let c = transcript.challenge::<C>(b"chaum_challenge").scalar;
+        let c = transcript.challenge::<C>(b"cp_challenge").scalar;
 
         // Verify: s*G1 = A + c*P1
         let lhs1 = G1 * self.response;

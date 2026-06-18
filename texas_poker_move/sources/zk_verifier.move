@@ -3,7 +3,6 @@ module texas_poker::zk_verifier;
 use sui::bls12381;
 use sui::bls12381::G1;
 use sui::group_ops;
-use std::hash;
 use texas_poker::bls_scalar;
 use texas_poker::bls_transcript::{Self, Transcript};
 use texas_poker::bls_elgamal::{Self, ElGamalCiphertext};
@@ -252,8 +251,13 @@ public fun deserialize_pk(pk_bytes: &vector<u8>): group_ops::Element<G1> {
 
 /// 验证 PK 所有权证明 (Schnorr proof of knowledge of sk where pk = G * sk)
 /// proof_bytes 格式: commitment (48 bytes G1) + response (32 bytes scalar)
-/// 使用 SHA2-256 哈希，与 Rust 端 key_manager.rs 保持一致
+/// 使用 hash_to_scalar 进行挑战派生，清除高位确保 < 曲线阶
 public fun verify_pk_ownership(pk: &group_ops::Element<G1>, proof_bytes: &vector<u8>): bool {
+    // M-D11 修复：拒绝恒等元公钥
+    if (bls_scalar::g1_is_identity(pk)) {
+        return false
+    };
+
     // 检查长度: 48 (commitment) + 32 (response) = 80
     if (proof_bytes.length() != 80) {
         return false
@@ -286,7 +290,8 @@ public fun verify_pk_ownership(pk: &group_ops::Element<G1>, proof_bytes: &vector
         return false
     };
 
-    // 计算 challenge = SHA256(G_bytes || pk_bytes || commitment_bytes)
+    // M-D12 修复：使用 hash_to_scalar 替代原始 SHA2-256，清除高位确保 < 曲线阶
+    // challenge = hash_to_scalar(G_bytes || pk_bytes || commitment_bytes)
     let mut hash_input = vector[];
     let mut j = 0;
     while (j < g_bytes.length()) {
@@ -303,8 +308,7 @@ public fun verify_pk_ownership(pk: &group_ops::Element<G1>, proof_bytes: &vector
         hash_input.push_back(commitment_bytes[j]);
         j = j + 1;
     };
-    let challenge_bytes = hash::sha2_256(hash_input);
-    let challenge = bls12381::scalar_from_bytes(&challenge_bytes);
+    let challenge = bls_scalar::hash_to_scalar(&hash_input);
 
     // 验证: G * response == commitment + pk * challenge
     let lhs = bls12381::g1_mul(&response, &g);

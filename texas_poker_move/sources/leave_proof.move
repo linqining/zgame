@@ -64,6 +64,11 @@ public fun verify(
 ): bool {
     let n = proof.per_card_commitments.length();
 
+    // M-P15: 空输入校验——n == 0 时无任何牌需要 leave，proof 无意义，拒绝验证。
+    if (n == 0) {
+        return false
+    };
+
     // 1. 检查长度一致
     if (n != input_cts.length()) {
         return false
@@ -92,6 +97,11 @@ public fun verify(
     let comm_pk = bls12381::g1_from_bytes(&proof.commitment_pk);
     let s = bls12381::scalar_from_bytes(&proof.response);
     let nonce_scalar = bls12381::scalar_from_bytes(&proof.nonce);
+
+    // M-P17: 校验承诺点非 identity——identity 承诺削弱证明安全性
+    if (bls_scalar::g1_is_identity(&comm_pk)) {
+        return false
+    };
 
     // 5. 构建 challenge：追加到 transcript
     bls_transcript::append_point(t, &b"leave_pk", player_pk);

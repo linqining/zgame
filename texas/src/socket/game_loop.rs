@@ -45,17 +45,17 @@ pub(crate) async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, t
             let mut gs = state.state.write().await;
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 if table.execute_reconstruct_if_completed() {
-                    Some(true)
-                } else if let Some(_timed_out) = table.check_reconstruct_timeout() {
-                    Some(false)
+                    Some((true, Vec::new()))
+                } else if let Some(timed_out_pks) = table.check_reconstruct_timeout() {
+                    Some((false, timed_out_pks))
                 } else {
                     None
                 }
             } else { None }
         };
-        if let Some(completed) = reconstruct_result {
+        if let Some((completed, timed_out_pks)) = reconstruct_result {
             if completed {
-                broadcast::broadcast_to_table(io, state, table_id, Some("Player expelled by vote")).await;
+                broadcast::broadcast_to_table(io, state, table_id, Some("Reconstruct completed")).await;
 
                 // Start shuffle phase after reconstruct completes
                 {
@@ -74,7 +74,25 @@ pub(crate) async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, t
 
                 state.send_shuffle_notice(table_id).await;
             } else {
-                broadcast::broadcast_to_table(io, state, table_id, Some("Expel vote timed out")).await;
+                // Reconstruct timeout: players in timed_out_pks have already been removed by check_reconstruct_timeout
+                let msg = if timed_out_pks.is_empty() {
+                    "Reconstruct timed out".to_string()
+                } else {
+                    format!("Reconstruct timed out, {} player(s) removed", timed_out_pks.len())
+                };
+                broadcast::broadcast_to_table(io, state, table_id, Some(&msg)).await;
+
+                // Check if we should reset the hand (not enough players)
+                let should_reset = {
+                    let gs = state.state.read().await;
+                    gs.tables.get(&table_id).map(|t| t.active_players().len() < MIN_START_NUM as usize).unwrap_or(true)
+                };
+                if should_reset {
+                    let mut gs = state.state.write().await;
+                    if let Some(table) = gs.tables.get_mut(&table_id) {
+                        table.transition_to(RoundState::Waiting);
+                    }
+                }
             }
             return Some(true);
         }
@@ -602,7 +620,7 @@ pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>,
             } else if table.is_betting_round_complete() {
                 table.advance_to_next_phase();
                 if table.round_state != RoundState::ShowdownReveal {
-                    table.turn = Some(table.next_unfolded_player(table.button.unwrap_or(1), 1));
+                    table.turn = table.next_unfolded_player(table.button.unwrap_or(1), 1);
                     table.betting_timeout_start = Some(std::time::Instant::now());
                     for i in 1..=table.max_players {
                         if let Some(seat) = table.seats.get_mut(&i) {
@@ -612,7 +630,7 @@ pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>,
                 }
             } else {
                 let last_turn = table.turn.unwrap_or(1);
-                table.turn = Some(table.next_unfolded_player(last_turn, 1));
+                table.turn = table.next_unfolded_player(last_turn, 1);
                 table.betting_timeout_start = Some(std::time::Instant::now());
                 for i in 1..=table.max_players {
                     if let Some(seat) = table.seats.get_mut(&i) {
@@ -632,17 +650,40 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
     let result = {
         let mut gs = state.state.write().await;
         if let Some(table) = gs.tables.get_mut(&table_id) {
-            for seat in table.seats.values_mut() {
-                if seat.player.as_ref().map_or(false, |p| p.pk_hex == req.pk_hex) {
+            // F8 fix: validate that it's the requesting player's turn and
+            // the game is in a betting phase before processing any action.
+            let is_betting_phase = matches!(table.round_state,
+                RoundState::PreFlop | RoundState::Flop | RoundState::Turn | RoundState::River);
+            let is_valid_turn = is_betting_phase && table.turn.map_or(false, |turn_id| {
+                table.seats.get(&turn_id).map_or(false, |seat| {
+                    seat.player.as_ref().map_or(false, |p| p.pk_hex == req.pk_hex)
+                        && !seat.folded
+                        && !seat.sitting_out
+                        && seat.stack > 0
+                })
+            });
+
+            if !is_valid_turn {
+                tracing::warn!(
+                    "[process_action] Rejected action {} from pk={}: not their turn or not betting phase (turn={:?}, state={:?})",
+                    req.action, req.pk_hex, table.turn, table.round_state
+                );
+                None
+            } else {
+                // F9 fix: only clear sitting_out after turn validation passes.
+                // (A valid turn implies the player is not sitting_out, but we
+                // keep this for safety in case of race conditions.)
+                if let Some(seat) = table.find_player_by_pk_mut(&req.pk_hex) {
                     seat.sitting_out = false;
                 }
-            }
-            match req.action.as_str() {
-                "fold" => table.handle_fold(&req.pk_hex),
-                "check" => table.handle_check(&req.pk_hex),
-                "call" => table.handle_call(&req.pk_hex),
-                "raise" => table.handle_raise(&req.pk_hex, req.amount.unwrap_or(0)),
-                _ => None,
+                match req.action.as_str() {
+                    "fold" => table.handle_fold(&req.pk_hex),
+                    "check" => table.handle_check(&req.pk_hex),
+                    "call" => table.handle_call(&req.pk_hex),
+                    "raise" => table.handle_raise(&req.pk_hex, req.amount.unwrap_or(0)),
+                    "allin" => table.handle_allin(&req.pk_hex), // D2 fix
+                    _ => None,
+                }
             }
         } else { None }
     };

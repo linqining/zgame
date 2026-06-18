@@ -5,7 +5,9 @@ use crate::crypto::{
 use crate::z_poker::convert::{hex_to_ecpoint};
 use crate::zk_shuffle::error::VerificationError;
 use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
-use crate::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+// 兼容 Move 合约：生产代码使用 FiatShamirTranscript（SHA3-256），
+// 而非 FiatShamirTranscript（STROBE），因为 Move 合约使用 SHA3-256 状态机。
+use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 use crate::crypto::curve::{Curve, CurveScalar, CurvePoint};
 use crate::z_poker::card::{PlayingCard, standard_deck};
 use crate::z_poker::key_manager::KeyManager;
@@ -23,7 +25,7 @@ use std::collections::HashMap;
 ///
 /// Uses BLS12-381 hash_to_g1 with label "texas_poker/card/{i}",
 /// matching the Move contract's `generate_plaintext_cards()`.
-pub(crate) fn new_plain_text() -> Vec<Plaintext> {
+pub fn new_plain_text() -> Vec<Plaintext> {
     (0..N_CARDS)
         .map(|i| {
             let label = format!("texas_poker/card/{}", i);
@@ -156,7 +158,7 @@ impl MentalPokerGame {
             return Err(VerificationError::PlayerNotFound);
         }
 
-        let mut transcript = MerlinTranscript::new(b"poker_protocol_player_shuffle");
+        let mut transcript = FiatShamirTranscript::new(b"zk_shuffle_proof_v1");
         if !round.verify(&self.key_manager.get_aggregated_pk(), &mut transcript) {
             return Err(VerificationError::ProofVerificationFailed);
         }
@@ -330,7 +332,7 @@ impl MentalPokerGame {
             &token.encrypted_card,
             &token.reveal_token,
             &token.user_public_key,
-            &mut MerlinTranscript::new(b"reveal_token_proof_v3"),
+            &mut FiatShamirTranscript::new(b"reveal_token_proof_v3"),
         ).map(|_| true).map_err(|_| VerificationError::ProofVerificationFailed)
     }
 
@@ -369,7 +371,7 @@ impl MentalPokerGame {
             &token.encrypted_card,
             &token.reveal_token,
             &token.user_public_key,
-            &mut MerlinTranscript::new(b"reveal_token_proof_v3"),
+            &mut FiatShamirTranscript::new(b"reveal_token_proof_v3"),
         ).map(|_| true).map_err(|_| VerificationError::ProofVerificationFailed)
     }
 
@@ -518,11 +520,11 @@ impl MentalPokerGame {
 
         let agg_pk = self.key_manager.get_aggregated_pk();
         let mut rng = OsRng;
-        let mut transcript = MerlinTranscript::new(b"poker_protocol_force_shuffle");
+        let mut transcript = FiatShamirTranscript::new(b"poker_protocol_force_shuffle");
 
         let round = ShuffleRound::execute(&self.deck_encrypted, &agg_pk, &mut transcript, &mut rng);
 
-        let mut transcript = MerlinTranscript::new(b"poker_protocol_force_shuffle");
+        let mut transcript = FiatShamirTranscript::new(b"poker_protocol_force_shuffle");
         if !round.verify(&agg_pk, &mut transcript) {
             return Err(VerificationError::ProofVerificationFailed);
         }
@@ -547,7 +549,7 @@ impl MentalPokerGame {
 
         let player_card = hand[card_index].clone();
         let reveal_token = player_card.encrypted_card.gen_reveal_token(&sk);
-        let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
+        let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
         let proof = RevealTokenProof::<DefaultCurve>::prove(&sk, &player.pk, &player_card.encrypted_card, &reveal_token, &mut OsRng, &mut transcript);
 
         Ok(RevealToken {
@@ -568,7 +570,7 @@ impl MentalPokerGame {
 
         let ct_for_self = ElGamalCiphertext::encrypt(&comm_plaintext, &player.pk, &Scalar::random(&mut OsRng));
         let reveal_token = ct_for_self.gen_reveal_token(&sk);
-        let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
+        let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
         let proof = RevealTokenProof::<DefaultCurve>::prove(&sk, &player.pk, &ct_for_self, &reveal_token, &mut OsRng, &mut transcript);
 
         Ok(RevealToken {
@@ -788,7 +790,7 @@ impl MentalPokerGame {
                     let sk = &self.entrusted_sk[pk];
                     let pk_val = &self.players[pk].pk;
                     let reveal_token = card_ct.gen_reveal_token(sk);
-                    let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
+                    let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
                     let proof = RevealTokenProof::<DefaultCurve>::prove(sk, pk_val, card_ct, &reveal_token, &mut OsRng, &mut transcript);
                     Some(RevealToken {
                         user_public_key: *pk_val,

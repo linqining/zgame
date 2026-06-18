@@ -37,14 +37,29 @@ public fun append_scalar(t: &mut Transcript, label: &vector<u8>, scalar: &group_
 }
 
 /// 追加任意消息
+///
+/// M-P13: 为防止长度扩展攻击和歧义编码，在 label 和 message 前分别添加
+/// 4 字节小端长度前缀。这样不同 (label, message) 对的拼接结果唯一。
 public fun append_message(t: &mut Transcript, label: &vector<u8>, message: &vector<u8>) {
     let mut data = *(&t.state);
+    // 追加 label 长度前缀（4 字节小端）
+    let label_len = label.length();
+    data.push_back(((label_len) & 0xFF) as u8);
+    data.push_back(((label_len >> 8) & 0xFF) as u8);
+    data.push_back(((label_len >> 16) & 0xFF) as u8);
+    data.push_back(((label_len >> 24) & 0xFF) as u8);
     // 追加 label
     let mut i = 0;
     while (i < label.length()) {
         data.push_back(*(vector::borrow(label, i)));
         i = i + 1;
     };
+    // 追加 message 长度前缀（4 字节小端）
+    let msg_len = message.length();
+    data.push_back(((msg_len) & 0xFF) as u8);
+    data.push_back(((msg_len >> 8) & 0xFF) as u8);
+    data.push_back(((msg_len >> 16) & 0xFF) as u8);
+    data.push_back(((msg_len >> 24) & 0xFF) as u8);
     // 追加 message
     i = 0;
     while (i < message.length()) {
