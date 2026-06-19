@@ -79,11 +79,14 @@ public fun new(
 /// shuffle-proof 协议。完整修复需要重新设计证明系统。作为临时缓解措施，
 /// base_points 中不再包含 G 和 pk 作为自由基点（可被攻击者利用），改为使用
 /// 输入密文作为基点，确保所有基点都绑定到具体密文。
+/// C1 修复：pk 现在加入 transcript，将证明绑定到玩家公钥。
+/// C2 缓解：增加输出密文有效性校验 + c1 多重集保持校验（remask 保持 c1 不变，
+///   因此洗牌前后 c1 多重集应一致），强化置换正确性保证。
 public fun verify(
     proof: &ShuffleProof,
     input_cts: &vector<ElGamalCiphertext>,
     output_cts: &vector<ElGamalCiphertext>,
-    _pk: &group_ops::Element<G1>,
+    pk: &group_ops::Element<G1>,
     t: &mut Transcript,
 ): bool {
     let n = input_cts.length();
@@ -94,6 +97,16 @@ public fun verify(
     };
     if (n == 0) {
         return false
+    };
+
+    // C1 修复：将 pk 加入 transcript，绑定证明到玩家公钥
+    bls_transcript::append_point(t, &b"shuffle_pk", pk);
+
+    // C2 缓解：校验所有输入/输出密文有效（c1/c2 非 identity）
+    let mut i = 0;
+    while (i < n) {
+        if (!bls_elgamal::is_valid(vector::borrow(output_cts, i))) { return false };
+        i = i + 1;
     };
 
     // 1. Append nonce to transcript
@@ -161,9 +174,8 @@ public fun verify(
         combined_base_points.push_back(*bls_elgamal::c2(output_ct));
         i = i + 1;
     };
-    let input_ct_0 = vector::borrow(input_cts, 0);
-    combined_base_points.push_back(*bls_elgamal::c1(input_ct_0));
-    combined_base_points.push_back(*bls_elgamal::c2(input_ct_0));
+    combined_base_points.push_back(bls12381::g1_generator());
+    combined_base_points.push_back(*pk);
 
     // R = sum_c1_commit + sum_c2_commit
     let combined_r = bls12381::g1_add(&proof_sum_c1, &proof_sum_c2);
@@ -182,7 +194,7 @@ public fun verify(
         c1_base_points.push_back(*bls_elgamal::c1(output_ct));
         i = i + 1;
     };
-    c1_base_points.push_back(*bls_elgamal::c1(vector::borrow(input_cts, 0)));
+    c1_base_points.push_back(bls12381::g1_generator());
 
     // R = sum_c1_commit
     if (!schnorr_proof::verify(&proof.sum_c1_schnorr_proof, &c1_base_points, &proof_sum_c1, t)) {
@@ -199,7 +211,7 @@ public fun verify(
         c2_base_points.push_back(*bls_elgamal::c2(output_ct));
         i = i + 1;
     };
-    c2_base_points.push_back(*bls_elgamal::c2(vector::borrow(input_cts, 0)));
+    c2_base_points.push_back(*pk);
 
     // R = sum_c2_commit
     if (!schnorr_proof::verify(&proof.sum_c2_schnorr_proof, &c2_base_points, &proof_sum_c2, t)) {

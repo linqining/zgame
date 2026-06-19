@@ -1,4 +1,5 @@
 import styled from 'styled-components';
+import { responsiveScale } from './responsiveScale';
 
 interface PositionedUISlotProps {
   width?: string;
@@ -25,31 +26,5 @@ export const PositionedUISlot = styled.div.withConfig({
   -webkit-backface-visibility: hidden;
   backface-visibility: hidden;
 
-  @media screen and (max-width: 1068px) {
-    transform: ${({ scale }) => `scale(${+(scale ?? '1') + 0.3})`};
-  }
-
-  @media screen and (max-width: 968px) {
-    transform: ${({ scale }) => `scale(${+(scale ?? '1') + 0.25})`};
-  }
-
-  @media screen and (max-width: 868px) {
-    transform: ${({ scale }) => `scale(${+(scale ?? '1') + 0.2})`};
-  }
-
-  @media screen and (max-width: 812px) {
-    transform: ${({ scale }) => `scale(${+(scale ?? '1') + 0.15})`};
-  }
-
-  @media screen and (max-width: 668px) {
-    transform: ${({ scale }) => `scale(${+(scale ?? '1') + 0.1})`};
-  }
-
-  @media screen and (max-width: 648px) {
-    transform: ${({ scale }) => `scale(${+(scale ?? '1') + 0.05})`};
-  }
-
-  @media screen and (max-width: 568px) {
-    transform: ${({ scale }) => `scale(${scale ?? '1'})`};
-  }
+  ${responsiveScale<PositionedUISlotProps>((props) => props.scale)}
 `;

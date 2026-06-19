@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use super::*;
+pub(crate) use crate::pokergame::table::events::CryptoEventType;
 
 pub(crate) async fn broadcast_to_table(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, message: Option<&str>) {
     let table_views = {
         let gs = state.state.read().await;
         let Some(table) = gs.tables.get(&table_id) else { return };
         let base_client_table = table.to_client();
-        table.players.iter()
+        table.players().iter()
             .filter_map(|(_game_pk, wallet_addr)| {
                 gs.players.values()
                     .find(|p| p.wallet_address.0 == wallet_addr.0)
@@ -39,6 +40,14 @@ pub(crate) async fn join_table_push(io: &SocketIo, state: &Arc<SocketState>, tab
     // G18 修复：原实现使用 io.emit 广播给所有 socket，但 table_view 是为该 wallet
     // 定制的（hide_opponent_cards 隐藏对手手牌），广播会导致其他玩家看到错误的 view。
     // 改为只 emit 给加入的 socket。
+    tracing::info!("[join_table_push] enter, table_id={}, wallet={}", table_id, wallet.0);
+
+    // 从链上同步玩家/座位状态，确保内存 table 包含最新的链上玩家数据。
+    // on-chain 模式下 SIT_DOWN_V2 不直接更新内存，玩家数据由 relayer 异步同步。
+    // 如果 relayer 尚未处理 PlayerJoined 事件，内存中会缺少新玩家，
+    // 导致 join_table_push 发送的 table view 不包含新玩家，刷新也看不到。
+    crate::relayer::sync_single_table_seats_from_chain(state, table_id).await;
+
     let (socket_id_opt, table_view) = {
         let gs = state.state.read().await;
         let Some(table) = gs.tables.get(&table_id) else { return };
@@ -86,14 +95,14 @@ impl SocketState {
                 None => return,
             };
             let player_cards = table.mental_poker_game.get_player_readable_tokens();
-            let socket_id_map: std::collections::HashMap<String, String> = table.players.iter()
+            let socket_id_map: std::collections::HashMap<String, String> = table.players().iter()
             .filter_map(|(game_pk, wallet_addr)| {
                 gs.players.values()
                     .find(|p| p.wallet_address.0 == wallet_addr.0)
                     .map(|player| (game_pk.0.clone(), player.socket_id.clone()))
             })
             .collect();
-            let deck_plaintext = table.mental_poker_game.deck_plaintext
+            let deck_plaintext = table.deck_plaintext()
                 .iter()
                 .map(|p| ecpoint_to_hex(p))
                 .collect::<Vec<String>>();
@@ -163,7 +172,7 @@ impl SocketState {
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 let (player_revealed_map, _) = table.mental_poker_game.list_revealed_cards();
 
-                for seat in table.seats.values_mut() {
+                for seat in table.local_seats.values_mut() {
                     if let Some(player) = &seat.player {
                         if let Some(revealed_cards) = player_revealed_map.get(&player.pk_hex.0) {
                             if revealed_cards.len() >= 2 {
@@ -210,31 +219,6 @@ impl SocketState {
 // ZK 密码学事件广播（crypto_event）
 // ---------------------------------------------------------------------------
 
-/// ZK 密码学事件类型，对应前端 ZK 可视化面板的事件分类。
-///
-/// 这些事件在玩家提交 ZK 证明并验证后广播给该桌所有 WS 客户端，
-/// 供前端"ZK 密码学可视化面板"实时展示证明提交与验证状态。
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum CryptoEventType {
-    Shuffle,
-    Remask,
-    RevealToken,
-    Leave,
-    Reconstruct,
-}
-
-impl CryptoEventType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Shuffle => "shuffle",
-            Self::Remask => "remask",
-            Self::RevealToken => "reveal_token",
-            Self::Leave => "leave",
-            Self::Reconstruct => "reconstruct",
-        }
-    }
-}
-
 /// ZK 密码学事件载荷，对应前端约定的 `crypto_event` WS 消息格式。
 ///
 /// 顶层 `type` 字段固定为 `"crypto_event"`，便于前端区分此事件与现有 GameState 广播。
@@ -263,8 +247,7 @@ impl SocketState {
     /// 广播一条 `crypto_event` 消息给该桌所有 WS 客户端。
     ///
     /// 这是"观察者"事件：广播失败只记日志，不传播错误，绝不阻塞游戏主流程。
-    /// 当前所有 ZK 证明验证均在链下完成，`tx_digest` 暂传 null，
-    /// 前端可据此显示 "pending onchain"。
+    /// `tx_digest` 为链上交易 digest（链下验证场景传 None，前端显示 "pending onchain"）。
     pub async fn broadcast_crypto_event(
         &self,
         table_id: u32,
@@ -273,6 +256,7 @@ impl SocketState {
         card_index: Option<u32>,
         verified: bool,
         message: Option<String>,
+        tx_digest: Option<String>,
     ) {
         let io = match get_socket_io() {
             Some(io) => io,
@@ -287,12 +271,11 @@ impl SocketState {
         };
 
         let payload = CryptoEventPayload {
-            msg_type: "crypto_event",
+            msg_type: actions::CRYPTO_EVENT,
             event_type: event_type.as_str(),
             player_pk,
             card_index,
-            // 当前 ZK 证明验证在链下完成，暂无 tx_digest；前端显示 "pending onchain"
-            tx_digest: None,
+            tx_digest,
             verified,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -305,7 +288,7 @@ impl SocketState {
         // crypto_event 载荷对所有客户端一致，无需 per-player 定制。
         if let Err(e) = io
             .to(table_room_name(table_id))
-            .emit("crypto_event", &payload)
+            .emit(actions::CRYPTO_EVENT, &payload)
             .await
         {
             tracing::warn!(
@@ -315,5 +298,57 @@ impl SocketState {
                 e
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 玩家变更事件广播（player_update）
+// ---------------------------------------------------------------------------
+
+/// 玩家变更事件载荷，对应前端约定的 `player_update` WS 消息格式。
+///
+/// 顶层 `type` 字段固定为 `"player_update"`，用于同步链上玩家加入/离开/踢出/退款事件。
+#[derive(Debug, Clone, Serialize)]
+pub struct PlayerUpdatePayload {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub action: String,
+    pub table_id: u64,
+    pub seat_index: u64,
+    pub pk_hex: String,
+    pub wallet: String,
+    pub buy_in: u64,
+    pub reason: u64,
+    pub message: String,
+}
+
+/// 广播一条 `player_update` 消息给该桌所有 WS 客户端。
+///
+/// 这是"观察者"事件：广播失败只记日志，不传播错误，绝不阻塞游戏主流程。
+pub async fn broadcast_player_update(
+    io: &SocketIo,
+    table_id: u64,
+    action: &str,
+    seat_index: u64,
+    pk_hex: String,
+    wallet: String,
+    buy_in: u64,
+    reason: u64,
+    message: String,
+) {
+    let payload = PlayerUpdatePayload {
+        event_type: actions::PLAYER_UPDATE.to_string(),
+        action: action.to_string(),
+        table_id,
+        seat_index,
+        pk_hex,
+        wallet,
+        buy_in,
+        reason,
+        message,
+    };
+    match io.to(table_room_name(table_id as u32)).emit(actions::PLAYER_UPDATE, &payload).await {
+        Ok(_) => {}
+        Err(e) => tracing::warn!("broadcast_player_update emit failed: {}", e),
     }
 }

@@ -10,24 +10,7 @@ import {
   decodeJwt,
 } from '@mysten/sui/zklogin';
 import { Transaction } from '@mysten/sui/transactions';
-
-// Base64 helpers (replacing removed fromB64/toB64 from @mysten/sui/utils)
-function fromB64(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function toB64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
+import { toB64, fromB64 } from './utils';
 
 // zkLogin session state
 export interface ZkLoginSession {
@@ -76,11 +59,6 @@ interface SerializedSession {
 }
 
 const SESSION_STORAGE_KEY = 'zklogin_session';
-const PROVER_URLS: Record<string, string> = {
-  devnet: 'https://prover-dev.mystenlabs.com/v1',
-  testnet: 'https://prover-dev.mystenlabs.com/v1',
-  mainnet: 'https://prover.mainnet.mystenlabs.com/v1',
-};
 
 // OAuth provider configurations
 export interface OAuthProviderConfig {
@@ -122,11 +100,13 @@ export class ZkLoginSessionManager {
   private client: SuiGrpcClient;
   private network: string;
   private saltServiceUrl: string;
+  private proverServiceUrl: string;
 
-  constructor(client: SuiGrpcClient, network: string = 'testnet', saltServiceUrl?: string) {
+  constructor(client: SuiGrpcClient, network: string = 'testnet', saltServiceUrl?: string, proverServiceUrl?: string) {
     this.client = client;
     this.network = network;
     this.saltServiceUrl = saltServiceUrl || '/api/auth/zklogin/salt';
+    this.proverServiceUrl = proverServiceUrl || '/api/auth/zklogin/prover';
     this.loadSession();
   }
 
@@ -217,6 +197,32 @@ export class ZkLoginSessionManager {
     // Derive address
     const address = jwtToAddress(jwt, userSalt, false);
 
+    // Detect address changes across logins. The zkLogin address MUST be
+    // stable for the same OAuth user (same iss/sub/aud/salt). If it changes,
+    // deposited coins on the previous address become inaccessible. Log a
+    // warning so the issue is visible in the browser console.
+    const previousAddress = localStorage.getItem('zklogin_last_address');
+    const previousSub = localStorage.getItem('zklogin_last_sub');
+    if (previousAddress && previousSub) {
+      if (previousAddress !== address) {
+        console.warn(
+          '[zkLogin] Address changed across logins!',
+          '\n  previous address:', previousAddress,
+          '\n  previous sub:', previousSub,
+          '\n  current  address:', address,
+          '\n  current  sub:', decodedJwt.sub,
+          '\n  iss:', decodedJwt.iss,
+          '\n  aud:', decodedJwt.aud,
+          '\n  salt prefix:', userSalt.slice(0, 8),
+          '\nCoins deposited to the previous address will be inaccessible.',
+        );
+      } else {
+        console.log('[zkLogin] Address stable across logins:', address);
+      }
+    }
+    localStorage.setItem('zklogin_last_address', address);
+    localStorage.setItem('zklogin_last_sub', decodedJwt.sub);
+
     this.session = {
       ephemeralKeyPair,
       maxEpoch,
@@ -286,6 +292,43 @@ export class ZkLoginSessionManager {
     };
   }
 
+  // Sign a personal message with zkLogin (for backend authentication)
+  async signPersonalMessage(message: Uint8Array): Promise<string> {
+    if (!this.session) {
+      throw new Error('No active zkLogin session. Please login first.');
+    }
+
+    // Check if session is still valid
+    const { systemState } = await this.client.core.getCurrentSystemState();
+    const currentEpoch = Number(systemState.epoch);
+    if (currentEpoch > this.session.maxEpoch) {
+      this.clearSession();
+      throw new Error('zkLogin session expired. Please login again.');
+    }
+
+    // Sign the message with the ephemeral key
+    const { signature: userSignature } = await this.session.ephemeralKeyPair.signPersonalMessage(message);
+
+    // Compose zkLogin signature (same as signTransaction but for personal messages)
+    const addressSeed = genAddressSeed(
+      this.session.userSalt,
+      'sub',
+      this.session.decodedJwt.sub,
+      this.session.decodedJwt.aud,
+    );
+
+    const zkLoginSignature = getZkLoginSignature({
+      inputs: {
+        ...this.session.zkProof,
+        addressSeed: addressSeed.toString(),
+      },
+      maxEpoch: this.session.maxEpoch,
+      userSignature,
+    });
+
+    return zkLoginSignature;
+  }
+
   // Execute a transaction (sign + submit)
   async executeTransaction(transaction: Transaction): Promise<string> {
     const { signature, txBytes } = await this.signTransaction(transaction);
@@ -327,7 +370,9 @@ export class ZkLoginSessionManager {
     return data.salt;
   }
 
-  // Fetch ZK proof from Mysten Labs prover
+  // Fetch ZK proof via the backend proxy (forwards to Shinami's zkProver).
+  // Shinami's prover does not support CORS and requires an X-API-Key header,
+  // so the request must go through the backend, not directly from the browser.
   private async fetchZkProof(params: {
     jwt: string;
     extendedEphemeralPublicKey: string;
@@ -336,17 +381,18 @@ export class ZkLoginSessionManager {
     salt: string;
     keyClaimName: string;
   }): Promise<ZkProof> {
-    const proverUrl = PROVER_URLS[this.network] || PROVER_URLS.testnet;
-
-    // Prover API requires maxEpoch as string, not number
     const body = {
-      ...params,
+      jwt: params.jwt,
+      extendedEphemeralPublicKey: params.extendedEphemeralPublicKey,
       maxEpoch: String(params.maxEpoch),
+      jwtRandomness: params.jwtRandomness,
+      salt: params.salt,
+      keyClaimName: params.keyClaimName,
     };
 
-    console.log('[zkLogin] Fetching ZK proof from:', proverUrl);
+    console.log('[zkLogin] Fetching ZK proof via backend proxy:', this.proverServiceUrl);
 
-    const response = await fetch(proverUrl, {
+    const response = await fetch(this.proverServiceUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -413,6 +459,21 @@ export class ZkLoginSessionManager {
     return this.session;
   }
 
+  // Ensure the session is active and not expired (epoch check).
+  // Clears the session and throws if expired — callers should surface
+  // the error to the user so they can re-login.
+  async ensureSessionValid(): Promise<void> {
+    if (!this.session) {
+      throw new Error('No active zkLogin session. Please login first.');
+    }
+    const { systemState } = await this.client.core.getCurrentSystemState();
+    const currentEpoch = Number(systemState.epoch);
+    if (currentEpoch > this.session.maxEpoch) {
+      this.clearSession();
+      throw new Error('zkLogin session expired. Please login again.');
+    }
+  }
+
   // Check if session is active and valid
   async isSessionValid(): Promise<boolean> {
     if (!this.session) return false;
@@ -439,9 +500,10 @@ export function getZkLoginSessionManager(
   client?: SuiGrpcClient,
   network?: string,
   saltServiceUrl?: string,
+  proverServiceUrl?: string,
 ): ZkLoginSessionManager {
   if (!_instance && client) {
-    _instance = new ZkLoginSessionManager(client, network, saltServiceUrl);
+    _instance = new ZkLoginSessionManager(client, network, saltServiceUrl, proverServiceUrl);
   }
   if (!_instance) {
     throw new Error('ZkLoginSessionManager not initialized. Call with client first.');
@@ -453,7 +515,8 @@ export function initZkLoginSessionManager(
   client: SuiGrpcClient,
   network: string = 'testnet',
   saltServiceUrl?: string,
+  proverServiceUrl?: string,
 ): ZkLoginSessionManager {
-  _instance = new ZkLoginSessionManager(client, network, saltServiceUrl);
+  _instance = new ZkLoginSessionManager(client, network, saltServiceUrl, proverServiceUrl);
   return _instance;
 }

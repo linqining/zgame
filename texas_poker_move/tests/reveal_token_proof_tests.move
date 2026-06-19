@@ -30,7 +30,7 @@ fun new_and_accessors() {
     let t2 = bls_scalar::g1_to_bytes(&make_g1_point(b"t2"));
     let s = bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(42));
 
-    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s);
+    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s, bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(1)));
 
     assert_eq!(*reveal_token_proof::user_public_key(&proof), bls_scalar::g1_to_bytes(&make_g1_point(b"pk")));
     assert_eq!(*reveal_token_proof::commitment_t1(&proof), bls_scalar::g1_to_bytes(&make_g1_point(b"t1")));
@@ -48,7 +48,7 @@ fun verify_rejects_invalid_ciphertext() {
     let t2 = bls_scalar::g1_to_bytes(&make_g1_point(b"t2"));
     let s = bls_scalar::scalar_to_bytes(&sk);
 
-    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s);
+    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s, bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(1)));
 
     // Placeholder ciphertext (c1=c2=identity) → invalid
     let ct = bls_elgamal::new_placeholder_card();
@@ -69,7 +69,7 @@ fun verify_rejects_identity_reveal_token() {
     let t2 = bls_scalar::g1_to_bytes(&make_g1_point(b"t2"));
     let s = bls_scalar::scalar_to_bytes(&sk);
 
-    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s);
+    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s, bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(1)));
 
     // reveal_token = identity → should reject
     let reveal_token = bls12381::g1_identity();
@@ -91,7 +91,7 @@ fun verify_rejects_pk_mismatch() {
     let t2 = bls_scalar::g1_to_bytes(&make_g1_point(b"t2"));
     let s = bls_scalar::scalar_to_bytes(&sk);
 
-    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s);
+    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s, bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(1)));
 
     let reveal_token = bls_elgamal::gen_reveal_token(&ct, &sk);
     let result = reveal_token_proof::verify(&proof, &ct, &reveal_token, &pk);
@@ -111,7 +111,7 @@ fun verify_rejects_wrong_proof_data() {
     let t2 = bls_scalar::g1_to_bytes(&make_g1_point(b"wrong_t2"));
     let s = bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(999));
 
-    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s);
+    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s, bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(1)));
 
     let reveal_token = make_g1_point(b"reveal_token");
     let result = reveal_token_proof::verify(&proof, &ct, &reveal_token, &pk);
@@ -133,7 +133,7 @@ fun verify_rejects_c1_identity_only() {
     let t2 = bls_scalar::g1_to_bytes(&make_g1_point(b"t2"));
     let s = bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(42));
 
-    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s);
+    let proof = reveal_token_proof::new(pk_bytes, t1, t2, s, bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(1)));
     let reveal_token = make_g1_point(b"reveal_token");
     let result = reveal_token_proof::verify(&proof, &ct, &reveal_token, &pk);
     // c1 = identity → is_valid returns false

@@ -10,20 +10,21 @@ import {
   type BuildActionRequest,
   type SponsoredTransactionResult,
 } from './sponsoredTx';
+import { toB64 } from './utils';
 
 /**
- * 提交 join_and_shuffle 操作到 Sui 链上（赞助交易）。
+ * 提交 join_and_shuffle_verified 操作到 Sui 链上（赞助交易）。
  *
  * @param suiTableId 链上 Table 对象 ID
  * @param seatIndex 座位索引
- * @param buyIn 买入金额
+ * @param coinObjectId 买入用的 SUI Coin 对象 ID (hex)，合约已改为接收 Coin<SUI>
  * @param joinResultJson WASM join_game_and_shuffle 返回的 JSON 字符串
  * @returns 交易结果
  */
 export async function submitJoinAndShuffle(
   suiTableId: string,
   seatIndex: number,
-  buyIn: number,
+  coinObjectId: string,
   joinResultJson: string,
 ): Promise<SponsoredTransactionResult> {
   // 动态导入 WASM 序列化函数（避免在模块加载时就依赖 WASM 初始化）
@@ -34,10 +35,10 @@ export async function submitJoinAndShuffle(
   const moveBytes = typeof moveBytesStr === 'string' ? JSON.parse(moveBytesStr) : moveBytesStr;
 
   const request: BuildActionRequest = {
-    action: 'join_and_shuffle',
+    action: 'join_and_shuffle_verified',
     table_id: suiTableId,
     seat_index: seatIndex,
-    buy_in: buyIn,
+    coin_object_id: coinObjectId,
     pk: moveBytes.pk,                       // base64(48 bytes)
     pk_ownership_proof: moveBytes.pk_ownership_proof,  // base64(80 bytes)
     output_cards: moveBytes.output_cards,   // base64(96*N bytes)
@@ -115,4 +116,56 @@ export async function submitRaise(
   };
   const service = getSponsoredTransactionService();
   return service.executeSponsoredAction(request);
+}
+
+/**
+ * 提交 leave_with_proof_verified 操作到 Sui 链上（赞助交易）。
+ *
+ * 参考 `submitJoinAndShuffle`，通过同步 HTTP API (`/api/sui/action/build`)
+ * 获取 TransactionKind，再由 SponsoredTransactionService 完成 sponsor + zkLogin
+ * 签名 + 提交。
+ *
+ * @param suiTableId 链上 Table 对象 ID
+ * @param seatIndex 座位索引
+ * @param outputCardsJson WASM leave_game 返回的 output_cards JSON 字符串
+ *                        （ElGamalCiphertext 数组）
+ * @param leaveProofJson WASM leave_game 返回的 leave_proof JSON 字符串
+ * @returns 交易结果
+ */
+export async function submitLeave(
+  suiTableId: string,
+  seatIndex: number,
+  outputCardsJson: string,
+  leaveProofJson: string,
+  hasShuffled: boolean,
+): Promise<SponsoredTransactionResult> {
+  // 动态导入 WASM 序列化函数（返回 Uint8Array，需自行 base64 编码）
+  const { serialize_ciphertexts_to_move_bytes, serialize_leave_proof_to_move_bytes } =
+    await import('@linqining/client-wasm');
+
+  const service = getSponsoredTransactionService();
+
+  // 根据玩家是否已完成洗牌，仅提交对应的 leave 交易。
+  // 同时提交两个交易会导致：先执行的交易清空座位，后执行的交易因 ESeatEmpty 失败。
+  // - 已洗牌 → leave_with_proof_verified（需要 completed_players 包含 seat_index）
+  // - 未洗牌 → leave_table（需要 completed_players 不包含 seat_index）
+  if (hasShuffled) {
+    const outputCardsBytes = serialize_ciphertexts_to_move_bytes(outputCardsJson);
+    const leaveProofBytes = serialize_leave_proof_to_move_bytes(leaveProofJson);
+    const proofRequest: BuildActionRequest = {
+      action: 'leave_with_proof_verified',
+      table_id: suiTableId,
+      seat_index: seatIndex,
+      output_cards: toB64(outputCardsBytes),
+      leave_proof_bytes: toB64(leaveProofBytes),
+    };
+    return service.executeSponsoredAction(proofRequest);
+  } else {
+    const simpleRequest: BuildActionRequest = {
+      action: 'leave_table',
+      table_id: suiTableId,
+      seat_index: seatIndex,
+    };
+    return service.executeSponsoredAction(simpleRequest);
+  }
 }

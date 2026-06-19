@@ -129,10 +129,12 @@ export interface GameContextType {
   revealLoading: boolean;
   decryptedHandCards: string[];
   communityCards: Card[];
+  kickNotification: string | null;
+  cryptoEvents: CryptoEvent[];
   joinTable: (tableId: number, pkHex: string) => void;
-  leaveTable: (shouldNavigate?: boolean, pkHex?: string) => void;
+  leaveTable: (shouldNavigate?: boolean, pkHex?: string, fireAndForget?: boolean) => Promise<void>;
   sitDown: (tableId: string, seatId: number, amount: number) => Promise<void>;
-  standUp: () => void;
+  standUp: () => Promise<void>;
   addMessage: (message: string) => void;
   fold: () => void;
   check: () => void;
@@ -142,6 +144,7 @@ export interface GameContextType {
   sittingOut: () => void;
   sittingIn: () => void;
   expelInitiate: (tableId: string, targetPlayerPk: string) => void;
+  clearKickNotification: () => void;
 }
 
 // ===== ZK 密码学事件（用于可视化面板） =====

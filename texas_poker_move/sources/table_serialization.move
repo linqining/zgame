@@ -164,7 +164,10 @@ public fun deserialize_reveal_token_proof(data: &vector<u8>): RevealTokenProof {
     let commitment_t2 = read_g1_point(data, offset);
     offset = offset + G1_POINT_SIZE;
     let response_s = read_scalar(data, offset);
-    texas_poker::reveal_token_proof::new(user_public_key, commitment_t1, commitment_t2, response_s)
+    offset = offset + SCALAR_SIZE;
+    // M4 修复：读取 nonce 字段
+    let nonce = read_scalar(data, offset);
+    texas_poker::reveal_token_proof::new(user_public_key, commitment_t1, commitment_t2, response_s, nonce)
 }
 
 public fun deserialize_reconstruct_proof(data: &vector<u8>): ReconstructProof {

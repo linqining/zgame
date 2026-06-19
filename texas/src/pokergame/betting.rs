@@ -62,16 +62,20 @@ impl BettingRound {
         Ok(())
     }
 
+    /// 对齐 Move process_raise：all-in（needed == stack）允许低于 min_raise（短 all-in），
+    /// 仅非 all-in 时强制 min_raise 检查。
     pub fn validate_raise(&self, seat: &Seat, raise_amount: u64) -> Result<(), String> {
         let chips_to_call = self.current_bet.saturating_sub(seat.bet);
-        if chips_to_call + raise_amount > seat.stack {
+        let needed = chips_to_call + raise_amount;
+        if needed > seat.stack {
             return Err(format!(
                 "not enough chips: need {}, have {}",
-                chips_to_call + raise_amount,
+                needed,
                 seat.stack
             ));
         }
-        if raise_amount < self.min_raise {
+        let is_all_in = needed == seat.stack && seat.stack > 0;
+        if !is_all_in && raise_amount < self.min_raise {
             return Err(format!(
                 "minimum raise is {}, got {}",
                 self.min_raise, raise_amount
@@ -103,13 +107,22 @@ impl BettingRound {
         active_players.iter().all(|s| s.bet == self.current_bet || s.stack == 0)
     }
 
-    pub fn update_after_raise(&mut self, total_bet: u64, seat_id: u32) {
+    /// 对齐 Move process_raise：all-in 时仅当 raise_amount >= min_raise 才更新
+    /// min_raise 和 last_raiser_seat_id（重新打开行动权）；短 all-in 不更新。
+    /// 非 all-in 时始终更新（调用方已通过 validate_raise 保证 raise_amount >= min_raise）。
+    pub fn update_after_raise(&mut self, total_bet: u64, seat_id: u32, is_all_in: bool) {
         let raise_amount = total_bet.saturating_sub(self.current_bet);
-        if raise_amount >= self.min_raise {
+        if is_all_in {
+            if raise_amount >= self.min_raise {
+                self.min_raise = raise_amount;
+                self.last_raiser_seat_id = Some(seat_id);
+            }
+            // 短 all-in（raise_amount < min_raise）：不更新 min_raise 和 last_raiser
+        } else {
             self.min_raise = raise_amount;
+            self.last_raiser_seat_id = Some(seat_id);
         }
         self.current_bet = total_bet;
-        self.last_raiser_seat_id = Some(seat_id);
         self.actions_taken += 1;
     }
 
@@ -144,11 +157,9 @@ impl BettingRound {
         } else {
             actions.push("call".to_string());
         }
+        // 对齐 Move can_raise：stack > to_call 即可 raise（含短 all-in）
         if seat.stack > chips_to_call {
-            let max_raise = seat.stack - chips_to_call;
-            if max_raise >= self.min_raise {
-                actions.push("raise".to_string());
-            }
+            actions.push("raise".to_string());
         }
         actions
     }

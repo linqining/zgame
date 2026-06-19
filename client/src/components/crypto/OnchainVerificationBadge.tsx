@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react'
 import { ExternalLink, ShieldCheck, Clock } from 'lucide-react'
+import { useContentContext } from '../../context/content/contentContext'
 
 interface OnchainVerificationBadgeProps {
   txDigest: string | null
@@ -49,15 +50,16 @@ export function OnchainVerificationBadge({
   network = 'testnet',
   compact = false,
 }: OnchainVerificationBadgeProps) {
+  const { getLocalizedString: t } = useContentContext()
   // 无 txDigest：显示灰色 pending 状态，不可点击
   if (!txDigest) {
     return (
       <span
         style={{ ...baseStyle, ...grayStyle, cursor: 'default' }}
-        title="pending onchain"
+        title={t('crypto_pending-onchain')}
       >
         <Clock size={12} />
-        {!compact && <span>pending onchain</span>}
+        {!compact && <span>{t('crypto_pending-onchain')}</span>}
       </span>
     )
   }

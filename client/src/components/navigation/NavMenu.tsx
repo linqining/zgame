@@ -10,8 +10,8 @@ import { Link } from 'react-router-dom';
 import lobbyIcon from '../../assets/icons/lobby-icon.svg';
 import userIcon from '../../assets/icons/user-icon.svg';
 import contentContext from '../../context/content/contentContext';
-import socketContext from '../../context/websocket/socketContext';
 import globalContext from '../../context/global/globalContext';
+import LanguageSwitcher from './LanguageSwitcher';
 
 const NavMenuWrapper = styled.div`
   position: fixed;
@@ -59,7 +59,7 @@ const MenuItem = styled(Link)`
   width: 100%;
   text-align: right;
   font-family: 'Inter', -apple-system, sans-serif;
-  color: #0f172a !important;
+  color: ${({ theme }) => theme.colors.fontColorDark} !important;
   border-bottom: 1px solid rgba(226, 232, 240, 0.6);
   background-color: transparent !important;
   font-size: 0.95rem;
@@ -74,7 +74,7 @@ const MenuItem = styled(Link)`
 
   &:hover {
     background-color: rgba(102, 126, 234, 0.08) !important;
-    color: #667eea !important;
+    color: ${({ theme }) => theme.colors.secondaryCta} !important;
 
     img {
       opacity: 1;
@@ -83,7 +83,7 @@ const MenuItem = styled(Link)`
 
   &:focus {
     outline: none;
-    border-left: 3px solid #667eea;
+    border-left: 3px solid ${({ theme }) => theme.colors.secondaryCta};
   }
 `;
 
@@ -120,8 +120,9 @@ const HorizontalWrapper = styled.div`
 
   ${Button} {
     min-width: 6.5rem;
-    background: linear-gradient(135deg, #667eea, #764ba2) !important;
-    color: white !important;
+    /* TODO: #764ba2 提取到 theme */
+    background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2) !important;
+    color: ${({ theme }) => theme.colors.lightestBg} !important;
     border: none !important;
     border-radius: 10px !important;
     box-shadow: 0 2px 12px rgba(102, 126, 234, 0.2) !important;
@@ -132,11 +133,12 @@ const SalutationText = styled(Text)`
   font-family: 'Inter', -apple-system, sans-serif;
   font-size: 1.25rem;
   font-weight: 700;
-  color: #0f172a;
+  color: ${({ theme }) => theme.colors.fontColorDark};
   letter-spacing: -0.02em;
 
   ${ColoredText} {
-    background: linear-gradient(135deg, #667eea, #764ba2);
+    /* TODO: #764ba2 提取到 theme */
+    background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -164,29 +166,13 @@ const IconWrapper = styled.div`
     color: #64748b !important;
 
     &:hover {
-      color: #0f172a !important;
+      color: ${({ theme }) => theme.colors.fontColorDark} !important;
     }
-  }
-`;
-
-const LogoutButton = styled(Button)`
-  background: rgba(241, 245, 249, 0.8) !important;
-  color: #475569 !important;
-  border: 1px solid rgba(226, 232, 240, 0.8) !important;
-  border-radius: 10px !important;
-  font-weight: 500 !important;
-  transition: all 0.25s ease !important;
-
-  &:hover {
-    border-color: rgba(239, 68, 68, 0.4) !important;
-    color: #ef4444 !important;
-    background: rgba(239, 68, 68, 0.06) !important;
   }
 `;
 
 interface NavMenuProps {
   onClose: () => void;
-  logout: () => void;
   userName: string | null;
   chipsAmount: number | null;
   lang?: string;
@@ -202,14 +188,12 @@ interface NavMenuProps {
 
 const NavMenu: React.FC<NavMenuProps> = ({
   onClose,
-  logout,
   userName,
   chipsAmount,
   openModal,
 }) => {
   const { players } = useContext(globalContext)!;
   const { getLocalizedString } = useContext(contentContext)!;
-  const { cleanUp } = useContext(socketContext)!;
 
   const openShopModal = () =>
     openModal(
@@ -288,18 +272,7 @@ const NavMenu: React.FC<NavMenuProps> = ({
 
         </MenuBody>
         <MenuFooter>
-          <LogoutButton
-            onClick={() => {
-              cleanUp();
-              logout();
-              onClose();
-            }}
-            secondary
-            fullWidth
-            small
-          >
-            {getLocalizedString('navmenu-logout_btn')}
-          </LogoutButton>
+          <LanguageSwitcher />
         </MenuFooter>
       </StyledNavMenu>
     </NavMenuWrapper>

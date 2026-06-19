@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 poker_protocol = { path = "../poker_protocol" }
-sui-serialization = { path = "../sui-serialization" }
+sui-serialization = { path = "../sui-serialization", default-features = false }
 clear_on_drop = { version = "0.2", features = ["no_cc"] }
 subtle = "2"
 wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }

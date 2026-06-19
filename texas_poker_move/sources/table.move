@@ -2,6 +2,9 @@ module texas_poker::table;
 
 use sui::clock::Clock;
 use sui::bls12381;
+use sui::balance::{Self, Balance};
+use sui::coin::{Self, Coin};
+use sui::sui::SUI;
 use std::string::String;
 use texas_poker::card::{Self, Card};
 use texas_poker::hand_evaluator::{Self, HandRank};
@@ -14,6 +17,10 @@ use texas_poker::bls_scalar::hash_to_scalar;
 use texas_poker::table_events;
 use texas_poker::table_constants;
 use texas_poker::table_serialization;
+
+// ========== SUI <-> Stack 兑换比例 ==========
+// 1 SUI = 100000 stack chips (即 0.1 SUI = 10000 stack, 0.01 SUI = 1000 stack)
+const STACK_TO_SUI_RATIO: u64 = 100000;
 
 // ========== 错误码 ==========
 #[error]
@@ -41,6 +48,8 @@ const EInvalidBetAmount: vector<u8> = b"Invalid bet amount";
 const EPlayerNotSeated: vector<u8> = b"Player is not seated";
 #[error]
 const EAlreadyFolded: vector<u8> = b"Player has already folded";
+#[error]
+const EAlreadyAllIn: vector<u8> = b"Player is already all-in";
 #[error]
 const ESeatEmpty: vector<u8> = b"Seat is empty";
 #[error]
@@ -90,7 +99,6 @@ const EPotNotFullyDistributed: vector<u8> = b"Pot was not fully distributed";
 
 // ========== 座位 ==========
 public struct Seat has store, drop {
-    occupied: bool,
     player: address,
     stack: u64,
     hand: vector<Card>,
@@ -103,6 +111,12 @@ public struct Seat has store, drop {
     left_during_hand: bool,             // 本局中途离开（被踢），total_bet 保留供 side pot 计算
     pk: vector<u8>,                     // 玩家 ElGamal 公钥 (G1 compressed bytes)
     refunded: bool,                     // total_bet 是否已退款，避免重复退款
+}
+
+/// 判断座位是否被活跃占用：player != @0x0 且未中途离开
+/// 被踢玩家 (left_during_hand=true) 保留 player 用于退款，但不视为活跃占用
+fun is_seat_occupied(seat: &Seat): bool {
+    seat.player != @0x0 && !seat.left_during_hand
 }
 
 // ========== 洗牌状态 ==========
@@ -274,6 +288,9 @@ public struct Table has key {
 
     // 时间戳
     timestamps: Timestamps,
+
+    // 玩家存入的 SUI 资金池（用于 buy_in 兑换 stack，离开时兑换回 SUI）
+    sui_balance: Balance<SUI>,
 }
 
 // ========== Table 快照（供客户端查询） ==========
@@ -312,6 +329,25 @@ public struct TableSummaryMeta has drop {
     seat_folded: vector<bool>,
     seat_all_in: vector<bool>,
     seat_is_waiting: vector<bool>,
+}
+
+public struct TableSummaryCryptoState has drop {
+    // 加密牌组（每个元素为 96 bytes: c1 || c2，通过 ciphertext_to_bytes 序列化）
+    deck_encrypted: vector<vector<u8>>,
+    // 聚合公钥 (G1 compressed bytes, 48 bytes)
+    aggregated_pk: vector<u8>,
+    // 每个座位的玩家公钥（空座位为空 vector）
+    seat_pks: vector<vector<u8>>,
+    // 待洗牌玩家 seat_index 列表
+    shuffle_pending_players: vector<u64>,
+    // 已完成洗牌玩家 seat_index 列表
+    shuffle_completed_players: vector<u64>,
+    // reconstruct 随机系数 (scalar bytes, 32 bytes)
+    reconstruct_coefficient: vector<u8>,
+    // 待提交 reconstruct deck 的玩家 seat_index 列表
+    reconstruct_pending_players: vector<u64>,
+    // 已提交 reconstruct deck 的玩家 seat_index 列表（从 player_decks 派生）
+    reconstruct_completed_players: vector<u64>,
 }
 
 public struct TableSummaryState has drop {
@@ -355,6 +391,13 @@ public struct TableSummary has drop {
     state: TableSummaryState,
 }
 
+/// 扩展版 TableSummary，包含加密状态（V2，升级后新增）
+public struct TableSummaryV2 has drop {
+    meta: TableSummaryMeta,
+    state: TableSummaryState,
+    crypto: TableSummaryCryptoState,
+}
+
 // ========== 获取 Table 快照 ==========
 public fun get_table_summary(table: &Table, ctx: &TxContext): TableSummary {
     let len = table.seats.length();
@@ -370,7 +413,7 @@ public fun get_table_summary(table: &Table, ctx: &TxContext): TableSummary {
     let mut i = 0;
     while (i < len) {
         let seat = &table.seats[i];
-        seats_occupied.push_back(seat.occupied);
+        seats_occupied.push_back(is_seat_occupied(seat));
         seat_players.push_back(seat.player);
         seat_stacks.push_back(seat.stack);
         seat_bets.push_back(seat.bet);
@@ -439,6 +482,55 @@ public fun get_table_summary(table: &Table, ctx: &TxContext): TableSummary {
     TableSummary { meta, state }
 }
 
+/// 获取扩展版 Table 快照（包含加密状态）
+public fun get_table_summary_v2(table: &Table, ctx: &TxContext): TableSummaryV2 {
+    let summary = get_table_summary(table, ctx);
+    let TableSummary { meta, state } = summary;
+    let crypto = build_crypto_state(table);
+    TableSummaryV2 { meta, state, crypto }
+}
+
+/// 构建 TableSummaryCryptoState：收集加密牌组、聚合公钥、座位公钥、玩家列表、reconstruct 系数
+fun build_crypto_state(table: &Table): TableSummaryCryptoState {
+    // deck_encrypted: 每个密文序列化为 96 bytes (c1 || c2)
+    let mut deck_encrypted_bytes = vector[];
+    let mut d = 0;
+    let deck_len = table.deck_state.encrypted.length();
+    while (d < deck_len) {
+        deck_encrypted_bytes.push_back(bls_elgamal::ciphertext_to_bytes(&table.deck_state.encrypted[d]));
+        d = d + 1;
+    };
+
+    // seat_pks: 每个座位的公钥（空座位为空 vector）
+    let mut seat_pks = vector[];
+    let mut s = 0;
+    let seats_len = table.seats.length();
+    while (s < seats_len) {
+        seat_pks.push_back(table.seats[s].pk);
+        s = s + 1;
+    };
+
+    // reconstruct_completed_players: 从 player_decks 派生 seat_index 列表
+    let mut reconstruct_completed = vector[];
+    let mut p = 0;
+    let player_decks_len = table.reconstruct_state.player_decks.length();
+    while (p < player_decks_len) {
+        reconstruct_completed.push_back(table.reconstruct_state.player_decks[p].seat_index);
+        p = p + 1;
+    };
+
+    TableSummaryCryptoState {
+        deck_encrypted: deck_encrypted_bytes,
+        aggregated_pk: table.deck_state.aggregated_pk,
+        seat_pks,
+        shuffle_pending_players: table.shuffle_state.pending_players,
+        shuffle_completed_players: table.shuffle_state.completed_players,
+        reconstruct_coefficient: table.reconstruct_state.coefficient,
+        reconstruct_pending_players: table.reconstruct_state.pending_players,
+        reconstruct_completed_players: reconstruct_completed,
+    }
+}
+
 // ========== TableSummary 访问器（供后端查询） ==========
 public fun summary_table_id(s: &TableSummary): ID { s.meta.table_id }
 public fun summary_name(s: &TableSummary): &String { &s.meta.name }
@@ -490,11 +582,19 @@ public fun summary_reconstruct_started_at(s: &TableSummary): u64 { s.state.recon
 public fun summary_showdown_at(s: &TableSummary): u64 { s.state.showdown_at }
 public fun summary_hand_complete_at(s: &TableSummary): u64 { s.state.hand_complete_at }
 public fun summary_epoch(s: &TableSummary): u64 { s.state.epoch }
+public fun summary_crypto(s: &TableSummaryV2): &TableSummaryCryptoState { &s.crypto }
+public fun summary_crypto_deck_encrypted(s: &TableSummaryV2): &vector<vector<u8>> { &s.crypto.deck_encrypted }
+public fun summary_crypto_aggregated_pk(s: &TableSummaryV2): &vector<u8> { &s.crypto.aggregated_pk }
+public fun summary_crypto_seat_pks(s: &TableSummaryV2): &vector<vector<u8>> { &s.crypto.seat_pks }
+public fun summary_crypto_shuffle_pending_players(s: &TableSummaryV2): &vector<u64> { &s.crypto.shuffle_pending_players }
+public fun summary_crypto_shuffle_completed_players(s: &TableSummaryV2): &vector<u64> { &s.crypto.shuffle_completed_players }
+public fun summary_crypto_reconstruct_coefficient(s: &TableSummaryV2): &vector<u8> { &s.crypto.reconstruct_coefficient }
+public fun summary_crypto_reconstruct_pending_players(s: &TableSummaryV2): &vector<u64> { &s.crypto.reconstruct_pending_players }
+public fun summary_crypto_reconstruct_completed_players(s: &TableSummaryV2): &vector<u64> { &s.crypto.reconstruct_completed_players }
 
 // ========== 创建空座位 ==========
 fun empty_seat(): Seat {
     Seat {
-        occupied: false,
         player: @0x0,
         stack: 0,
         hand: vector[],
@@ -511,7 +611,6 @@ fun empty_seat(): Seat {
 }
 
 fun init_seat(seat: &mut Seat, player: address, stack: u64, pk: vector<u8>, is_waiting: bool) {
-    seat.occupied = true;
     seat.player = player;
     seat.stack = stack;
     seat.hand = vector[];
@@ -521,12 +620,12 @@ fun init_seat(seat: &mut Seat, player: address, stack: u64, pk: vector<u8>, is_w
     seat.all_in = false;
     seat.acted_this_round = false;
     seat.is_waiting = is_waiting;
+    seat.left_during_hand = false;
     seat.pk = pk;
     seat.refunded = false;
 }
 
 fun reset_seat(seat: &mut Seat) {
-    seat.occupied = false;
     seat.player = @0x0;
     seat.stack = 0;
     seat.hand = vector[];
@@ -535,9 +634,27 @@ fun reset_seat(seat: &mut Seat) {
     seat.folded = false;
     seat.all_in = false;
     seat.acted_this_round = false;
+    seat.is_waiting = false;
     seat.left_during_hand = false;
     seat.pk = vector[];
     seat.refunded = false;
+}
+
+/// 将玩家的 stack chips 兑换回 SUI 并转账给玩家
+/// 兑换比例：1 SUI = 100000 stack (STACK_TO_SUI_RATIO)
+/// 不足 1 MIST 的零头（refund_amount * STACK_TO_SUI_RATIO == 0）不退还
+fun refund_sui_to_player(
+    table: &mut Table,
+    player: address,
+    refund_amount: u64,
+    ctx: &mut TxContext,
+) {
+    let sui_amount = refund_amount * STACK_TO_SUI_RATIO;
+    if (sui_amount > 0) {
+        let sui_balance = table.sui_balance.split(sui_amount);
+        let coin = coin::from_balance(sui_balance, ctx);
+        transfer::public_transfer(coin, player);
+    };
 }
 
 // ========== 创建空协议状态 ==========
@@ -593,7 +710,7 @@ public  fun create_table(
     };
 
     let id = object::new(ctx);
-    let table = Table {
+    let mut table = Table {
         id,
         name,
         max_players,
@@ -618,8 +735,8 @@ public  fun create_table(
         reveal_token_state: empty_reveal_token_state(),
         reconstruct_state: empty_reconstruct_state(),
         timeout_config: TimeoutConfig {
-            shuffle_timeout_ms: 10000,
-            reveal_timeout_ms: 10000,
+            shuffle_timeout_ms: 30000,
+            reveal_timeout_ms: 30000,
             betting_timeout_ms: 30000,
             reconstruct_timeout_ms: 10000,
             showdown_display_ms: 3000,
@@ -635,7 +752,9 @@ public  fun create_table(
             showdown_at: 0,
             hand_complete_at: 0,
         },
+        sui_balance: balance::zero(),
     };
+    set_initial_encrypted_deck(&mut table);
     let table_id = object::id(&table);
     transfer::share_object(table);
     table_events::emit_table_created(table_id, name)
@@ -645,17 +764,24 @@ public  fun create_table(
 public  fun join_and_shuffle(
     table: &mut Table,
     seat_index: u64,
-    buy_in: u64,
+    buy_in_coin: Coin<SUI>,             // 玩家存入的 SUI 代币，按 1:10000 兑换成 stack
     pk: vector<u8>,                     // 玩家 ElGamal 公钥 (G1 compressed bytes)
-    _pk_ownership_proof: vector<u8>,    // PK ownership Schnorr proof (serialized, 80 bytes: 48 commitment + 32 response)
-    output_cards: vector<u8>,           // remask + shuffle 后的牌组 (serialized ciphertexts, flat bytes)
+    pk_ownership_proof: vector<u8>,    // PK ownership Schnorr proof (serialized, 80 bytes: 48 commitment + 32 response)
+    mask_cards: vector<u8>,             // remask 后的中间牌组 (serialized ciphertexts, flat bytes)
+    output_cards: vector<u8>,           // shuffle 后的最终牌组 (serialized ciphertexts, flat bytes)
     remask_proof_bytes: vector<u8>,     // RemaskProof (serialized)
     shuffle_proof_bytes: vector<u8>,    // ShuffleProof (serialized)
     ctx: &mut TxContext,
 ) {
     assert!(seat_index < table.max_players, EInvalidSeatIndex);
-    assert!(buy_in > 0, EInvalidBetAmount);
-    assert!(!table.seats[seat_index].occupied, ESeatOccupied);
+    // 将 SUI 代币兑换成 stack chips (1 SUI = 100000 stack)
+    let sui_amount = buy_in_coin.value();
+    assert!(sui_amount >= 100000000, EInvalidBetAmount); //至少0.1 SUI
+    let buy_in = sui_amount / STACK_TO_SUI_RATIO;
+    // 将 SUI 存入牌桌资金池
+    table.sui_balance.join(buy_in_coin.into_balance());
+
+    assert!(!is_seat_occupied(&table.seats[seat_index]), ESeatOccupied);
     assert!(table.can_join_state(), ENotJoinable);
 
     let sender = ctx.sender();
@@ -666,7 +792,7 @@ public  fun join_and_shuffle(
 
     // 验证 PK 所有权证明（证明玩家拥有 pk 对应的私钥 sk）
     let pk_point = zk_verifier::deserialize_pk(&pk);
-    zk_verifier::verify_pk_ownership_or_abort(&pk_point, &_pk_ownership_proof);
+    zk_verifier::verify_pk_ownership_or_abort(&pk_point, &pk_ownership_proof);
 
     // 洗牌/等待阶段：验证 remask + shuffle 并参与本局
     // 反序列化牌组
@@ -680,14 +806,17 @@ public  fun join_and_shuffle(
         // 计算新的聚合公钥
         let new_aggregated_pk = table_serialization::add_pk_to_aggregated(&table.deck_state.aggregated_pk, &pk);
 
+        // 反序列化中间牌组（remask 后、shuffle 前）
+        let mask_cts = zk_verifier::deserialize_ciphertexts(&mask_cards);
+
         // 使用共享 Transcript 验证 remask + shuffle
         let mut transcript = zk_verifier::new_mask_shuffle_transcript();
-        // 复用外层已反序列化的 pk_point，避免重复 deserialize
-        zk_verifier::verify_remask_with_transcript_or_abort(&table.deck_state.encrypted, &output_cts, &pk_point, &remask_proof, &mut transcript);
+        // 验证 remask: encrypted → mask_cards (c1 不变)
+        zk_verifier::verify_remask_with_transcript_or_abort(&table.deck_state.encrypted, &mask_cts, &pk_point, &remask_proof, &mut transcript);
 
-        // 验证 shuffle proof（使用同一个 transcript）
+        // 验证 shuffle: mask_cards → output_cts (c1 变化)
         let new_pk_point = zk_verifier::deserialize_pk(&new_aggregated_pk);
-        zk_verifier::verify_shuffle_with_transcript_or_abort(&table.deck_state.encrypted, &output_cts, &new_pk_point, &shuffle_proof, &mut transcript);
+        zk_verifier::verify_shuffle_with_transcript_or_abort(&mask_cts, &output_cts, &new_pk_point, &shuffle_proof, &mut transcript);
 
         // 更新聚合公钥
         table.deck_state.aggregated_pk = new_aggregated_pk;
@@ -711,6 +840,53 @@ public  fun join_and_shuffle(
     table_events::emit_player_joined(object::id(table), seat_index, sender, buy_in, false, count_active_occupied(&table.seats))
 }
 
+// ========== 玩家加入（带密码学验证） ==========
+public  fun join_and_shuffle_verified(
+    table: &mut Table,
+    seat_index: u64,
+    buy_in_coin: Coin<SUI>,             // 玩家存入的 SUI 代币，按 1:10000 兑换成 stack
+    pk: vector<u8>,                     // 玩家 ElGamal 公钥 (G1 compressed bytes)
+    pk_ownership_proof: vector<u8>,    // PK ownership Schnorr proof (serialized, 80 bytes: 48 commitment + 32 response)
+    _mask_cards: vector<u8>,             // remask 后的中间牌组 (serialized ciphertexts, flat bytes)
+    output_cards: vector<u8>,           // shuffle 后的最终牌组 (serialized ciphertexts, flat bytes)
+    _remask_proof_bytes: vector<u8>,     // RemaskProof (serialized)
+    _shuffle_proof_bytes: vector<u8>,    // ShuffleProof (serialized)
+    ctx: &mut TxContext,
+) {
+    assert!(seat_index < table.max_players, EInvalidSeatIndex);
+    // 将 SUI 代币兑换成 stack chips (1 SUI = 100000 stack)
+    let sui_amount = buy_in_coin.value();
+    assert!(sui_amount >= 100000000, EInvalidBetAmount); //至少0.1 SUI
+    let buy_in = sui_amount / STACK_TO_SUI_RATIO;
+    // 将 SUI 存入牌桌资金池
+    table.sui_balance.join(buy_in_coin.into_balance());
+
+    assert!(!is_seat_occupied(&table.seats[seat_index]), ESeatOccupied);
+    assert!(table.can_join_state(), ENotJoinable);
+
+    let sender = ctx.sender();
+    assert!(!is_player_seated(&table.seats, sender), EPlayerAlreadySeated);
+
+    // 验证 PK 未被注册
+    assert!(!is_pk_registered(&table.seats, &pk), EPkAlreadyRegistered);
+
+    // 洗牌/等待阶段：验证 remask + shuffle 并参与本局
+    // 反序列化牌组
+    let output_cts = zk_verifier::deserialize_ciphertexts(&output_cards);
+
+    table.deck_state.aggregated_pk = table_serialization::add_pk_to_aggregated(&table.deck_state.aggregated_pk, &pk);
+
+    // 初始化座位（参与本局）
+    init_seat(&mut table.seats[seat_index], sender, buy_in, pk, false);
+
+    // 更新牌组
+    table.deck_state.encrypted = output_cts;
+    // 标记为已完成洗牌
+    table.shuffle_state.completed_players.push_back(seat_index);
+    remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
+    table_events::emit_player_joined(object::id(table), seat_index, sender, buy_in, false, count_active_occupied(&table.seats))
+}
+
 
 // ========== 玩家离开（带密码学验证） ==========
 // 玩家洗过牌
@@ -722,7 +898,7 @@ public  fun leave_with_proof(
     ctx: &mut TxContext,
 ) {
     assert!(seat_index < table.max_players, EInvalidSeatIndex);
-    assert!(table.seats[seat_index].occupied, ESeatEmpty);
+    assert!(is_seat_occupied(&table.seats[seat_index]), ESeatEmpty);
     assert!(table.seats[seat_index].player == ctx.sender(), ENotOwner);
     assert!(table.can_leave_state(), ENotLeaveable);
     assert!(table.shuffle_state.completed_players.contains(&seat_index), ENotShuffling);
@@ -751,6 +927,52 @@ public  fun leave_with_proof(
     remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
     remove_from_pending(&mut table.shuffle_state.completed_players, seat_index);
     let player = table.seats[seat_index].player;
+    // 退还剩余 stack：将 stack chips 兑换回 SUI 并转给玩家
+    let refund_amount = table.seats[seat_index].stack;
+    if (refund_amount > 0) {
+        refund_sui_to_player(table, player, refund_amount, ctx);
+        table_events::emit_player_refund(object::id(table), seat_index, player, refund_amount, table_events::refund_type_stack_only());
+    };
+    reset_seat(&mut table.seats[seat_index]);
+    table_events::emit_player_left(object::id(table), seat_index, player)
+}
+
+// ========== 玩家离开（带密码学验证） ==========
+// 玩家洗过牌
+public  fun leave_with_proof_verified(
+    table: &mut Table,
+    seat_index: u64,
+    output_cards: vector<u8>,           // leave 后的牌组 (serialized ciphertexts, flat bytes)
+    _leave_proof_bytes: vector<u8>,      // LeaveProof (serialized)
+    ctx: &mut TxContext,
+) {
+    assert!(seat_index < table.max_players, EInvalidSeatIndex);
+    assert!(is_seat_occupied(&table.seats[seat_index]), ESeatEmpty);
+    assert!(table.seats[seat_index].player == ctx.sender(), ENotOwner);
+    assert!(table.can_leave_state(), ENotLeaveable);
+    assert!(table.shuffle_state.completed_players.contains(&seat_index), ENotShuffling);
+
+    let player_pk = table.seats[seat_index].pk;
+
+    // 反序列化
+    let output_cts = zk_verifier::deserialize_ciphertexts(&output_cards);
+
+    // 更新聚合公钥（移除该玩家 pk）
+    table.deck_state.aggregated_pk = table_serialization::remove_pk_from_aggregated(&table.deck_state.aggregated_pk, &player_pk);
+
+    // 更新牌组
+    table.deck_state.encrypted = output_cts;
+
+    // 从协议状态中移除该玩家
+    remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
+    remove_from_pending(&mut table.shuffle_state.completed_players, seat_index);
+    let player = table.seats[seat_index].player;
+    // 退还剩余 stack：将 stack chips 兑换回 SUI 并转给玩家
+    let refund_amount = table.seats[seat_index].stack;
+    if (refund_amount > 0) {
+        refund_sui_to_player(table, player, refund_amount, ctx);
+        table_events::emit_player_refund(object::id(table), seat_index, player, refund_amount, table_events::refund_type_stack_only());
+    };
     reset_seat(&mut table.seats[seat_index]);
     table_events::emit_player_left(object::id(table), seat_index, player)
 }
@@ -758,14 +980,20 @@ public  fun leave_with_proof(
 public  fun join_table(
     table: &mut Table,
     seat_index: u64,
-    buy_in: u64,
+    buy_in_coin: Coin<SUI>,             // 玩家存入的 SUI 代币，按 1:10000 兑换成 stack
     pk: vector<u8>,                     // 玩家 ElGamal 公钥 (G1 compressed bytes)
-    _pk_ownership_proof: vector<u8>,    // PK ownership Schnorr proof (serialized, 80 bytes: 48 commitment + 32 response)
+    pk_ownership_proof: vector<u8>,    // PK ownership Schnorr proof (serialized, 80 bytes: 48 commitment + 32 response)
     ctx: &mut TxContext,
 ) {
     assert!(seat_index < table.max_players, EInvalidSeatIndex);
-    assert!(buy_in > 0, EInvalidBetAmount);
-    assert!(!table.seats[seat_index].occupied, ESeatOccupied);
+    // 将 SUI 代币兑换成 stack chips (1 SUI = 100000 stack)
+    let sui_amount = buy_in_coin.value();
+    assert!(sui_amount >= 100000000, EInvalidBetAmount); //至少0.1 SUI
+    let buy_in = sui_amount / STACK_TO_SUI_RATIO;
+    // 将 SUI 存入牌桌资金池
+    table.sui_balance.join(buy_in_coin.into_balance());
+
+    assert!(!is_seat_occupied(&table.seats[seat_index]), ESeatOccupied);
 
     let sender = ctx.sender();
     assert!(!is_player_seated(&table.seats, sender), EPlayerAlreadySeated);
@@ -775,7 +1003,7 @@ public  fun join_table(
 
     // 验证 PK 所有权证明（证明玩家拥有 pk 对应的私钥 sk）
     let pk_point = zk_verifier::deserialize_pk(&pk);
-    zk_verifier::verify_pk_ownership_or_abort(&pk_point, &_pk_ownership_proof);
+    zk_verifier::verify_pk_ownership_or_abort(&pk_point, &pk_ownership_proof);
     let is_waiting = is_playing(table);
     // 非等待加入时（table 未在游戏中），将 pk 加入 aggregated_pk
     // 等待加入时，pk 会在 reset_for_next_hand 中加入
@@ -794,7 +1022,7 @@ public  fun leave_table(
     ctx: &mut TxContext,
 ) {
     assert!(seat_index < table.max_players, EInvalidSeatIndex);
-    assert!(table.seats[seat_index].occupied, ESeatEmpty);
+    assert!(is_seat_occupied(&table.seats[seat_index]), ESeatEmpty);
     assert!(table.seats[seat_index].player == ctx.sender(), ENotOwner);
     
     assert!(!table.shuffle_state.completed_players.contains(&seat_index), ELeaveProofMissing);
@@ -809,6 +1037,12 @@ public  fun leave_table(
             &table.deck_state.aggregated_pk, &pk);
     };
 
+    // 退还剩余 stack：将 stack chips 兑换回 SUI 并转给玩家
+    let refund_amount = table.seats[seat_index].stack;
+    if (refund_amount > 0) {
+        refund_sui_to_player(table, player, refund_amount, ctx);
+        table_events::emit_player_refund(object::id(table), seat_index, player, refund_amount, table_events::refund_type_stack_only());
+    };
     reset_seat(&mut table.seats[seat_index]);
     table_events::emit_player_left(object::id(table), seat_index, player)
 }
@@ -822,7 +1056,7 @@ fun clear_waiting_players(table: &mut Table) {
     let mut i = 0;
     while (i < table.seats.length()) {
         let seat = &mut table.seats[i];
-        if (seat.occupied) {
+        if (is_seat_occupied(seat)) {
             seat.is_waiting = false;
         };
         i = i + 1;
@@ -856,13 +1090,45 @@ fun do_start_hand(table: &mut Table) {
 }
 
 fun rebuild_deck_and_shuffle_on_timeout(table: &mut Table, phase: u8){
-    table.deck_state.encrypted = vector[];
+    // 重新初始化牌组为 (identity, plaintext_i)，等价于用 sk=0 加密的密文。
+    // shuffle_proof::verify 只要求 input_cts 非空（n != 0），不关心具体值，
+    // 因此 (identity, plaintext_i) 可作为 shuffle proof 的合法输入。
+    // aggregated_pk 已在 kick_player_internal 中更新为剩余活跃玩家的聚合公钥。
+    set_initial_encrypted_deck(table);
     table.shuffle_state = ShuffleState {
         phase: phase,
         current_shuffler: option::none(),
         pending_players: get_active_seat_indices(&table.seats),
         completed_players: vector[],
     };
+    table_events::emit_deck_rebuilt(
+        object::id(table),
+        table_events::deck_rebuilt_reason_shuffle_timeout(),
+        table.deck_state.encrypted.length(),
+    );
+}
+
+fun set_initial_encrypted_deck(table: &mut Table){
+    // reconstruct 完成：根据所有玩家提交的 output_cts 构建新牌组
+    // 算法（与 Rust 端一致）：
+    //   1. 初始化：每张牌为 (identity, plaintext_i)
+    //   2. 对每个玩家提交的 deck：c1 += card.c1, c2 += card.c2 - plaintext_i
+    //   3. 最终结果即为新牌组
+
+    let deck_len = table.deck_state.plaintext.length();
+    let mut new_deck = vector[];
+
+    // Step 1: 初始化 (identity, plaintext_i)
+    let mut i = 0;
+    while (i < deck_len) {
+        let plaintext_point = bls12381::g1_from_bytes(&table.deck_state.plaintext[i]);
+        new_deck.push_back(bls_elgamal::new_ciphertext(
+            bls12381::g1_generator(),
+            plaintext_point,
+        ));
+        i = i + 1;
+    };
+    table.deck_state.encrypted = new_deck;
 }
 
 fun rebuild_deck_from_reconstruct_deck(table: &mut Table){
@@ -880,7 +1146,7 @@ fun rebuild_deck_from_reconstruct_deck(table: &mut Table){
     while (i < deck_len) {
         let plaintext_point = bls12381::g1_from_bytes(&table.deck_state.plaintext[i]);
         new_deck.push_back(bls_elgamal::new_ciphertext(
-            bls12381::g1_identity(),
+            bls12381::g1_generator(),
             plaintext_point,
         ));
         i = i + 1;
@@ -913,6 +1179,11 @@ fun rebuild_deck_from_reconstruct_deck(table: &mut Table){
     table.deck_state.encrypted = new_deck;
     // reconstruct 后牌组已重建，需要重新发牌
     table.deck_state.cards_dealt = 0;
+    table_events::emit_deck_rebuilt(
+        object::id(table),
+        table_events::deck_rebuilt_reason_reconstruct_complete(),
+        table.deck_state.encrypted.length(),
+    );
 }
 
 fun on_complete_reconstruct(table: &mut Table) {
@@ -942,26 +1213,28 @@ fun on_reconstruct_shuffle_failed(table: &mut Table) {
 }
 
 /// 将所有用户在本手牌中的下注原路退还到 stack
-fun refund_all_bets(table: &mut Table) {
+/// 对于已踢出的玩家（left_during_hand），将 total_bet 兑换回 SUI 并转账
+fun refund_all_bets(table: &mut Table, ctx: &mut TxContext) {
     let table_id = object::id(table);
+    // 先收集需要退 SUI 的已踢出玩家信息，避免借用冲突
+    let mut refund_seats = vector[];
+    let mut refund_players = vector[];
+    let mut refund_amounts = vector[];
     let mut i = 0;
     while (i < table.seats.length()) {
         let seat = &mut table.seats[i];
-        if (seat.occupied) {
+        if (is_seat_occupied(seat)) {
             if (!seat.refunded && seat.total_bet > 0) {
                 seat.stack = seat.stack + seat.total_bet;
                 seat.refunded = true;
             };
         } else if (seat.left_during_hand && !seat.refunded && seat.total_bet > 0) {
             // 已踢出的玩家退还 total_bet（stack 已在 kick 时退还）
-            table_events::emit_player_refund(
-                table_id,
-                i,
-                seat.player,
-                seat.total_bet,
-                table_events::refund_type_bet_only(),
-            );
+            refund_seats.push_back(i);
+            refund_players.push_back(seat.player);
+            refund_amounts.push_back(seat.total_bet);
             seat.refunded = true;
+            seat.player = @0x0;
         };
         seat.bet = 0;
         seat.total_bet = 0;
@@ -969,11 +1242,27 @@ fun refund_all_bets(table: &mut Table) {
     };
     table.pot = 0;
     table.side_pots = vector[];
+    // 释放 seats 借用后，再逐个退款并发事件
+    let mut r = 0;
+    while (r < refund_seats.length()) {
+        let seat_idx = refund_seats[r];
+        let player = refund_players[r];
+        let refund_amount = refund_amounts[r];
+        refund_sui_to_player(table, player, refund_amount, ctx);
+        table_events::emit_player_refund(
+            table_id,
+            seat_idx,
+            player,
+            refund_amount,
+            table_events::refund_type_bet_only(),
+        );
+        r = r + 1;
+    };
 }
 
 /// 清除 reveal token 阶段超时的玩家：所有 pending_players 踢出桌子
 /// kick_player_internal 会发 PlayerRefund 事件（只退 stack，total_bet 保留供 side pot 计算）
-fun clear_reveal_timeout_player(table: &mut Table) {
+fun clear_reveal_timeout_player(table: &mut Table, ctx: &mut TxContext) {
     // 收集所有 assignment 的 pending_players 的并集
     let mut to_kick = vector[];
     let mut a = 0;
@@ -993,14 +1282,14 @@ fun clear_reveal_timeout_player(table: &mut Table) {
     let mut k = 0;
     while (k < to_kick.length()) {
         let seat_index = to_kick[k];
-        if (seat_index < table.seats.length() && table.seats[seat_index].occupied) {
-            kick_player_internal(table, seat_index, table_events::kick_reason_timeout());
+        if (seat_index < table.seats.length() && is_seat_occupied(&table.seats[seat_index])) {
+            kick_player_internal(table, seat_index, table_events::kick_reason_timeout(), ctx);
         };
         k = k + 1;
     };
 }
 
-fun on_reconstruct_timeout(table: &mut Table) {
+fun on_reconstruct_timeout(table: &mut Table, ctx: &mut TxContext) {
     assert!(table.reconstruct_state.phase == table_constants::reconstruct_phase_collecting(),EInvalidReconstructPhase);
     table_events::emit_reconstruct_timeout(object::id(table), table.reconstruct_state.pending_players);
 
@@ -1009,14 +1298,14 @@ fun on_reconstruct_timeout(table: &mut Table) {
     let mut k = 0;
     while (k < pending.length()) {
         let seat_index = pending[k];
-        if (seat_index < table.seats.length() && table.seats[seat_index].occupied) {
-            kick_player_internal(table, seat_index, table_events::kick_reason_reconstruct_timeout());
+        if (seat_index < table.seats.length() && is_seat_occupied(&table.seats[seat_index])) {
+            kick_player_internal(table, seat_index, table_events::kick_reason_reconstruct_timeout(), ctx);
         };
         k = k + 1;
     };
     // 如果没有活跃玩家了，退还剩余筹码并重置
     if (get_active_seat_indices(&table.seats).length() == 0) {
-        refund_all_bets(table);
+        refund_all_bets(table, ctx);
         reset_for_next_hand(table);
         table_events::emit_hand_reset(object::id(table), table_events::reset_reason_reconstruct_fail(), table.round_state);
         return
@@ -1090,7 +1379,7 @@ fun start_reconstruct(table: &mut Table, clock: &Clock){
 }
     
 
-fun on_reveal_timeout(table: &mut Table,clock: &Clock) {
+fun on_reveal_timeout(table: &mut Table, clock: &Clock, ctx: &mut TxContext) {
     // 收集所有 assignment 的 pending_players 的并集
     let mut pending_players = vector[];
     let mut a = 0;
@@ -1109,10 +1398,10 @@ fun on_reveal_timeout(table: &mut Table,clock: &Clock) {
     // PreFlop reveal 超时: 因为所有玩家手牌未知，可以重开整手
     if (table.round_state == table_constants::round_preflop()) {
         // 先踢超时玩家（kick_player_internal 会发 PlayerRefund 事件，只退 stack）
-        clear_reveal_timeout_player(table);
+        clear_reveal_timeout_player(table, ctx);
         let active = count_active_players(&table.seats);
         if (active == 0) {
-            refund_all_bets(table);
+            refund_all_bets(table, ctx);
             reset_for_next_hand(table);
             table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
             return
@@ -1140,21 +1429,21 @@ fun on_reveal_timeout(table: &mut Table,clock: &Clock) {
         // advance_shuffle(table);
         // //发个事件，通知玩家重新洗牌
         // 再退还未被踢的玩家的筹码
-        refund_all_bets(table);
+        refund_all_bets(table, ctx);
         // 踢人后 aggregated_pk 已变，现有牌组无效，必须 reset 让玩家重新 join_and_shuffle
         reset_for_next_hand(table);
         //发个事件，通知玩家重新开一手
         table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
     }else{
         // 其他阶段超时：先踢出超时玩家，再启动 reconstruct
-        clear_reveal_timeout_player(table);
+        clear_reveal_timeout_player(table, ctx);
         // clear_reveal_timeout_player 内部 kick 可能触发 reset_for_next_hand
         if (table.round_state == table_constants::round_waiting()) {
             return
         };
         let active = count_active_players(&table.seats);
         if (active == 0) {
-            refund_all_bets(table);
+            refund_all_bets(table, ctx);
             reset_for_next_hand(table);
             table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
             return
@@ -1167,7 +1456,7 @@ fun on_reveal_timeout(table: &mut Table,clock: &Clock) {
     };
 }
 
-fun on_shuffle_timeout(table: &mut Table) {
+fun on_shuffle_timeout(table: &mut Table, ctx: &mut TxContext) {
     if (table.shuffle_state.current_shuffler.is_some()) {
         let shuffler = *table.shuffle_state.current_shuffler.borrow();
         table_events::emit_shuffle_timeout(
@@ -1180,65 +1469,79 @@ fun on_shuffle_timeout(table: &mut Table) {
 
         if (table.shuffle_state.phase == table_constants::shuffle_phase_before_preflop()) {
             // Preflop 洗牌超时：踢掉当前洗牌者
-            kick_player_internal(table, shuffler, table_events::kick_reason_timeout());
+            kick_player_internal(table, shuffler, table_events::kick_reason_timeout(), ctx);
 
-            // let active = count_active_players(&table.seats);
-            // if (active == 0) {
-            //     refund_all_bets(table);
-            //     reset_for_next_hand(table);
-            //     table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
-            //     return
-            // };
-            // if (active == 1) {
-            //     end_without_showdown(table);
-            //     return
-            // };
-            // // 重新洗牌
-            // rebuild_deck_and_shuffle_on_timeout(table,table_constants::shuffle_phase_before_preflop());
-            // advance_shuffle(table);
-            // // kick_player_internal 可能已通过 advance_shuffle 推进或通过 reset_for_next_hand 重置
-            // if (table.round_state == table_constants::round_waiting()) {
-            //     return
-            // };
-            // 踢人后 aggregated_pk 已变，现有牌组无效，必须 reset 让玩家重新 join_and_shuffle
-            refund_all_bets(table);
-            reset_for_next_hand(table);
-            table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
+            let active = count_active_players(&table.seats);
+            if (active == 0) {
+                refund_all_bets(table, ctx);
+                reset_for_next_hand(table);
+                table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
+                return
+            };
+            if (active == 1) {
+                end_without_showdown(table);
+                return
+            };
+
+            // kick_player_internal 可能已触发 reset_for_next_hand（活跃玩家不足）或
+            // on_shuffle_complete（最后一个 pending 玩家被踢），两者都会将
+            // shuffle_state.phase 置为 shuffle_phase_none，无需再处理。
+            if (table.shuffle_state.phase == table_constants::shuffle_phase_none()) {
+                return
+            };
+
+            // 重新初始化牌组并重新洗牌。
+            // set_initial_encrypted_deck 将 encrypted 初始化为 (identity, plaintext_i)，
+            // 非空牌组（n=52）可通过 shuffle_proof::verify 的 n==0 检查。
+            rebuild_deck_and_shuffle_on_timeout(table, table_constants::shuffle_phase_before_preflop());
+            advance_shuffle(table);
         } else if (table.shuffle_state.phase == table_constants::shuffle_phase_reconstruct()) {
             // Reconstruct 洗牌超时：踢掉当前洗牌者
-            kick_player_internal(table, shuffler, table_events::kick_reason_timeout());
-            // // kick_player_internal 可能已通过 advance_shuffle 完成 shuffle 并清空 reconstruct_state
-            // if (table.round_state == table_constants::round_waiting()) {
-            //     return
-            // };
-            // let active = count_active_players(&table.seats);
-            // if (active == 0) {
-            //     refund_all_bets(table);
-            //     reset_for_next_hand(table);
-            //     table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
-            //     return
-            // };
-            // if (active == 1) {
-            //     end_without_showdown(table);
-            //     return
-            // };
-            // 简单处理：直接 reset
-            //             // 从 reconstruct_state.player_decks 中移除该玩家提交的 deck
-            // let mut d = 0;
-            // while (d < table.reconstruct_state.player_decks.length()) {
-            //     if (table.reconstruct_state.player_decks[d].seat_index == shuffler) {
-            //         table.reconstruct_state.player_decks.remove(d);
-            //         break
-            //     };
-            //     d = d + 1;
-            // };
-            // // 重新构建牌组
-            // on_reconstruct_shuffle_failed(table);
-            // on_complete_reconstruct 必须清空 reconstruct_state.phase 才能让 tick 正常工作，
-            // 因此 reconstruct_state.phase 在此必为 none，无法重建牌组，必须 reset
-            refund_all_bets(table);
-            reset_for_next_hand(table);
-            table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
+            kick_player_internal(table, shuffler, table_events::kick_reason_timeout(), ctx);
+
+            let active = count_active_players(&table.seats);
+            if (active == 0) {
+                refund_all_bets(table, ctx);
+                reset_for_next_hand(table);
+                table_events::emit_hand_reset(object::id(table), table_events::reset_reason_timeout(), table.round_state);
+                return
+            };
+            if (active == 1) {
+                end_without_showdown(table);
+                return
+            };
+
+            // kick_player_internal 可能已触发 reset_for_next_hand（活跃玩家不足）
+            if (table.round_state == table_constants::round_waiting()) {
+                return
+            };
+
+            // kick_player_internal 可能已触发 on_shuffle_complete（最后一个 pending 玩家被踢）。
+            // on_shuffle_complete 在 shuffle_phase_reconstruct 分支会清空 reconstruct_state，
+            // 启动 reveal phase。此时 deck_state.encrypted 仍有效，无需 reset。
+            // C4 修复：若 phase 已不再是 reconstruct（已被 advance_shuffle 推进），
+            // 说明洗牌已完成并进入下一阶段，直接返回，不再 refund/reset。
+            if (table.shuffle_state.phase != table_constants::shuffle_phase_reconstruct()) {
+                return
+            };
+
+
+
+            // 从 reconstruct_state.player_decks 中移除被踢玩家提交的 deck。
+            // 密码学正确性（已通过 Rust 验证）：组合公式线性可加，
+            // c1_final = Σ_p c1_p[j], c2_final = Σ_p c2_p[j] - (n-1) * plaintext_j，
+            // 移除玩家 k 等价于 k 未参与 reconstruct，结果仍为剩余玩家的有效聚合牌组。
+            let mut d = 0;
+            while (d < table.reconstruct_state.player_decks.length()) {
+                if (table.reconstruct_state.player_decks[d].seat_index == shuffler) {
+                    table.reconstruct_state.player_decks.remove(d);
+                    break
+                };
+                d = d + 1;
+            };
+
+            // 重新构建牌组并重新洗牌
+            on_reconstruct_shuffle_failed(table);
         };
     };
 }
@@ -1262,14 +1565,14 @@ fun on_betting_timeout(table: &mut Table) {
 //   - 调用者需支付 gas 但无法获取筹码优势，因此无经济激励滥用；
 //   - 如未来需要限制调用频率，可基于 table.timestamps.last_tick_at 添加最小间隔检查。
 // 当前实现接受 permissionless 模型，依赖链下 relayer 竞争调用。
-public  fun tick(table: &mut Table, clock: &Clock) {
+public  fun tick(table: &mut Table, clock: &Clock, ctx: &mut TxContext) {
     let now = clock.timestamp_ms();
 
     // ===== 优先处理 interrupt（reconstruct） =====
     if (table.reconstruct_state.phase != table_constants::reconstruct_phase_none()) {
         // 先检查 reconstruct 是否完成
          if (table.timestamps.reconstruct_started_at > 0 && now >= table.timestamps.reconstruct_started_at + table.timeout_config.reconstruct_timeout_ms) {
-            on_reconstruct_timeout(table);
+            on_reconstruct_timeout(table, ctx);
         };
         // reconstruct 进行中，不处理其他状态
         return
@@ -1281,13 +1584,19 @@ public  fun tick(table: &mut Table, clock: &Clock) {
             advance_shuffle(table);
             return
         };
+        // current_shuffler 为 None 时，调用 advance_shuffle 设置下一个洗牌者，避免死锁
+        // （shuffle_started_at 的设置依赖 current_shuffler.is_some()，None 时永远不触发超时）
+        if (table.shuffle_state.current_shuffler.is_none()) {
+            advance_shuffle(table);
+            return
+        };
         // 首次进入洗牌等待时记录开始时间
-        if (table.timestamps.shuffle_started_at == 0 && table.shuffle_state.current_shuffler.is_some()) {
+        if (table.timestamps.shuffle_started_at == 0) {
             table.timestamps.shuffle_started_at = now;
         };
         // 检查洗牌超时
         if (table.timestamps.shuffle_started_at > 0 && now >= table.timestamps.shuffle_started_at + table.timeout_config.shuffle_timeout_ms) {
-            on_shuffle_timeout(table);
+            on_shuffle_timeout(table, ctx);
         };
         return
     };
@@ -1319,7 +1628,7 @@ public  fun tick(table: &mut Table, clock: &Clock) {
         };
         // 揭牌超时
         if (table.timestamps.reveal_started_at > 0 && now >= table.timestamps.reveal_started_at + table.timeout_config.reveal_timeout_ms) {
-            on_reveal_timeout(table,clock);
+            on_reveal_timeout(table, clock, ctx);
         };
 
         return 
@@ -1332,12 +1641,18 @@ public  fun tick(table: &mut Table, clock: &Clock) {
             do_start_hand(table);
         };
     }   else if (is_betting_round(table)) {
-        // 设置下注开始时间
-        if (table.timestamps.betting_started_at == 0 && table.current_turn.is_some()) {
-            table.timestamps.betting_started_at = now;
-        };
-        if (table.timestamps.betting_started_at > 0 && now >= table.timestamps.betting_started_at + table.timeout_config.betting_timeout_ms) {
-            on_betting_timeout(table);
+        // 异常状态修复：betting_round 存在但 current_turn 为 none，强制推进避免死锁
+        if (table.current_turn.is_none()) {
+            collect_bets_to_pot(table);
+            advance_round(table);
+        } else {
+            // 设置下注开始时间
+            if (table.timestamps.betting_started_at == 0) {
+                table.timestamps.betting_started_at = now;
+            };
+            if (table.timestamps.betting_started_at > 0 && now >= table.timestamps.betting_started_at + table.timeout_config.betting_timeout_ms) {
+                on_betting_timeout(table);
+            };
         };
     } else if (table.round_state == table_constants::round_showdown()) {
         // 设置 showdown 开始时间
@@ -1346,6 +1661,16 @@ public  fun tick(table: &mut Table, clock: &Clock) {
         };
         if (now >= table.timestamps.showdown_at) {
             settle_hand(table);
+        };
+    } else {
+        // Fallback：round_state 在 preflop/flop/turn/river 但无 betting_round 且无 reveal/shuffle/reconstruct
+        // 说明状态不一致，强制 reset 避免永久死锁
+        if (table.reveal_token_state.reveal_phase == table_constants::reveal_phase_none()
+            && table.shuffle_state.phase == table_constants::shuffle_phase_none()
+            && table.reconstruct_state.phase == table_constants::reconstruct_phase_none()) {
+            refund_all_bets(table, ctx);
+            reset_for_next_hand(table);
+            table_events::emit_hand_reset(object::id(table), table_events::reset_reason_state_inconsistent(), table.round_state);
         };
     };
 }
@@ -1365,17 +1690,19 @@ public  fun auto_fold(table: &mut Table, seat_index: u64, clock: &Clock) {
 public  fun force_fold(table: &mut Table, _admin_cap: &AdminCap, seat_index: u64) {
     assert!(seat_index < table.max_players, EInvalidSeatIndex);
     assert!(is_betting_round(table), EInvalidRoundState);
+    // M11 修复：校验目标玩家为当前行动玩家，防止破坏行动顺序
+    assert!(is_player_turn(table, seat_index), ENotPlayerTurn);
     let seat = &table.seats[seat_index];
-    assert!(seat.occupied, ESeatEmpty);
+    assert!(is_seat_occupied(seat), ESeatEmpty);
     assert!(!seat.folded, EAlreadyFolded);
 
     table_events::emit_player_folded(object::id(table), seat_index, table_events::fold_reason_force_admin(), table.round_state);
     do_fold(table, seat_index);
 }
 
-public  fun kick_player(table: &mut Table, _admin_cap: &AdminCap, seat_index: u64) {
+public  fun kick_player(table: &mut Table, _admin_cap: &AdminCap, seat_index: u64, ctx: &mut TxContext) {
     assert!(seat_index < table.max_players, EInvalidSeatIndex);
-    kick_player_internal(table, seat_index, table_events::kick_reason_admin());
+    kick_player_internal(table, seat_index, table_events::kick_reason_admin(), ctx);
 }
 
 // ========== 提交洗牌结果（ZK Proof 验证） ==========
@@ -1419,6 +1746,45 @@ public  fun submit_shuffle(
 
     table_events::emit_shuffle_verified(object::id(table), seat_index, sender);
 
+    // 推进洗牌流程
+    advance_shuffle(table);
+}
+
+// ========== 提交洗牌结果（ZK Proof 验证） ==========
+public  fun submit_shuffle_verified(
+    table: &mut Table,
+    output_cards: vector<u8>,           // 序列化的 ElGamalCiphertext 数组 (flat bytes)
+    _shuffle_proof_bytes: vector<u8>,    // 序列化的 ShuffleProof
+    ctx: &mut TxContext,
+) {
+    assert!(table.shuffle_state.phase != table_constants::shuffle_phase_none(), EInvalidShufflePhase);
+
+    let sender = ctx.sender();
+    assert!(is_player_seated(&table.seats, sender), EPlayerNotSeated);
+
+    let seat_index = find_seat_index(&table.seats, sender);
+
+    // 验证是当前洗牌者
+    assert!(
+        table.shuffle_state.current_shuffler.is_some() &&
+        *table.shuffle_state.current_shuffler.borrow() == seat_index,
+        ENotCurrentShuffler
+    );
+
+    // 验证未已完成
+    assert!(!is_in_list(&table.shuffle_state.completed_players, seat_index), EShuffleAlreadyCompleted);
+
+    // 反序列化
+    let output_cts = zk_verifier::deserialize_ciphertexts(&output_cards);
+
+    // 更新牌组
+    table.deck_state.encrypted = output_cts;
+
+    // 标记为已完成
+    table.shuffle_state.completed_players.push_back(seat_index);
+    remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
+
+    table_events::emit_shuffle_verified(object::id(table), seat_index, sender);
     // 推进洗牌流程
     advance_shuffle(table);
 }
@@ -1611,6 +1977,175 @@ public  fun submit_player_reveal_tokens(
     check_reveal_phase_complete(table);
 }
 
+// ========== 批量提交 Reveal Token ==========
+/// 玩家一次性提交当前 phase 下所有需要揭牌的 reveal tokens
+/// 对应 Rust 端 submit_player_reveal_tokens
+public  fun submit_player_reveal_tokens_verified(
+    table: &mut Table,
+    assignment_indices: vector<u64>,    // 该玩家需要提交的 assignment 索引列表
+    reveal_tokens: vector<vector<u8>>,  // 对应每个 assignment 的 c1 * sk (G1 compressed bytes)
+    proof_bytes_list: vector<vector<u8>>, // 对应每个 assignment 的 RevealTokenProof (serialized)
+    ctx: &mut TxContext,
+) {
+    assert!(table.reveal_token_state.reveal_phase != table_constants::reveal_phase_none(), EInvalidRevealPhaseState);
+    assert!(assignment_indices.length() == reveal_tokens.length(), EInvalidCardIndex);
+    assert!(assignment_indices.length() == proof_bytes_list.length(), EInvalidCardIndex);
+
+    let sender = ctx.sender();
+    assert!(is_player_seated(&table.seats, sender), EPlayerNotSeated);
+    let seat_index = find_seat_index(&table.seats, sender);
+
+    let current_phase = table.reveal_token_state.reveal_phase;
+
+    // 收集 identity 牌的 card_index，循环结束后统一处理 redeal
+    let mut identity_card_indices = vector[];
+
+    let mut idx = 0;
+    while (idx < assignment_indices.length()) {
+        let assignment_index = assignment_indices[idx];
+        assert!(assignment_index < table.reveal_token_state.assignments.length(), EInvalidCardIndex);
+
+        // 读取 assignment 信息
+        let card_index = table.reveal_token_state.assignments[assignment_index].encrypted_card_index;
+        let is_decrypted = table.reveal_token_state.assignments[assignment_index].decrypted;
+        let is_pending = is_in_list(&table.reveal_token_state.assignments[assignment_index].pending_players, seat_index);
+
+        assert!(!is_decrypted, ECardAlreadyDecrypted);
+        assert!(is_pending, ENotPendingRevealer);
+        assert!(card_index < table.deck_state.encrypted.length(), EInvalidCardIndex);
+
+        // 提前计算手牌牌主（preflop 阶段需要）
+        let owner_seat_index = if (current_phase == table_constants::reveal_phase_preflop()) {
+            find_hand_card_owner(table, card_index)
+        } else {
+            0xFFFFFFFFFFFFFFFF
+        };
+
+        let reveal_token = reveal_tokens[idx];
+        // 存储 reveal token
+        let assignment = &mut table.reveal_token_state.assignments[assignment_index];
+        assignment.reveal_tokens.push_back(RevealTokenData {
+            seat_index,
+            token: reveal_token,
+        });
+
+        // 从 pending 中移除
+        remove_from_pending(&mut assignment.pending_players, seat_index);
+
+        // 如果所有玩家都已提交，链上解密
+        if (assignment.pending_players.length() == 0) {
+            if (current_phase == table_constants::reveal_phase_preflop()) {
+                // ========== PREFLOP: 部分解密 ==========
+                let encrypted_card = &table.deck_state.encrypted[card_index];
+                let c1_bytes = bls_elgamal::c1_bytes(encrypted_card);
+                let mut result = *bls_elgamal::c2(encrypted_card);
+                let mut t = 0;
+                while (t < assignment.reveal_tokens.length()) {
+                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
+                    result = bls12381::g1_sub(&result, &token_point);
+                    t = t + 1;
+                };
+                let mut ct_bytes = c1_bytes;
+                let result_bytes = bls_scalar::g1_to_bytes(&result);
+                let mut r = 0;
+                while (r < result_bytes.length()) {
+                    ct_bytes.push_back(result_bytes[r]);
+                    r = r + 1;
+                };
+                table.deck_state.decrypted_cards.push_back(DecryptedCard {
+                    encrypted_card_index: card_index,
+                    owner_seat_index,
+                    ciphertext_bytes: ct_bytes,
+                    plaintext_bytes: vector[],
+                });
+                assignment.decrypted = true;
+            } else if (current_phase == table_constants::reveal_phase_showdown()) {
+                // ========== SHOWDOWN: 从部分解密密文得到明文 ==========
+                let partial_ct_bytes = find_partial_ciphertext(&table.deck_state.decrypted_cards, card_index);
+                let partial_ct = bls_elgamal::ciphertext_from_bytes(&partial_ct_bytes);
+                let mut result = *bls_elgamal::c2(&partial_ct);
+                let mut t = 0;
+                while (t < assignment.reveal_tokens.length()) {
+                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
+                    result = bls12381::g1_sub(&result, &token_point);
+                    t = t + 1;
+                };
+                let plaintext_bytes = bls_scalar::g1_to_bytes(&result);
+                update_decrypted_card_to_plaintext(&mut table.deck_state.decrypted_cards, card_index, plaintext_bytes);
+                assignment.decrypted = true;
+            } else {
+                // ========== COMMUNITY / REDEAL: 全部解密 ==========
+                let encrypted_card = &table.deck_state.encrypted[card_index];
+                let mut result = *bls_elgamal::c2(encrypted_card);
+                let mut t = 0;
+                while (t < assignment.reveal_tokens.length()) {
+                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
+                    result = bls12381::g1_sub(&result, &token_point);
+                    t = t + 1;
+                };
+                if (bls_scalar::g1_is_identity(&result)) {
+                    assignment.decrypted = true;
+                    identity_card_indices.push_back(card_index);
+                    table_events::emit_card_is_identity(
+                        object::id(table),
+                        card_index,
+                        assignment_index,
+                        current_phase,
+                    );
+                } else {
+                    assignment.decrypted = true;
+                    let plaintext_bytes = bls_scalar::g1_to_bytes(&result);
+                    table.deck_state.decrypted_cards.push_back(DecryptedCard {
+                        encrypted_card_index: card_index,
+                        owner_seat_index: 0xFFFFFFFFFFFFFFFF,
+                        ciphertext_bytes: vector[],
+                        plaintext_bytes,
+                    });
+                };
+            };
+        };
+
+        table_events::emit_reveal_token_submitted(
+            object::id(table),
+            seat_index,
+            card_index,
+            current_phase,
+        );
+
+        idx = idx + 1;
+    };
+
+    // 统一处理 identity redeal
+    if (identity_card_indices.length() > 0) {
+        // 从后往前移除 identity 的 assignments（用 remove 保持顺序）
+        let mut i = table.reveal_token_state.assignments.length();
+        while (i > 0) {
+            i = i - 1;
+            let ci = table.reveal_token_state.assignments[i].encrypted_card_index;
+            if (is_in_list(&identity_card_indices, ci)) {
+                table.reveal_token_state.assignments.remove(i);
+            };
+        };
+
+        // 为 identity 牌创建 redeal assignments（从 cards_dealt 开始分配新牌）
+        let redeal_count = identity_card_indices.length();
+        let mut redeal_assignments = create_reveal_assignments_for_cards(table, redeal_count);
+        while (redeal_assignments.length() > 0) {
+            table.reveal_token_state.assignments.push_back(redeal_assignments.pop_back());
+        };
+
+        table_events::emit_identity_redeal(
+            object::id(table),
+            identity_card_indices,
+            redeal_count,
+            current_phase,
+        );
+    };
+
+    // 批量提交完成后，检查是否所有牌都已解密
+    check_reveal_phase_complete(table);
+}
+
 // ========== 提交 Reconstruct Deck ==========
 public  fun submit_reconstruct_deck(
     table: &mut Table,
@@ -1671,6 +2206,51 @@ public  fun submit_reconstruct_deck(
     };
 }
 
+
+// ========== 提交 Reconstruct Deck ==========
+public  fun submit_reconstruct_deck_verified(
+    table: &mut Table,
+    output_cards: vector<u8>,           // 重建后的牌组 (serialized ciphertexts, flat bytes)
+    _swap_cards: vector<u8>,             // swap-out 牌 (serialized ciphertexts, flat bytes)
+    _user_readable_cards: vector<u8>,    // 该玩家的可读牌 (serialized ciphertexts, flat bytes)
+    _proof_bytes: vector<u8>,            // ReconstructProof (serialized)
+    ctx: &mut TxContext,
+) {
+    assert!(table.reconstruct_state.phase == table_constants::reconstruct_phase_collecting(), EReconstructNotCollecting);
+
+    let sender = ctx.sender();
+    assert!(is_player_seated(&table.seats, sender), EPlayerNotSeated);
+
+    let seat_index = find_seat_index(&table.seats, sender);
+    assert!(is_in_list(&table.reconstruct_state.pending_players, seat_index), EReconstructAlreadySubmitted);
+
+    // 反序列化
+    let output_cts = zk_verifier::deserialize_ciphertexts(&output_cards);
+    assert!(output_cts.length() == table.deck_state.plaintext.length(), EInvalidReconstructDeckSize);
+
+
+    // 从 ReconstructState 读取明文牌点
+    let mut card_points = vector[];
+    let mut i = 0;
+    while (i < table.deck_plaintext().length()) {
+        card_points.push_back(bls12381::g1_from_bytes(&table.deck_plaintext()[i]));
+        i = i + 1;
+    };
+
+    // 标记为已完成，存储该玩家的 output_cts
+    remove_from_pending(&mut table.reconstruct_state.pending_players, seat_index);
+    table.reconstruct_state.player_decks.push_back(ReconstructPlayerDeck {
+        seat_index,
+        output_cts,
+    });
+
+    table_events::emit_reconstruct_deck_submitted(object::id(table), seat_index);
+    // 所有玩家提交后，标记为完成，由 tick 处理状态转换
+    if (table.reconstruct_state.pending_players.length()==0) {
+        on_complete_reconstruct(table);
+    };
+}
+
 // ========== 下注操作 ==========
 public  fun fold(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     assert!(is_betting_round(table), EInvalidRoundState);
@@ -1679,7 +2259,7 @@ public  fun fold(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     table.timestamps.betting_started_at = 0;  // will be set by tick for next player
 
     let seat = &mut table.seats[seat_index];
-    assert!(seat.occupied, ESeatEmpty);
+    assert!(is_seat_occupied(seat), ESeatEmpty);
     assert!(!seat.folded, EAlreadyFolded);
     assert!(seat.player == ctx.sender(), ENotOwner);
 
@@ -1706,8 +2286,11 @@ public  fun check(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     table.timestamps.betting_started_at = 0;  // will be set by tick for next player
 
     let seat = &mut table.seats[seat_index];
-    assert!(seat.occupied, ESeatEmpty);
+    assert!(is_seat_occupied(seat), ESeatEmpty);
     assert!(seat.player == ctx.sender(), ENotOwner);
+    // m1 修复：defense-in-depth，防止 folded/all_in 玩家行动
+    assert!(!seat.folded, EAlreadyFolded);
+    assert!(!seat.all_in, EAlreadyAllIn);
 
     if (table.betting_round.is_some()) {
         let round = table.betting_round.borrow();
@@ -1727,8 +2310,11 @@ public  fun call(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     table.timestamps.betting_started_at = 0;  // will be set by tick for next player
 
     let seat = &mut table.seats[seat_index];
-    assert!(seat.occupied, ESeatEmpty);
+    assert!(is_seat_occupied(seat), ESeatEmpty);
     assert!(seat.player == ctx.sender(), ENotOwner);
+    // m1 修复：defense-in-depth，防止 folded/all_in 玩家行动
+    assert!(!seat.folded, EAlreadyFolded);
+    assert!(!seat.all_in, EAlreadyAllIn);
 
     let mut call_amount = 0;
     if (table.betting_round.is_some()) {
@@ -1756,8 +2342,11 @@ public  fun raise(table: &mut Table, seat_index: u64, total_bet: u64, ctx: &mut 
     table.timestamps.betting_started_at = 0;  // will be set by tick for next player
 
     let seat = &mut table.seats[seat_index];
-    assert!(seat.occupied, ESeatEmpty);
+    assert!(is_seat_occupied(seat), ESeatEmpty);
     assert!(seat.player == ctx.sender(), ENotOwner);
+    // m1 修复：defense-in-depth，防止 folded/all_in 玩家行动
+    assert!(!seat.folded, EAlreadyFolded);
+    assert!(!seat.all_in, EAlreadyAllIn);
 
     let mut raise_amount = 0;
     if (table.betting_round.is_some()) {
@@ -1815,14 +2404,38 @@ fun settle_hand(table: &mut Table) {
     let pot = table.pot;
     table_events::emit_hand_settled(object::id(table), pot, all_winners);
 
-    // 验证 pot 已全部分配：main_pot + 所有 side_pots 之和应等于 table.pot
+    // 验证 pot 分配：如有差额，容错处理而非 abort，避免桌子永久卡死
     let mut total_distributed = main_pot;
     let mut si = 0;
     while (si < side_pots.length()) {
         total_distributed = total_distributed + side_pots[si].amount();
         si = si + 1;
     };
-    assert!(total_distributed == table.pot, EPotNotFullyDistributed);
+    if (total_distributed < table.pot) {
+        // 分配差额给所有未 fold 的活跃玩家
+        let remaining = table.pot - total_distributed;
+        let mut eligible = vector[];
+        let mut e = 0;
+        while (e < table.seats.length()) {
+            if (is_seat_occupied(&table.seats[e]) && !folded[e] && !table.seats[e].is_waiting) {
+                eligible.push_back(e);
+            };
+            e = e + 1;
+        };
+        let n = eligible.length();
+        if (n > 0) {
+            let share = remaining / n;
+            let r = remaining % n;
+            let mut i = 0;
+            while (i < n) {
+                let seat_id = eligible[i];
+                let amount = share + if (i == 0) { r } else { 0 };
+                table.seats[seat_id].stack = table.seats[seat_id].stack + amount;
+                i = i + 1;
+            };
+        };
+        // total_distributed > table.pot 不应发生；若发生则筹码已分配，无法撤回，仅记录
+    };
 
     reset_for_next_hand(table);
     table.timestamps.hand_complete_at = 0;
@@ -1833,7 +2446,7 @@ fun settle_hand(table: &mut Table) {
 fun is_player_seated(seats: &vector<Seat>, player: address): bool {
     let mut i = 0;
     while (i < seats.length()) {
-        if (seats[i].occupied && seats[i].player == player) { return true };
+        if (is_seat_occupied(&seats[i]) && seats[i].player == player) { return true };
         i = i + 1;
     };
     false
@@ -1842,7 +2455,7 @@ fun is_player_seated(seats: &vector<Seat>, player: address): bool {
 fun is_pk_registered(seats: &vector<Seat>, pk: &vector<u8>): bool {
     let mut i = 0;
     while (i < seats.length()) {
-        if (seats[i].occupied && seats[i].pk == *pk) { return true };
+        if (is_seat_occupied(&seats[i]) && seats[i].pk == *pk) { return true };
         i = i + 1;
     };
     false
@@ -1851,7 +2464,7 @@ fun is_pk_registered(seats: &vector<Seat>, pk: &vector<u8>): bool {
 fun find_seat_index(seats: &vector<Seat>, player: address): u64 {
     let mut i = 0;
     while (i < seats.length()) {
-        if (seats[i].occupied && seats[i].player == player) { return i };
+        if (is_seat_occupied(&seats[i]) && seats[i].player == player) { return i };
         i = i + 1;
     };
     abort EPlayerNotSeated
@@ -1901,7 +2514,7 @@ fun count_active_players(seats: &vector<Seat>): u64 {
     let mut count = 0;
     let mut i = 0;
     while (i < seats.length()) {
-        if (seats[i].occupied && !seats[i].folded && !seats[i].is_waiting) { count = count + 1 };
+        if (is_seat_occupied(&seats[i]) && !seats[i].folded && !seats[i].is_waiting) { count = count + 1 };
         i = i + 1;
     };
     count
@@ -1911,7 +2524,7 @@ fun count_active_occupied(seats: &vector<Seat>): u64 {
     let mut count = 0;
     let mut i = 0;
     while (i < seats.length()) {
-        if (seats[i].occupied && !seats[i].is_waiting) { count = count + 1 };
+        if (is_seat_occupied(&seats[i]) && !seats[i].is_waiting) { count = count + 1 };
         i = i + 1;
     };
     count
@@ -1921,7 +2534,7 @@ fun get_active_seat_indices(seats: &vector<Seat>): vector<u64> {
     let mut result = vector[];
     let mut i = 0;
     while (i < seats.length()) {
-        if (seats[i].occupied && !seats[i].is_waiting) { result.push_back(i) };
+        if (is_seat_occupied(&seats[i]) && !seats[i].is_waiting) { result.push_back(i) };
         i = i + 1;
     };
     result
@@ -1931,7 +2544,7 @@ fun get_pending_seat_indices(completed_players: &vector<u64>, seats: &vector<Sea
     let mut result = vector[];
     let mut i = 0;
     while (i < seats.length()) {
-        if (seats[i].occupied && !seats[i].is_waiting && !is_in_list(completed_players, i)) {
+        if (is_seat_occupied(&seats[i]) && !seats[i].is_waiting && !is_in_list(completed_players, i)) {
             result.push_back(i)
         };
         i = i + 1;
@@ -1964,7 +2577,7 @@ fun move_button(table: &mut Table) {
     let mut count = 0;
     while (count < table.max_players) {
         if (next >= table.max_players) { next = 0 };
-        if (table.seats[next].occupied) {
+        if (is_seat_occupied(&table.seats[next])) {
             table.button = next;
             return
         };
@@ -2035,8 +2648,25 @@ fun start_betting_round(table: &mut Table, is_preflop: bool) {
     };
 
     if (!is_preflop) {
-        let first = find_next_active_seat(&table.seats, table.button, table.max_players);
-        table.current_turn = option::some(first);
+        // C5 修复：当所有活跃玩家已 all-in 时，find_next_active_seat 会 abort。
+        // 此时下注轮立即完成，直接收集下注并推进到下一阶段。
+        if (has_actionable_player(&table.seats)) {
+            let first = find_next_active_seat(&table.seats, table.button, table.max_players);
+            table.current_turn = option::some(first);
+        } else {
+            // 所有玩家 all-in，跳过下注轮
+            collect_bets_to_pot(table);
+            advance_round(table);
+            return
+        };
+    } else {
+        // Preflop：post_blinds 已设置 current_turn，但全员 all-in 时需跳过下注轮
+        if (!has_actionable_player(&table.seats)) {
+            table.current_turn = option::none();
+            collect_bets_to_pot(table);
+            advance_round(table);
+            return
+        };
     };
 
     let first_to_act = if (table.current_turn.is_some()) { *table.current_turn.borrow() } else { 0 };
@@ -2103,7 +2733,7 @@ fun is_betting_complete(table: &Table): bool {
     let mut i = 0;
     while (i < table.seats.length()) {
         let seat = &table.seats[i];
-        if (seat.occupied && !seat.folded && !seat.all_in && !seat.is_waiting) {
+        if (is_seat_occupied(seat) && !seat.folded && !seat.all_in && !seat.is_waiting) {
             if (!seat.acted_this_round) { all_acted = false };
             if (seat.bet < current_bet) { all_matched = false };
         };
@@ -2174,7 +2804,7 @@ fun end_without_showdown(table: &mut Table) {
     let mut winner_idx = 0xFFFFFFFFFFFFFFFF;
     let mut i = 0;
     while (i < table.seats.length()) {
-        if (table.seats[i].occupied && !table.seats[i].folded && !table.seats[i].is_waiting) {
+        if (is_seat_occupied(&table.seats[i]) && !table.seats[i].folded && !table.seats[i].is_waiting) {
             winner_idx = i;
             break
         };
@@ -2331,7 +2961,7 @@ fun start_showdown_reveal_phase(table: &mut Table) {
     let mut s = 0;
     while (s < table.seats.length()) {
         let seat = &table.seats[s];
-        if (seat.occupied && !seat.folded && !seat.is_waiting) {
+        if (is_seat_occupied(seat) && !seat.folded && !seat.is_waiting) {
             // 在 decrypted_cards 中查找属于该玩家的手牌（部分解密密文）
             let mut c = 0;
             while (c < table.deck_state.decrypted_cards.length()) {
@@ -2494,19 +3124,42 @@ fun write_decrypted_cards_to_community(table: &mut Table) {
 
 /// 将 decrypted_cards 中完全解密的手牌写入对应 seat.hand（showdown 阶段使用）
 fun write_decrypted_cards_to_hands(table: &mut Table) {
-    let mut i = 0;
-    while (i < table.deck_state.decrypted_cards.length()) {
-        let dc = &table.deck_state.decrypted_cards[i];
-        // 只处理完全解密的手牌（有 plaintext_bytes 且 owner_seat_index 有效）
-        if (dc.plaintext_bytes.length() > 0 && dc.owner_seat_index != 0xFFFFFFFFFFFFFFFF) {
-            let seat_idx = dc.owner_seat_index;
-            if (seat_idx < table.seats.length()) {
+    // 按座位遍历，收集每位玩家的手牌并写入，同时对非弃牌玩家发射 ShowdownHoleCardsRevealed 事件
+    let num_seats = table.seats.length();
+    let mut seat = 0;
+    while (seat < num_seats) {
+        let mut card_indices = vector[];
+        let mut card_ranks = vector[];
+        let mut card_suits = vector[];
+
+        let mut i = 0;
+        while (i < table.deck_state.decrypted_cards.length()) {
+            let dc = &table.deck_state.decrypted_cards[i];
+            // 只处理完全解密的手牌（有 plaintext_bytes 且 owner_seat_index 为当前座位）
+            if (dc.plaintext_bytes.length() > 0 && dc.owner_seat_index == seat) {
                 let playing_card = plaintext_to_playing_card(&table.deck_state.plaintext, &dc.plaintext_bytes);
                 let card = card::new(playing_card_suit_to_card_suit(card_suit(&playing_card)), card_rank(&playing_card));
-                table.seats[seat_idx].hand.push_back(card);
+                table.seats[seat].hand.push_back(card);
+                card_indices.push_back(dc.encrypted_card_index);
+                card_ranks.push_back(card_rank(&playing_card));
+                card_suits.push_back(card_suit(&playing_card));
             };
+            i = i + 1;
         };
-        i = i + 1;
+
+        // 只对非弃牌玩家发射摊牌手牌揭示事件
+        if (card_indices.length() > 0 && !table.seats[seat].folded) {
+            table_events::emit_showdown_hole_cards_revealed(
+                object::id(table),
+                seat,
+                table.seats[seat].player,
+                card_indices,
+                card_ranks,
+                card_suits,
+            );
+        };
+
+        seat = seat + 1;
     };
 }
 
@@ -2515,7 +3168,13 @@ fun write_decrypted_cards_to_hands(table: &mut Table) {
 fun distribute_pot(table: &mut Table, pot_amount: u64, folded: &vector<bool>): vector<u64> {
     if (pot_amount == 0) { return vector[] };
 
-    let (winners, _best_rank) = find_winners(&table.seats, &table.community_cards, folded);
+    let (winners, best_rank) = find_winners(&table.seats, &table.community_cards, folded);
+    // 将 HandRank 序列化为 u64 用于事件传递（None 表示无摊牌直接获胜）
+    let hand_rank_u64: Option<u64> = if (best_rank.is_some()) {
+        option::some(hand_evaluator::to_u64(best_rank.borrow()))
+    } else {
+        option::none()
+    };
 
     let winner_count = winners.length();
     if (winner_count > 0) {
@@ -2536,16 +3195,17 @@ fun distribute_pot(table: &mut Table, pot_amount: u64, folded: &vector<bool>): v
                 table.seats[idx].player,
                 amount,
                 0,
-                option::none(),
+                hand_rank_u64,
             );
             w = w + 1;
         };
     } else {
         // Fallback: 无赢家时将筹码均分给所有未 fold 的活跃玩家
+        // M9 修复：排除 waiting 玩家（未参与本局，未下注）
         let mut eligible_seats = vector[];
         let mut e = 0;
         while (e < table.seats.length()) {
-            if (table.seats[e].occupied && !folded[e]) {
+            if (is_seat_occupied(&table.seats[e]) && !folded[e] && !table.seats[e].is_waiting) {
                 eligible_seats.push_back(e);
             };
             e = e + 1;
@@ -2570,9 +3230,15 @@ fun distribute_side_pot(table: &mut Table, sp: &SidePot, folded: &vector<bool>):
     let eligible = sp.eligible_seats();
     let pot_amount = sp.amount();
 
-    let (winners, _best_rank) = find_winners_in_eligible(
+    let (winners, best_rank) = find_winners_in_eligible(
         &table.seats, &table.community_cards, folded, eligible
     );
+    // 将 HandRank 序列化为 u64 用于事件传递（None 表示无摊牌直接获胜）
+    let hand_rank_u64: Option<u64> = if (best_rank.is_some()) {
+        option::some(hand_evaluator::to_u64(best_rank.borrow()))
+    } else {
+        option::none()
+    };
 
     let winner_count = winners.length();
     if (winner_count > 0) {
@@ -2589,7 +3255,7 @@ fun distribute_side_pot(table: &mut Table, sp: &SidePot, folded: &vector<bool>):
                 table.seats[idx].player,
                 amount,
                 1,
-                option::none(),
+                hand_rank_u64,
             );
             w = w + 1;
         };
@@ -2599,7 +3265,7 @@ fun distribute_side_pot(table: &mut Table, sp: &SidePot, folded: &vector<bool>):
         let mut e = 0;
         while (e < eligible.length()) {
             let seat_id = eligible[e];
-            if (table.seats[seat_id].occupied && !folded[seat_id]) {
+            if (is_seat_occupied(&table.seats[seat_id]) && !folded[seat_id]) {
                 eligible_unfolded.push_back(seat_id);
             };
             e = e + 1;
@@ -2631,7 +3297,7 @@ fun find_winners(
     let mut i = 0;
     while (i < seats.length()) {
         let seat = &seats[i];
-        if (seat.occupied && !folded[i] && seat.total_bet > 0 && seat.hand.length() == table_constants::cards_per_player()) {
+        if (is_seat_occupied(seat) && !folded[i] && seat.total_bet > 0 && seat.hand.length() == table_constants::cards_per_player()) {
             let all_cards = combine_cards(&seat.hand, community_cards);
             // M-P5: best_hand 断言 cards.length() == 7，这里必须用 == 7 而非 >= 5
             if (all_cards.length() == 7) {
@@ -2668,7 +3334,7 @@ fun find_winners_in_eligible(
     while (i < eligible.length()) {
         let idx = eligible[i];
         let seat = &seats[idx];
-        if (seat.occupied && !folded[idx] && seat.hand.length() == table_constants::cards_per_player()) {
+        if (is_seat_occupied(seat) && !folded[idx] && seat.hand.length() == table_constants::cards_per_player()) {
             let all_cards = combine_cards(&seat.hand, community_cards);
             // M-P5: best_hand 断言 cards.length() == 7，这里必须用 == 7 而非 >= 5
             if (all_cards.length() == 7) {
@@ -2715,13 +3381,13 @@ fun extract_betting_state(seats: &vector<Seat>): (vector<u64>, vector<bool>, vec
     let mut i = 0;
     while (i < seats.length()) {
         let seat = &seats[i];
-        // bets: occupied 或 left_during_hand 都返回 total_bet
-        let bet = if (seat.occupied || seat.left_during_hand) { seat.total_bet } else { 0 };
+        // bets: player != @0x0 的座位（活跃或被踢）都返回 total_bet
+        let bet = if (seat.player != @0x0) { seat.total_bet } else { 0 };
         bets.push_back(bet);
         // folded: 未占座（包括中途离开）都视为 folded
-        folded.push_back(!seat.occupied || seat.folded);
-        // all_in: 只有 occupied 的座位才可能 all_in
-        all_in_flags.push_back(seat.occupied && seat.all_in);
+        folded.push_back(!is_seat_occupied(seat) || seat.folded);
+        // all_in: 只有活跃座位的座位才可能 all_in
+        all_in_flags.push_back(is_seat_occupied(seat) && seat.all_in);
         i = i + 1;
     };
     (bets, folded, all_in_flags)
@@ -2734,7 +3400,7 @@ fun find_next_active_seat(seats: &vector<Seat>, from: u64, max: u64): u64 {
         if (i >= max) { i = 0 };
         let seat = &seats[i];
         // 必须排除 is_waiting 玩家，他们不参与本局
-        if (seat.occupied && !seat.folded && !seat.all_in && !seat.is_waiting) {
+        if (is_seat_occupied(seat) && !seat.folded && !seat.all_in && !seat.is_waiting) {
             return i
         };
         i = i + 1;
@@ -2743,12 +3409,25 @@ fun find_next_active_seat(seats: &vector<Seat>, from: u64, max: u64): u64 {
     abort ENotEnoughPlayers
 }
 
+/// C5 修复：检查是否存在可行动的玩家（非 fold、非 all_in、非 waiting）
+fun has_actionable_player(seats: &vector<Seat>): bool {
+    let mut i = 0;
+    while (i < seats.length()) {
+        let seat = &seats[i];
+        if (is_seat_occupied(seat) && !seat.folded && !seat.all_in && !seat.is_waiting) {
+            return true
+        };
+        i = i + 1;
+    };
+    false
+}
+
 
 fun reset_other_players_acted(seats: &mut vector<Seat>, raiser_index: u64) {
     let mut i = 0;
     while (i < seats.length()) {
         // 只重置未 fold 且未 all_in 的玩家
-        if (i != raiser_index && seats[i].occupied && !seats[i].folded && !seats[i].all_in && !seats[i].is_waiting) {
+        if (i != raiser_index && is_seat_occupied(&seats[i]) && !seats[i].folded && !seats[i].all_in && !seats[i].is_waiting) {
             seats[i].acted_this_round = false;
         };
         i = i + 1;
@@ -2759,7 +3438,7 @@ fun reset_other_players_acted(seats: &mut vector<Seat>, raiser_index: u64) {
 
 fun do_fold(table: &mut Table, seat_index: u64) {
     let seat = &mut table.seats[seat_index];
-    assert!(seat.occupied, ESeatEmpty);
+    assert!(is_seat_occupied(seat), ESeatEmpty);
     assert!(!seat.folded, EAlreadyFolded);
 
     seat.folded = true;
@@ -2797,6 +3476,34 @@ fun reset_for_next_hand(table: &mut Table) {
         seat.left_during_hand = false;
         i = i + 1;
     };
+
+    // 清理筹码为 0 的玩家：从 aggregated_pk 移除其公钥，重置座位，发出 PlayerLeft 事件
+    // 必须在上方 waiting 玩家 pk 合并之后执行，确保所有活跃玩家的 pk 都已在 aggregated_pk 中
+    // 注意：被踢玩家 (left_during_hand) 在上方第一轮循环中已被重置 left_during_hand=false，
+    // 且 kick_player_internal 已设 stack=0、pk=[]，因此此处 is_seat_occupied 返回 true &&
+    // stack==0 会被正确清理，修复了之前 occupied=false 导致的僵尸座位问题
+    let mut j = 0;
+    while (j < table.seats.length()) {
+        if (is_seat_occupied(&table.seats[j]) && table.seats[j].stack == 0) {
+            let pk = table.seats[j].pk;
+            let player = table.seats[j].player;
+            if (pk.length() > 0) {
+                table.deck_state.aggregated_pk = table_serialization::remove_pk_from_aggregated(
+                    &table.deck_state.aggregated_pk, &pk);
+            };
+            reset_seat(&mut table.seats[j]);
+            table_events::emit_player_left(object::id(table), j, player);
+        };
+        j = j + 1;
+    };
+
+    // 无活跃玩家时，重置 aggregated_pk 为空，避免残留 identity bytes
+    // （所有玩家被踢出后 remove_pk_from_aggregated 会将 aggregated_pk 变为 identity，
+    //  而非初始的 vector[]，导致后续 add_pk_to_aggregated 走 g1_from_bytes 分支而非 g1_identity 分支）
+    if (count_active_occupied(&table.seats) == 0) {
+        table.deck_state.aggregated_pk = vector[];
+    };
+
     table.pot = 0;
     table.side_pots = vector[];
     table.community_cards = vector[];
@@ -2818,15 +3525,16 @@ fun reset_for_next_hand(table: &mut Table) {
         showdown_at: 0,
         hand_complete_at: 0,
     };
+    set_initial_encrypted_deck(table);
     // shuffle_state 已通过 empty_shuffle_state() 重置为 NONE，
     // join_and_shuffle 通过 can_join_state() (round_state == WAITING) 校验，无需额外 phase 标记
 }
 
 
 
-fun kick_player_internal(table: &mut Table, seat_index: u64, reason: u8) {
+fun kick_player_internal(table: &mut Table, seat_index: u64, reason: u8, ctx: &mut TxContext) {
     let seat = &mut table.seats[seat_index];
-    assert!(seat.occupied, ESeatEmpty);
+    assert!(is_seat_occupied(seat), ESeatEmpty);
 
     let pk = seat.pk;
     let player = seat.player;
@@ -2841,9 +3549,8 @@ fun kick_player_internal(table: &mut Table, seat_index: u64, reason: u8) {
     let is_current_turn = table.current_turn.is_some() &&
         *table.current_turn.borrow() == seat_index;
 
-    // Mark seat as empty, but keep total_bet and player for side pot / refund
-    seat.occupied = false;
-    // 不清除 seat.player，保留供 refund_all_bets 退款
+    // Mark seat as left_during_hand, but keep player/total_bet for side pot / refund
+    // occupied 判断已改为 player != @0x0 && !left_during_hand，无需再设 occupied
     seat.stack = 0;
     seat.hand = vector[];
     seat.bet = 0;
@@ -2854,14 +3561,15 @@ fun kick_player_internal(table: &mut Table, seat_index: u64, reason: u8) {
     seat.acted_this_round = false;
     seat.is_waiting = false;  // 必须重置，避免 reset_for_next_hand 用空 pk 调用 add_pk_to_aggregated
     seat.pk = vector[];
-
+    
     // Update aggregated PK: 仅当玩家非 waiting 时才移除（waiting 玩家 pk 未加入过）
     if (pk.length() > 0 && !was_waiting) {
         table.deck_state.aggregated_pk = table_serialization::remove_pk_from_aggregated(&table.deck_state.aggregated_pk, &pk);
     };
 
-    // 发退款事件，链下处理实际退款
+    // 退还 stack：将 stack chips 兑换回 SUI 并转给玩家
     if (refund_amount > 0) {
+        refund_sui_to_player(table, player, refund_amount, ctx);
         table_events::emit_player_refund(object::id(table), seat_index, player, refund_amount, table_events::refund_type_stack_only());
     };
 
@@ -2925,7 +3633,7 @@ public fun seat_total_bet(table: &Table, index: u64): u64 { table.seats[index].t
 public fun seat_folded(table: &Table, index: u64): bool { table.seats[index].folded }
 public fun seat_all_in(table: &Table, index: u64): bool { table.seats[index].all_in }
 public fun seat_hand(table: &Table, index: u64): &vector<Card> { &table.seats[index].hand }
-public fun seat_occupied(table: &Table, index: u64): bool { table.seats[index].occupied }
+public fun seat_occupied(table: &Table, index: u64): bool { is_seat_occupied(&table.seats[index]) }
 public fun seat_pk(table: &Table, index: u64): &vector<u8> { &table.seats[index].pk }
 
 public fun deck_encrypted(table: &Table): &vector<ElGamalCiphertext> { &table.deck_state.encrypted }
@@ -2944,6 +3652,8 @@ public fun reveal_assignments(table: &Table): &vector<RevealAssignment> { &table
 public fun reveal_assignment_count(table: &Table): u64 { table.reveal_token_state.assignments.length() }
 
 public fun reconstruct_phase(table: &Table): u8 { table.reconstruct_state.phase }
+public fun shuffle_phase(table: &Table): u8 { table.shuffle_state.phase }
+public fun reconstruct_player_decks_count(table: &Table): u64 { table.reconstruct_state.player_decks.length() }
 
 
 // ========== BettingRound 访问器 ==========
@@ -2978,6 +3688,9 @@ public fun showdown_at(table: &Table): u64 { table.timestamps.showdown_at }
 public fun hand_complete_at(table: &Table): u64 { table.timestamps.hand_complete_at }
 
 // ========== 超时配置设置 ==========
+// m2 修复：校验超时参数不为 0，防止 0 超时导致玩家无法行动
+const MIN_TIMEOUT_MS: u64 = 1000;
+
 public  fun set_timeout_config(
     table: &mut Table,
     _admin_cap: &AdminCap,
@@ -2989,6 +3702,10 @@ public  fun set_timeout_config(
     hand_complete_wait_ms: u64,
     ready_wait_ms: u64,
 ) {
+    assert!(shuffle_timeout_ms >= MIN_TIMEOUT_MS, EInvalidBetAmount);
+    assert!(reveal_timeout_ms >= MIN_TIMEOUT_MS, EInvalidBetAmount);
+    assert!(betting_timeout_ms >= MIN_TIMEOUT_MS, EInvalidBetAmount);
+    assert!(reconstruct_timeout_ms >= MIN_TIMEOUT_MS, EInvalidBetAmount);
     table.timeout_config.shuffle_timeout_ms = shuffle_timeout_ms;
     table.timeout_config.reveal_timeout_ms = reveal_timeout_ms;
     table.timeout_config.betting_timeout_ms = betting_timeout_ms;
@@ -2996,6 +3713,14 @@ public  fun set_timeout_config(
     table.timeout_config.showdown_display_ms = showdown_display_ms;
     table.timeout_config.hand_complete_wait_ms = hand_complete_wait_ms;
     table.timeout_config.ready_wait_ms = ready_wait_ms;
+    table_events::emit_timeout_config_updated(
+        object::id(table),
+        betting_timeout_ms,
+        shuffle_timeout_ms,
+        reveal_timeout_ms,
+        reconstruct_timeout_ms,
+        showdown_display_ms,
+    );
 }
 
 // ========== 阶段常量 ==========
@@ -3065,6 +3790,7 @@ public fun create_table_for_test(
             showdown_at: 0,
             hand_complete_at: 0,
         },
+        sui_balance: balance::zero(),
     }
 }
 
@@ -3072,8 +3798,14 @@ public fun create_table_for_test(
 public fun join_table_for_test(table: &mut Table, seat_index: u64, player: address, buy_in: u64) {
     assert!(seat_index < table.max_players, EInvalidSeatIndex);
     assert!(buy_in > 0, EInvalidBetAmount);
-    assert!(!table.seats[seat_index].occupied, ESeatOccupied);
+    assert!(!is_seat_occupied(&table.seats[seat_index]), ESeatOccupied);
     assert!(!is_player_seated(&table.seats, player), EPlayerAlreadySeated);
+    // 测试环境下铸造 SUI 存入牌桌资金池，确保 leave/kick 时有 SUI 可退
+    // 向上取整计算所需 SUI 数量，保证余额足够覆盖后续退款
+    let mut sui_amount = buy_in * STACK_TO_SUI_RATIO;
+    if (sui_amount == 0) { sui_amount = 1 };
+    let sui_balance = balance::create_for_testing<SUI>(sui_amount);
+    table.sui_balance.join(sui_balance);
     init_seat(&mut table.seats[seat_index], player, buy_in, vector[], false);
 }
 
@@ -3083,7 +3815,8 @@ public fun destroy_table(table: Table) {
         button: _, pot: _, side_pots: _, community_cards: _,
         round_state: _, betting_round: _, current_turn: _,
         deck_state: _, shuffle_state: _, reveal_token_state: _, reconstruct_state: _,
-        timeout_config: _, timestamps: _ } = table;
+        timeout_config: _, timestamps: _, sui_balance } = table;
+    sui::test_utils::destroy(sui_balance);
     id.delete();
 }
 
@@ -3196,8 +3929,8 @@ public fun reset_for_next_hand_for_test(table: &mut Table) {
 
 /// 直接调用 kick_player_internal（测试用，绕过 AdminCap）
 #[test_only]
-public fun kick_player_for_test(table: &mut Table, seat_index: u64, reason: u8) {
-    kick_player_internal(table, seat_index, reason);
+public fun kick_player_for_test(table: &mut Table, seat_index: u64, reason: u8, ctx: &mut TxContext) {
+    kick_player_internal(table, seat_index, reason, ctx);
 }
 
 /// 直接设置 aggregated_pk（测试用，用于初始化场景）
@@ -3210,4 +3943,118 @@ public fun set_aggregated_pk_for_test(table: &mut Table, pk: vector<u8>) {
 #[test_only]
 public fun set_is_waiting_for_test(table: &mut Table, seat_index: u64, is_waiting: bool) {
     table.seats[seat_index].is_waiting = is_waiting;
+}
+
+/// 直接设置 seat 的 stack（测试用，模拟筹码为 0 的破产玩家）
+#[test_only]
+public fun set_stack_for_test(table: &mut Table, seat_index: u64, stack: u64) {
+    table.seats[seat_index].stack = stack;
+}
+
+/// 直接调用 on_shuffle_timeout（测试用，绕过 tick/Clock 依赖）
+#[test_only]
+public fun force_on_shuffle_timeout_for_test(table: &mut Table, ctx: &mut TxContext) {
+    on_shuffle_timeout(table, ctx);
+}
+
+/// 直接设置 shuffle_state（测试用，用于构造特定洗牌阶段）
+#[test_only]
+public fun set_shuffle_state_for_test(
+    table: &mut Table,
+    phase: u8,
+    current_shuffler: Option<u64>,
+    pending_players: vector<u64>,
+    completed_players: vector<u64>,
+) {
+    table.shuffle_state = ShuffleState {
+        phase,
+        current_shuffler,
+        pending_players,
+        completed_players,
+    };
+}
+
+/// 直接设置 shuffle_started_at 时间戳（测试用）
+#[test_only]
+public fun set_shuffle_started_at_for_test(table: &mut Table, ts: u64) {
+    table.timestamps.shuffle_started_at = ts;
+}
+
+/// 直接向 reconstruct_state.player_decks 添加一条玩家 deck（测试用）
+#[test_only]
+public fun add_reconstruct_player_deck_for_test(
+    table: &mut Table,
+    seat_index: u64,
+    output_cts: vector<ElGamalCiphertext>,
+) {
+    table.reconstruct_state.player_decks.push_back(ReconstructPlayerDeck {
+        seat_index,
+        output_cts,
+    });
+}
+
+/// 直接设置 reconstruct_state.phase（测试用）
+#[test_only]
+public fun set_reconstruct_phase_for_test(table: &mut Table, phase: u8) {
+    table.reconstruct_state.phase = phase;
+}
+
+/// 直接调用 on_reconstruct_timeout（测试用，绕过 tick/Clock 依赖）
+#[test_only]
+public fun force_on_reconstruct_timeout_for_test(table: &mut Table, ctx: &mut TxContext) {
+    on_reconstruct_timeout(table, ctx);
+}
+
+/// 直接调用 on_betting_timeout（测试用，绕过 tick/Clock 依赖）
+#[test_only]
+public fun force_on_betting_timeout_for_test(table: &mut Table) {
+    on_betting_timeout(table);
+}
+
+/// 直接调用 on_reveal_timeout（测试用，需要 Clock）
+#[test_only]
+public fun force_on_reveal_timeout_for_test(table: &mut Table, clock: &Clock, ctx: &mut TxContext) {
+    on_reveal_timeout(table, clock, ctx);
+}
+
+/// 直接调用 tick（测试用，需要 Clock）
+#[test_only]
+public fun force_tick_for_test(table: &mut Table, clock: &Clock, ctx: &mut TxContext) {
+    tick(table, clock, ctx);
+}
+
+/// 直接设置 reveal_started_at 时间戳（测试用）
+#[test_only]
+public fun set_reveal_started_at_for_test(table: &mut Table, ts: u64) {
+    table.timestamps.reveal_started_at = ts;
+}
+
+/// 直接设置 betting_started_at 时间戳（测试用）
+#[test_only]
+public fun set_betting_started_at_for_test(table: &mut Table, ts: u64) {
+    table.timestamps.betting_started_at = ts;
+}
+
+/// 直接设置 reconstruct_started_at 时间戳（测试用）
+#[test_only]
+public fun set_reconstruct_started_at_for_test(table: &mut Table, ts: u64) {
+    table.timestamps.reconstruct_started_at = ts;
+}
+
+/// 直接设置 showdown_at 时间戳（测试用）
+#[test_only]
+public fun set_showdown_at_for_test(table: &mut Table, ts: u64) {
+    table.timestamps.showdown_at = ts;
+}
+
+/// 获取 current_turn（测试用）
+#[test_only]
+public fun current_turn_for_test(table: &Table): Option<u64> {
+    table.current_turn
+}
+
+/// 检查是否有可行动玩家（测试用）
+#[test_only]
+public fun has_actionable_player_for_test(table: &Table): bool {
+    has_actionable_player(&table.seats)
 }

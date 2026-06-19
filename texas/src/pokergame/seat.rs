@@ -12,6 +12,8 @@ pub struct Seat {
     pub stack: u64,
     pub hand: Vec<Card>,
     pub bet: u64,
+    #[serde(default)]
+    pub total_bet: u64,
     pub turn: bool,
     pub checked: bool,
     pub folded: bool,
@@ -25,6 +27,13 @@ pub struct Seat {
     pub is_waiting: bool,
     #[serde(default)]
     pub has_acted: bool,
+    /// 对齐 Move seat.left_during_hand：玩家在手牌进行中被踢出/离开时标记。
+    /// 保留 seat 不删除，total_bet 保留供 side pot 计算，refund_all_bets 时退款。
+    #[serde(default)]
+    pub left_during_hand: bool,
+    /// 对齐 Move seat.refunded：标记已退款，避免重复退款。
+    #[serde(default)]
+    pub refunded: bool,
 }
 
 impl Seat {
@@ -45,6 +54,9 @@ impl Seat {
             disconnected_at: None,
             is_waiting: false,
             has_acted: false,
+            total_bet: 0,
+            left_during_hand: false,
+            refunded: false,
         }
     }
 
@@ -70,9 +82,11 @@ impl Seat {
         if re_raise_amount > self.stack {
             // all-in: put all remaining chips in
             self.bet += self.stack;
+            self.total_bet += self.stack;
             self.stack = 0;
         } else {
             self.bet = amount;
+            self.total_bet += re_raise_amount;
             self.stack -= re_raise_amount;
         }
         self.turn = false;
@@ -83,6 +97,7 @@ impl Seat {
     pub fn place_blind(&mut self, amount: u64) -> u64 {
         let actual = if amount > self.stack { self.stack } else { amount };
         self.bet = actual;
+        self.total_bet += actual;
         self.stack -= actual;
         actual
     }
@@ -93,6 +108,7 @@ impl Seat {
             amount_called = self.stack;
         }
         self.bet += amount_called;
+        self.total_bet += amount_called;
         self.stack -= amount_called;
         self.turn = false;
         self.last_action = Some(actions::CALL.to_string());
@@ -101,6 +117,7 @@ impl Seat {
 
     pub fn win_hand(&mut self, amount: u64) {
         self.bet = 0;
+        self.total_bet = 0;
         self.stack += amount;
         self.turn = false;
         self.last_action = Some(actions::WINNER.to_string());

@@ -32,6 +32,20 @@ public fun new_hand_rank(category: u8, kickers: vector<u8>): HandRank {
 public fun category(hr: &HandRank): u8 { hr.category }
 public fun kickers(hr: &HandRank): &vector<u8> { &hr.kickers }
 
+/// 将 HandRank 序列化为 u64，便于事件传递。
+/// 编码: category 占 bits 0-7，kickers[i] 占 bits 8*(i+1) ~ 8*(i+1)+7
+/// 最多 5 个 kickers，总共使用 48 bits，可完整还原。
+public fun to_u64(hr: &HandRank): u64 {
+    let mut result = (hr.category as u64);
+    let mut i = 0;
+    while (i < hr.kickers.length()) {
+        let shift = (8 * (i + 1)) as u8;
+        result = result | ((hr.kickers[i] as u64) << shift);
+        i = i + 1;
+    };
+    result
+}
+
 // ========== 比较 ==========
 // 返回: 0 = a < b, 1 = 相等, 2 = a > b
 public fun compare(a: &HandRank, b: &HandRank): u8 {
@@ -44,7 +58,7 @@ fun compare_kickers(a: &vector<u8>, b: &vector<u8>): u8 {
     // M-P6: 校验长度一致——同一 category 的 HandRank 应有相同 kickers 长度。
     // 不一致则视为非法输入，abort 防止错误的比较结果。
     assert!(a.length() == b.length(), EInvalidCardCount);
-    let len = if (a.length() < b.length()) { a.length() } else { b.length() };
+    let len = a.length();
     let mut i = 0;
     while (i < len) {
         let va = a[i];

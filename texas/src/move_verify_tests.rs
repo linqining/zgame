@@ -24,19 +24,18 @@
 
 use base64::Engine;
 use poker_protocol::crypto::{
-    BASE_G, DefaultCurve, EcPoint, ElGamalCiphertext, N_CARDS, Scalar,
+    DefaultCurve, EcPoint, ElGamalCiphertext, Scalar,
 };
-use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
-use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
+use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar};
+use poker_protocol::zk_shuffle::dleq_proof::DLEqProof;
 use poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof;
 use poker_protocol::zk_shuffle::reconstruction::{ChaumPedersenDLEQProof, ReconstructionDLEQProof, ReconstructProof, SwapOutCardProof};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 use poker_protocol::z_poker::protocol::new_plain_text;
-use poker_protocol::z_poker::key_manager::PKOwnershipProof;
-use rand_core::OsRng;
-use sui_sdk_types::{Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction, SharedInput, TransactionKind};
+use rand::rngs::OsRng;
+use sui_sdk_types::{Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction, TransactionKind};
 
 // ============================================================================
 // 常量
@@ -223,6 +222,13 @@ fn pure_bytes(bytes: Vec<u8>) -> Input {
     Input::Pure(bcs_encode(&bytes).expect("BCS encode vector<u8> should not fail"))
 }
 
+/// 创建 Pure 输入（直接传入原始字节，不做 BCS 编码）
+/// 用于测试 Sui runtime 是否期望原始字节
+#[allow(dead_code)]
+fn pure_raw_bytes(bytes: Vec<u8>) -> Input {
+    Input::Pure(bytes)
+}
+
 /// 构建 MoveCall command
 #[allow(dead_code)]
 fn move_call(
@@ -274,7 +280,13 @@ async fn dev_inspect_verify(pt: ProgrammableTransaction) -> Result<bool, String>
             tx_kind_b64,
             null,
             null,
-            "ShowEffects,ShowInput,ShowObjectChanges"
+            {
+                "show_effects": true,
+                "show_input": true,
+                "show_object_changes": true,
+                "show_raw_input": false,
+                "show_raw_effects": false
+            }
         ]
     });
 
@@ -381,17 +393,33 @@ async fn test_verify_pk_ownership_on_testnet() {
 
     // 2. 序列化为字节
     let pk_bytes = g1_to_bytes(&player.pk);
+    let commitment_bytes = g1_to_bytes(&proof.commitment);
+    let response_bytes = scalar_to_bytes(&proof.response);
     let mut proof_bytes = Vec::with_capacity(80);
-    proof_bytes.extend_from_slice(&g1_to_bytes(&proof.commitment));
-    proof_bytes.extend_from_slice(&scalar_to_bytes(&proof.response));
+    proof_bytes.extend_from_slice(&commitment_bytes);
+    proof_bytes.extend_from_slice(&response_bytes);
     assert_eq!(proof_bytes.len(), 80, "pk_ownership_proof must be 80 bytes");
 
+    // 调试: 打印字节以诊断反序列化问题
+    println!("pk_bytes ({}): {}", pk_bytes.len(), hex::encode(&pk_bytes));
+    println!("commitment_bytes ({}): {}", commitment_bytes.len(), hex::encode(&commitment_bytes));
+    println!("response_bytes ({}): {}", response_bytes.len(), hex::encode(&response_bytes));
+
+    // 验证 commitment 可以被本地反序列化
+    use poker_protocol::crypto::curve::CurvePoint;
+    let recovered: Option<<DefaultCurve as Curve>::Point> = CurvePoint::from_compressed(commitment_bytes.as_slice());
+    assert!(recovered.is_some(), "commitment should be locally deserializable");
+    println!("commitment locally verified OK");
+
     // 3. 构建 PTB
+    // 调试: 先单独测试 commitment_bytes 能否被 deserialize_pk 反序列化
     let inputs = vec![
-        pure_bytes(pk_bytes),       // Input(0): pk
-        pure_bytes(proof_bytes),    // Input(1): proof_bytes
+        pure_bytes(pk_bytes),               // Input(0): pk
+        pure_bytes(proof_bytes),            // Input(1): proof_bytes
+        pure_bytes(commitment_bytes.clone()), // Input(2): commitment_bytes (for debugging)
     ];
     let commands = vec![
+        // Command 0: deserialize pk
         Command::MoveCall(MoveCall {
             package: parse_address(PACKAGE_ID).unwrap(),
             module: Identifier::from_static("zk_verifier"),
@@ -399,6 +427,15 @@ async fn test_verify_pk_ownership_on_testnet() {
             type_arguments: Vec::new(),
             arguments: vec![Argument::Input(0)],
         }),
+        // Command 1: deserialize commitment (debug - test if this works)
+        Command::MoveCall(MoveCall {
+            package: parse_address(PACKAGE_ID).unwrap(),
+            module: Identifier::from_static("zk_verifier"),
+            function: Identifier::from_static("deserialize_pk"),
+            type_arguments: Vec::new(),
+            arguments: vec![Argument::Input(2)],
+        }),
+        // Command 2: verify_pk_ownership
         Command::MoveCall(MoveCall {
             package: parse_address(PACKAGE_ID).unwrap(),
             module: Identifier::from_static("zk_verifier"),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::pokergame::game_state::ShufflePhase;
 use rand::rngs::OsRng;
 
 impl Table {
@@ -23,6 +24,8 @@ impl Table {
         }
         self.reconstruct_state.player_deck.clear();
         tracing::info!("[RECONSTRUCT] Reconstruct initiated for player {}", self.reconstruct_state.pending_players.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","));
+        // 通知前端 reconstruct 阶段已开始
+        self.emit_event(crate::pokergame::table::events::TableEvent::ReconstructNotice);
         Ok(())
     }
 
@@ -62,7 +65,7 @@ impl Table {
         if self.reconstruct_state.pending_players.is_empty() {
             tracing::info!("[RECONSTRUCT] Executing reconstruct for players: {:?}",
                 self.reconstruct_state.completed_players);
-            self.reconstruct_state.reset();
+            self.on_complete_reconstruct();
             return true;
         }
         false
@@ -111,25 +114,97 @@ impl Table {
         self.reconstruct_state.pending_players.retain(|p| p != player_pk_hex);
         self.reconstruct_state.completed_players.push(player_pk_hex.clone());
         let is_all_complete = self.reconstruct_state.pending_players.len()==0;
-        if is_all_complete {
-            let init_deck = self.mental_poker_game.deck_plaintext.clone();
-            let deck_len = init_deck.len();
-            let mut reconstruct_deck = init_deck.iter().map(|c| ElGamalCiphertext {
-                c1: EcPoint::identity(),
-                c2: c.clone(),
-            }).collect::<Vec<_>>();
-            for (_, deck) in self.reconstruct_state.player_deck.iter() {
-                for (i, card) in deck.iter().enumerate() {
-                    if i < deck_len {
-                        reconstruct_deck[i].c1 = reconstruct_deck[i].c1 + card.c1;
-                        reconstruct_deck[i].c2 = reconstruct_deck[i].c2 + card.c2 - init_deck[i];
-                    }
+        // 移除原来的重建 deck 逻辑，由 execute_reconstruct_if_completed → on_complete_reconstruct 处理
+        Ok(is_all_complete)
+    }
+
+    /// 镜像 Move on_complete_reconstruct：reconstruct 完成后重建牌组并重新洗牌
+    pub fn on_complete_reconstruct(&mut self) {
+        // 重建牌组（从 player_deck 构建）
+        let init_deck = self.mental_poker_game.deck_plaintext.clone();
+        let deck_len = init_deck.len();
+        let mut reconstruct_deck = init_deck.iter().map(|c| ElGamalCiphertext {
+            c1: EcPoint::identity(),
+            c2: c.clone(),
+        }).collect::<Vec<_>>();
+        for (_, deck) in self.reconstruct_state.player_deck.iter() {
+            for (i, card) in deck.iter().enumerate() {
+                if i < deck_len {
+                    reconstruct_deck[i].c1 = reconstruct_deck[i].c1 + card.c1;
+                    reconstruct_deck[i].c2 = reconstruct_deck[i].c2 + card.c2 - init_deck[i];
                 }
             }
-            self.mental_poker_game.deck_encrypted = reconstruct_deck;
-            self.reconstruct_state.reset();
         }
-        Ok(is_all_complete)
+        self.mental_poker_game.deck_encrypted = reconstruct_deck;
+
+        // 仅重置状态字段，保留 player_deck 供后续 on_reconstruct_shuffle_failed 重建牌组使用。
+        // 下次 start_reconstruct 会清空 player_deck，此处无需清空。
+        self.reconstruct_state.is_active = false;
+        self.reconstruct_state.timeout_start = None;
+        self.reconstruct_state.completed_players.clear();
+        self.reconstruct_state.pending_players.clear();
+        self.reconstruct_state.cards.clear();
+        self.reconstruct_state.coefficient = Scalar::zero();
+        self.reconstruct_state.player_readable_cards.clear();
+
+        // 进入洗牌阶段（RECONSTRUCT phase，对齐 Move shuffle_phase_reconstruct）
+        self.shuffle_state.phase = ShufflePhase::Reconstruct;
+        self.shuffle_state.pending_players = self.mental_poker_game.players.keys()
+            .map(|k| GamePkHex::new(k.clone()))
+            .collect();
+        self.shuffle_state.completed_players.clear();
+        self.shuffle_state.current_player_pk = None;
+
+        // 推进洗牌
+        self.advance_shuffle();
+
+        // 通知前端 reconstruct 完成
+        self.emit_event(crate::pokergame::table::events::TableEvent::TableUpdated {
+            message: None,
+        });
+    }
+
+    /// 镜像 Move on_reconstruct_timeout：处理 reconstruct 超时
+    pub fn on_reconstruct_timeout(&mut self) {
+        if !self.reconstruct_state.is_active {
+            return;
+        }
+        let pending_pks = self.reconstruct_state.pending_players.clone();
+        tracing::warn!("[RECONSTRUCT] Timeout for players: {:?}", pending_pks);
+
+        // 对齐 Move：kick all pending players（kick_player_internal 会处理退款/pot/状态清理）
+        for pk in &pending_pks {
+            self.remove_player_by_pk(pk);
+        }
+
+        let active_count = self.active_players().len();
+
+        // 对齐 Move：没有活跃玩家 → refund + reset
+        if active_count == 0 {
+            self.refund_all_bets();
+            self.reset_for_next_hand();
+            return;
+        }
+
+        // 对齐 Move：只剩一人 → end_without_showdown
+        if active_count == 1 {
+            self.end_without_showdown();
+            return;
+        }
+
+        // 对齐 Move：kick 可能已触发 reset_for_next_hand（活跃玩家不足）
+        if self.round_state() == RoundState::Waiting {
+            return;
+        }
+
+        // 对齐 Move：不清空 reconstruct_state，保留已提交的 player_decks 供 on_complete_reconstruct 重建牌组
+        // 重置 pending_players（已全部 kick），保留 completed_players 和 player_deck
+        self.reconstruct_state.is_active = false;
+        self.reconstruct_state.timeout_start = None;
+        self.reconstruct_state.pending_players.clear();
+
+        // 调用 on_complete_reconstruct 用已提交的 deck 重建牌组
+        self.on_complete_reconstruct();
     }
 
     pub fn get_reconstruct_public_state(&self) -> Option<ReconstructPublicState> {

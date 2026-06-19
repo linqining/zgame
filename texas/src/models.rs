@@ -1,21 +1,32 @@
-use mongodb::{Collection, Database as MongoDatabase};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
+
+/// 1 SUI = 10^9 MIST, 1 SUI = 10000 chips → 1 chip = 10^5 MIST
+pub const MIST_PER_CHIP: u64 = 100_000;
+
+/// 将 MIST 余额转换为筹码数量（1 SUI = 10000 chips）
+pub fn chips_from_mist(mist: u64) -> i64 {
+    (mist / MIST_PER_CHIP) as i64
+}
+
+/// 将筹码数量转换为 MIST（用于显示兑换花费）
+pub fn mist_from_chips(chips: i64) -> u64 {
+    if chips <= 0 {
+        return 0;
+    }
+    (chips as u64) * MIST_PER_CHIP
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
-    #[serde(rename = "_id")]
     pub id: String,
     pub name: String,
-    pub email: String,
-    pub password: String,
-    pub chips_amount: i64,
-    #[serde(rename = "type", default)]
-    pub user_type: i32,
+    pub address: String,
     pub created: String,
-    pub address:String,
-    #[serde(default)]
-    pub last_free_chips_at: Option<String>,
+    /// 已锁定筹码（入座时扣除，离开时返还）。实际余额由 SUI 链上余额决定。
+    pub locked_chips: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,138 +35,77 @@ pub struct UserResponse {
     #[serde(rename = "_id")]
     pub id: String,
     pub name: String,
-    pub email: String,
+    pub address: String,
+    /// 可用筹码 = SUI 余额 * 10000 - locked_chips
     pub chips_amount: i64,
-    #[serde(rename = "type")]
-    pub user_type: i32,
+    /// SUI 链上余额（MIST）
+    pub sui_balance: u64,
     pub created: String,
 }
 
 #[derive(Clone)]
 pub struct Database {
-    users: Arc<Collection<User>>,
+    users: Arc<RwLock<HashMap<String, User>>>,
 }
 
 impl Database {
-    pub async fn new(mongo_db: &MongoDatabase) -> Self {
-        let users = mongo_db.collection::<User>("users");
-        Self { users: Arc::new(users) }
+    pub fn new() -> Self {
+        Self {
+            users: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     pub async fn find_user_by_id(&self, id: &str) -> Option<User> {
-        self.users
-            .find_one(mongodb::bson::doc! {"_id": id})
-            .await
-            .ok()
-            .flatten()
+        self.users.read().await.get(id).cloned()
     }
 
+    pub async fn find_user_by_address(&self, address: &str) -> Option<User> {
+        self.users.read().await.values().find(|u| u.address == address).cloned()
+    }
 
+    pub async fn save_user(&self, user: &User) -> Result<(), String> {
+        let mut users = self.users.write().await;
+        users.insert(user.id.clone(), user.clone());
+        Ok(())
+    }
 
     pub async fn update_address(&self, id: &str, address: &str) -> bool {
-        self.users
-            .update_one(
-                mongodb::bson::doc! {"_id": id},
-                mongodb::bson::doc! {"$set": {"address": address}},
-            )
-            .await
-            .is_ok()
-    }
-
-    pub async fn find_user_by_email(&self, email: &str) -> Option<User> {
-        match self.users
-            .find_one(mongodb::bson::doc! {"email": email})
-            .await
-        {
-            Ok(opt) => opt,
-            Err(e) => {
-                tracing::error!("Failed to find user by email {}: {}", email, e);
-                None
-            }
+        let mut users = self.users.write().await;
+        if let Some(user) = users.get_mut(id) {
+            user.address = address.to_string();
+            true
+        } else {
+            false
         }
     }
 
-    pub async fn find_user_by_name(&self, name: &str) -> Option<User> {
-        self.users
-            .find_one(mongodb::bson::doc! {"name": name})
-            .await
-            .ok()
-            .flatten()
-    }
-
-
-    pub async fn save_user(&self, user: &User) -> mongodb::error::Result<mongodb::results::InsertOneResult> {
-        self.users.insert_one(user).await
-    }
-
-    pub async fn update_chips(&self, id: &str, amount: i64) -> Option<User> {
-        let result = self.users
-            .update_one(
-                mongodb::bson::doc! {"_id": id},
-                mongodb::bson::doc! {"$inc": {"chips_amount": amount}},
-            )
-            .await;
-        match result {
-            Ok(_) => self.find_user_by_id(id).await,
-            Err(e) => {
-                tracing::error!("Failed to update chips for {}: {}", id, e);
-                None
-            }
+    /// 锁定筹码（入座时调用）
+    pub async fn lock_chips(&self, id: &str, amount: i64) -> Option<User> {
+        let mut users = self.users.write().await;
+        if let Some(user) = users.get_mut(id) {
+            user.locked_chips += amount;
+            return Some(user.clone());
         }
+        None
     }
 
-    pub async fn set_chips(&self, id: &str, amount: i64) -> Option<User> {
-        let result = self.users
-            .update_one(
-                mongodb::bson::doc! {"_id": id},
-                mongodb::bson::doc! {"$set": {"chips_amount": amount}},
-            )
-            .await;
-        match result {
-            Ok(_) => self.find_user_by_id(id).await,
-            Err(e) => {
-                tracing::error!("Failed to set chips for {}: {}", id, e);
-                None
-            }
+    /// 解锁筹码（离开时调用）
+    pub async fn unlock_chips(&self, id: &str, amount: i64) -> Option<User> {
+        let mut users = self.users.write().await;
+        if let Some(user) = users.get_mut(id) {
+            user.locked_chips = (user.locked_chips - amount).max(0);
+            return Some(user.clone());
         }
+        None
     }
 
-    pub async fn set_chips_with_cooldown(&self, id: &str, amount: i64) -> Option<User> {
-        let now = chrono::Utc::now();
-        let one_hour_ago = now - chrono::Duration::hours(1);
-        let now_str = now.to_rfc3339();
-        let one_hour_ago_str = one_hour_ago.to_rfc3339();
+    pub async fn get_locked_chips(&self, id: &str) -> i64 {
+        self.users.read().await.get(id).map(|u| u.locked_chips).unwrap_or(0)
+    }
+}
 
-        // F12: 原子操作 —— 在 filter 中加入冷却时间检查，避免 check-then-update 竞态
-        let filter = mongodb::bson::doc! {
-            "_id": id,
-            "$or": [
-                {"last_free_chips_at": {"$exists": false}},
-                {"last_free_chips_at": null},
-                {"last_free_chips_at": {"$lt": &one_hour_ago_str}}
-            ]
-        };
-        let update = mongodb::bson::doc! {
-            "$set": {"chips_amount": amount, "last_free_chips_at": &now_str}
-        };
-
-        let result = self.users
-            .update_one(filter, update)
-            .await;
-        match result {
-            Ok(update_result) if update_result.matched_count > 0 => {
-                // 冷却已过，更新成功，重新查询返回最新用户
-                self.find_user_by_id(id).await
-            }
-            Ok(_) => {
-                // matched_count == 0，冷却未过
-                tracing::debug!("Cooldown not elapsed for {}", id);
-                None
-            }
-            Err(e) => {
-                tracing::error!("Failed to set chips for {}: {}", id, e);
-                None
-            }
-        }
+impl Default for Database {
+    fn default() -> Self {
+        Self::new()
     }
 }

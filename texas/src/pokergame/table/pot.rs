@@ -3,69 +3,120 @@ use crate::pokergame::hand_rank::{vin_card_to_eval_card, EvalCard, HandRank};
 use crate::pokergame::evaluator::best_hand;
 
 impl Table {
+    /// 对齐 Move side_pot::calculate_side_pots：使用 total_bet（累积下注）计算边池。
+    /// 仅在 showdown 时调用一次（由 on_reveal_complete(ShowdownReveal) 触发）。
+    /// self.pot 保持不变（已包含所有下注），self.side_pots 填充边池列表，
+    /// main_pot() = pot - sum(side_pots) 即主池金额。
     pub fn calculate_side_pots(&mut self) {
-        // Collect (seat_id, bet, folded) for ALL players with bets, including folded.
-        // Folded players' chips are included in pot amounts (they contributed),
-        // but only unfolded players are eligible to win.
-        let mut player_bets: Vec<(u32, u64, bool)> = self.seats.values()
-            .filter(|s| s.bet > 0)
-            .map(|s| (s.id, s.bet, s.folded))
+        // 清空旧 side_pots（对齐 Move: 每次重新计算）
+        self.summary.side_pots.clear();
+
+        // 收集所有有下注的玩家 (seat_id, total_bet, folded, all_in)
+        // all_in = stack == 0 && total_bet > 0（对齐 Move: stack 耗尽即 all-in）
+        let mut player_bets: Vec<(u32, u64, bool, bool)> = self.seats().values()
+            .filter(|s| s.total_bet > 0)
+            .map(|s| (s.id, s.total_bet, s.folded, s.stack == 0))
             .collect();
 
         if player_bets.is_empty() {
             return;
         }
 
-        // Sort by bet ascending — the foundation of the layered pot algorithm.
-        player_bets.sort_by_key(|(_, bet, _)| *bet);
+        // 收集所有 all-in 的下注额（去重），对齐 Move collect_all_in_bets
+        let mut all_in_bets: Vec<u64> = player_bets.iter()
+            .filter(|(_, _, _, all_in)| *all_in)
+            .map(|(_, bet, _, _)| *bet)
+            .collect();
+        all_in_bets.sort_unstable();
+        all_in_bets.dedup();
 
-        // Don't clear side_pots — preserve side pots from previous rounds.
-        // New side pots from this round are appended.
+        // 没有 all-in 玩家 → 无边池，全部归主池
+        if all_in_bets.is_empty() {
+            return;
+        }
+
+        // 按层级计算边池，对齐 Move calculate_side_pots
+        let n = player_bets.len();
         let mut prev_level: u64 = 0;
-        let mut new_side_pots_total: u64 = 0;
-        let mut is_first_layer = true;
+        let mut side_pots: Vec<SidePot> = Vec::new();
 
-        for i in 0..player_bets.len() {
-            let current_bet = player_bets[i].1;
-            if current_bet > prev_level {
-                let increment = current_bet - prev_level;
-                // All players at or above this bet level contributed to this layer.
-                let contributors: Vec<u32> = player_bets[i..].iter().map(|(id, _, _)| *id).collect();
-                let pot_amount = increment * contributors.len() as u64;
-                // Only unfolded contributors are eligible to win this layer.
-                let eligible: Vec<u32> = player_bets[i..].iter()
-                    .filter(|(_, _, folded)| !*folded)
-                    .map(|(id, _, _)| *id)
-                    .collect();
+        for &level in &all_in_bets {
+            if level <= prev_level { continue; }
 
-                if is_first_layer {
-                    // First layer = main pot. The amount is already in self.pot
-                    // via add_to_pot() during betting — don't add again (B1 fix).
-                    // G3 修复：同步更新 main_pot 字段，使其与实际主底池金额一致
-                    self.main_pot = pot_amount;
-                    is_first_layer = false;
-                } else if !eligible.is_empty() {
-                    // Side pot layer — move amount from self.pot to side_pots.
-                    self.side_pots.push(SidePot { amount: pot_amount, players: eligible });
-                    new_side_pots_total += pot_amount;
+            let mut pot_amount: u64 = 0;
+            let mut eligible: Vec<u32> = Vec::new();
+            for j in 0..n {
+                let (seat_id, bet, folded, _) = player_bets[j];
+                if bet > prev_level {
+                    let contribution = if bet < level { bet - prev_level } else { level - prev_level };
+                    pot_amount += contribution;
+                    if !folded {
+                        eligible.push(seat_id);
+                    }
                 }
-                prev_level = current_bet;
+            }
+            if pot_amount > 0 {
+                side_pots.push(SidePot { amount: pot_amount, players: eligible });
+            }
+            prev_level = level;
+        }
+
+        // 最外层（超出最大 all-in 的部分），对齐 Move
+        let mut outer_amount: u64 = 0;
+        let mut outer_eligible: Vec<u32> = Vec::new();
+        for j in 0..n {
+            let (seat_id, bet, folded, _) = player_bets[j];
+            if bet > prev_level {
+                outer_amount += bet - prev_level;
+                if !folded {
+                    outer_eligible.push(seat_id);
+                }
             }
         }
-        // Move new side pot amounts out of self.pot so that self.pot holds
-        // only the main pot. Total pot = self.pot + sum(side_pots).
-        self.pot = self.pot.saturating_sub(new_side_pots_total);
+        if outer_amount > 0 {
+            side_pots.push(SidePot { amount: outer_amount, players: outer_eligible });
+        }
+
+        // M-A3 修复：最后一个边池 eligible 为空时，合并到上一个有 eligible 的层级
+        if !side_pots.is_empty() {
+            let last_idx = side_pots.len() - 1;
+            if side_pots[last_idx].players.is_empty() && side_pots[last_idx].amount > 0 {
+                let merge_amount = side_pots[last_idx].amount;
+                side_pots.pop();
+                if !side_pots.is_empty() {
+                    // 找到最后一个有 eligible 的层级
+                    let mut merge_idx = 0;
+                    for k in (0..side_pots.len()).rev() {
+                        if !side_pots[k].players.is_empty() {
+                            merge_idx = k;
+                            break;
+                        }
+                    }
+                    side_pots[merge_idx].amount += merge_amount;
+                } else {
+                    // 所有层级 eligible 都为空，放回（由调用方处理）
+                    side_pots.push(SidePot { amount: merge_amount, players: Vec::new() });
+                }
+            }
+        }
+
+        // 第一个边池 = 主池（对齐 Move: first.amount = main_pot），其余 = 边池。
+        // Rust 中 self.pot 已包含所有下注，main_pot() = pot - sum(side_pots) 即主池。
+        // 所以第一个边池不放入 self.side_pots，仅保留其余。
+        if side_pots.len() > 1 {
+            self.summary.side_pots = side_pots[1..].to_vec();
+        }
     }
 
 
 
     pub fn determine_side_pot_winners(&mut self) {
-        if self.side_pots.is_empty() { return; }
+        if self.summary.side_pots.is_empty() { return; }
         // Collect (amount, eligible_ids) pairs first to avoid cloning side_pots
-        let pot_info: Vec<(u64, Vec<u32>)> = self.side_pots.iter()
+        let pot_info: Vec<(u64, Vec<u32>)> = self.summary.side_pots.iter()
             .map(|sp| {
                 let eligible: Vec<u32> = sp.players.iter()
-                    .filter(|id| self.seats.get(id).map_or(false, |s| !s.folded))
+                    .filter(|id| self.seats().get(id).map_or(false, |s| !s.folded))
                     .copied()
                     .collect();
                 (sp.amount, eligible)
@@ -78,22 +129,32 @@ impl Table {
     }
 
     pub fn determine_main_pot_winner(&mut self) {
-        let unfolded_ids: Vec<u32> = self.seats.values()
+        let unfolded_ids: Vec<u32> = self.seats().values()
             .filter(|s| !s.folded)
             .map(|s| s.id)
             .collect();
-        self.determine_winner_by_ids(self.pot, &unfolded_ids);
-        self.went_to_showdown = true;
-        self.transition_to(RoundState::Showdown);
-        self.showdown_at = Some(std::time::Instant::now());
+        // 对齐 Move settle_hand: 使用 main_pot（= pot - sum(side_pots)），而非整个 pot
+        self.determine_winner_by_ids(self.main_pot(), &unfolded_ids);
+        self.summary.went_to_showdown = true;
+        // 注意：round_state 已在 advance_to_next_phase(River) 中设为 Showdown，无需再 transition_to
+        self.set_showdown_at(now_ms());
     }
 
     pub fn finish_showdown(&mut self) {
         self.clear_seat_turns();
-        self.hand_over = true;
-        self.transition_to(RoundState::HandComplete);
-        self.hand_complete_at = Some(std::time::Instant::now());
+        self.summary.hand_over = true;
+        self.transition_to(RoundState::Waiting);
+        self.set_hand_complete_at(now_ms());
         self.sit_out_felted_players();
+    }
+
+    /// 镜像 Move settle_hand：Showdown 展示超时后分配底池并重置牌桌。
+    /// 先 calculate_side_pots(total_bet) 再分配 side pot 和 main pot 给赢家，最后 finish_showdown。
+    pub fn settle_hand(&mut self) {
+        self.calculate_side_pots();
+        self.determine_side_pot_winners();
+        self.determine_main_pot_winner();
+        self.finish_showdown();
     }
 
     pub fn evaluate_player_hands(&self) -> Vec<(u32, HandRank)> {
@@ -101,7 +162,7 @@ impl Table {
         let (player_revealed_map, comm_revealed_cards) = self.mental_poker_game.list_revealed_cards();
         if comm_revealed_cards.len() < 5 { return results; }
         tracing::info!("comm_revealed_cards: {:?}", comm_revealed_cards);
-        for seat in self.seats.values() {
+        for seat in self.seats().values() {
             let seat_player = match seat.player.as_ref() {
                 Some(p) => p,
                 None => continue,
@@ -139,11 +200,11 @@ impl Table {
         if eligible_ids.len() == 1 {
             let winner_id = eligible_ids[0];
             let win_amount = amount;
-            if let Some(seat) = self.seats.get_mut(&winner_id) {
+            if let Some(seat) = self.local_seats.get_mut(&winner_id) {
                 let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                 seat.win_hand(win_amount);
                 if win_amount > 0 {
-                    self.win_messages.push(format!("{} wins ${:.2}", player_name, win_amount));
+                    self.summary.win_messages.push(format!("{} wins ${:.2}", player_name, win_amount));
                 }
             }
             self.update_history();
@@ -161,11 +222,11 @@ impl Table {
             let remainder = amount % eligible_ids.len() as u64;
             for (idx, winner_id) in eligible_ids.iter().enumerate() {
                 let extra = if idx < remainder as usize { 1 } else { 0 };
-                if let Some(seat) = self.seats.get_mut(winner_id) {
+                if let Some(seat) = self.local_seats.get_mut(winner_id) {
                     let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                     seat.win_hand(win_amount + extra);
                     if win_amount + extra > 0 {
-                        self.win_messages.push(format!("{} wins ${:.2}", player_name, win_amount + extra));
+                        self.summary.win_messages.push(format!("{} wins ${:.2}", player_name, win_amount + extra));
                     }
                 }
             }
@@ -182,11 +243,11 @@ impl Table {
         let remainder = amount % winners.len() as u64;
         for (idx, winner_id) in winners.iter().enumerate() {
             let extra = if idx < remainder as usize { 1 } else { 0 };
-            if let Some(seat) = self.seats.get_mut(winner_id) {
+            if let Some(seat) = self.local_seats.get_mut(winner_id) {
                 let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                 seat.win_hand(win_amount + extra);
                 if win_amount + extra > 0 {
-                    self.win_messages.push(format!("{} wins ${:.2} with {}", player_name, win_amount + extra, best_rank.name()));
+                    self.summary.win_messages.push(format!("{} wins ${:.2} with {}", player_name, win_amount + extra, best_rank.name()));
                 }
             }
         }

@@ -33,3 +33,5 @@ pub const RECONSTRUCT_SUBMIT: &str = "RECONSTRUCT_SUBMIT";
 pub const REDEAL_NOTICE: &str = "REDEAL_NOTICE";
 pub const REDEAL_RESULT: &str = "REDEAL_RESULT";
 pub const REDEAL_REQUEST: &str = "REDEAL_REQUEST";
+pub const CRYPTO_EVENT: &str = "crypto_event";
+pub const PLAYER_UPDATE: &str = "player_update";

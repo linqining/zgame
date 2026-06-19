@@ -71,8 +71,9 @@ const GlowRing = styled.div`
   border-radius: 50%;
   border: 2px solid transparent;
   background:
-    linear-gradient(#f8fafc, #f8fafc) padding-box,
-    linear-gradient(135deg, #667eea, #764ba2, #06b6d4) border-box;
+    linear-gradient(${({ theme }) => theme.colors.fontColorLight}, ${({ theme }) => theme.colors.fontColorLight}) padding-box,
+    /* TODO: #764ba2, #06b6d4 提取到 theme */
+    linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2, #06b6d4) border-box;
   opacity: 0.4;
   animation: ${pulse} 2s ease-in-out infinite;
 `;
@@ -81,7 +82,8 @@ const LogoText = styled.div`
   margin-top: 2.5rem;
   font-size: 1.5rem;
   font-weight: 700;
-  background: linear-gradient(135deg, #667eea, #764ba2);
+  /* TODO: #764ba2 提取到 theme */
+  background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;

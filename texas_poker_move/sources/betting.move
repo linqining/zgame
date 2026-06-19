@@ -31,6 +31,7 @@ public struct BettingRound has store, drop {
 
 // ========== 构造函数 ==========
 public fun new_preflop(big_blind: u64): BettingRound {
+    assert!(big_blind > 0, EInvalidRaiseAmount);
     BettingRound {
         current_bet: big_blind,
         min_raise: big_blind,
@@ -41,6 +42,7 @@ public fun new_preflop(big_blind: u64): BettingRound {
 }
 
 public fun new_postflop(big_blind: u64): BettingRound {
+    assert!(big_blind > 0, EInvalidRaiseAmount);
     BettingRound {
         current_bet: 0,
         min_raise: big_blind,
@@ -113,7 +115,16 @@ public fun process_raise(
 
     // M-D7 修复：允许 all-in 小于 min_raise，但不更新 min_raise 和 last_raiser_seat
     // （不重新打开行动权），仅当非 all-in 时才强制 min_raise 检查并更新状态
-    if (needed < stack) {
+    // M1 修复：满足 min_raise 的 all-in 也应更新 min_raise 和 last_raiser_seat（重新打开行动权）
+    if (needed == stack) {
+        // all-in 情况：仅当满足 min_raise 时才更新状态（重新打开行动权）
+        if (raise_amount >= round.min_raise) {
+            round.min_raise = raise_amount;
+            round.last_raiser_seat = option::some(seat_id);
+        };
+        // 短 all-in（raise_amount < min_raise）：不更新，不重新打开行动权
+    } else {
+        // 非 all-in：强制 min_raise 检查并更新状态
         assert!(raise_amount >= round.min_raise, EInvalidRaiseAmount);
         round.min_raise = raise_amount;
         round.last_raiser_seat = option::some(seat_id);

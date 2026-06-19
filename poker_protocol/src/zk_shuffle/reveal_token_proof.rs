@@ -34,6 +34,8 @@ pub struct RevealTokenProof<C: Curve> {
     pub commitment_t1: C::Point,
     pub commitment_t2: C::Point,
     pub response_s: C::Scalar,
+    /// M4 修复：anti-replay nonce，兼容 Move 合约 reveal_token_proof.nonce
+    pub nonce: C::Scalar,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +72,8 @@ impl<C: Curve> RevealTokenProof<C>
         let omega = C::Scalar::random(rng);
         let t1 = C::base_g() * omega;
         let t2 = encrypted_card.c1 * omega;
+        // M4 修复：生成 anti-replay nonce，兼容 Move 合约 reveal_token_proof.nonce
+        let nonce = C::Scalar::random(rng);
 
         let challenge = Self::compute_challenge(
             user_pk,
@@ -77,6 +81,7 @@ impl<C: Curve> RevealTokenProof<C>
             reveal_token,
             &t1,
             &t2,
+            &nonce,
             transcript,
         );
 
@@ -87,6 +92,7 @@ impl<C: Curve> RevealTokenProof<C>
             commitment_t1: t1,
             commitment_t2: t2,
             response_s,
+            nonce,
         }
     }
 
@@ -111,12 +117,19 @@ impl<C: Curve> RevealTokenProof<C>
             return Err(RevealProofError::InvalidProof);
         }
 
+        // M-P17: 校验承诺点非 identity——identity 承诺削弱证明安全性
+        // 兼容 Move 合约 reveal_token_proof::verify 的 M-P17 修复
+        if self.commitment_t1.is_identity() || self.commitment_t2.is_identity() {
+            return Err(RevealProofError::InvalidProof);
+        }
+
         let expected_c = Self::compute_challenge(
             &self.user_public_key,
             &encrypted_card,
             reveal_token,
             &self.commitment_t1,
             &self.commitment_t2,
+            &self.nonce,
             transcript,
         );
 
@@ -140,8 +153,12 @@ impl<C: Curve> RevealTokenProof<C>
         reveal_token: &C::Point,
         t1: &C::Point,
         t2: &C::Point,
+        nonce: &C::Scalar,
         transcript: &mut impl CryptoTranscript,
     ) -> C::Scalar {
+        // M4 修复：将 nonce 加入 transcript，防止同一 proof 在不同上下文重放
+        // 兼容 Move 合约 reveal_token_proof::verify：nonce 在所有 point 之前追加
+        transcript.append_scalar::<C>(b"reveal_token_nonce", nonce);
         // 标签与 Move 合约 reveal_token_proof.move 完全一致
         transcript.append_point::<C>(b"pk", pk);
         transcript.append_point::<C>(b"c1", &encrypted_card.c1);

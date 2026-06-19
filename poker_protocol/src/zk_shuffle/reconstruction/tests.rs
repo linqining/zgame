@@ -132,18 +132,29 @@ mod tests {
 
     #[test]
     fn test_chaum_pedersen_dleq_identity_point() {
+        // 兼容 Move 合约 chaum_pedersen::verify 的 M5 修复：
+        // Move 拒绝恒等元公钥点 P1/P2——若 P1=P2=identity，x=0 即可使等式平凡成立
+        // Rust 须保持一致：prove 和 verify 都应拒绝 identity P1/P2
         let G1 = RistrettoCurve::base_g();
         let G2 = RistrettoPoint::random(&mut OsRng);
         let s = Scalar::ZERO; // Zero scalar produces identity points
-        let P1 = G1 * s;
-        let P2 = G2 * s;
+        let P1 = G1 * s; // identity
+        let P2 = G2 * s; // identity
 
+        // prove 应拒绝 identity P1/P2
         let mut prove_ts = MerlinTranscript::new(b"test_chaum_dleq");
-        let proof = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts).unwrap();
+        let prove_result = ChaumPedersenDLEQProof::<RistrettoCurve>::prove(G1, G2, s, P1, P2, &mut prove_ts);
+        assert!(prove_result.is_err(), "prove should reject identity P1/P2 (consistent with Move M5 fix)");
 
+        // verify 也应拒绝 identity P1/P2
+        let fake_proof = ChaumPedersenDLEQProof::<RistrettoCurve> {
+            commitment_a: RistrettoPoint::random(&mut OsRng),
+            commitment_b: RistrettoPoint::random(&mut OsRng),
+            response: Scalar::random(&mut OsRng),
+        };
         let mut verify_ts = MerlinTranscript::new(b"test_chaum_dleq");
-        let result = proof.verify(G1, G2, P1, P2, &mut verify_ts);
-        assert!(result.is_ok(), "Identity point proof should still verify");
+        let verify_result = fake_proof.verify(G1, G2, P1, P2, &mut verify_ts);
+        assert!(verify_result.is_err(), "verify should reject identity P1/P2 (consistent with Move M5 fix)");
     }
 
     #[test]

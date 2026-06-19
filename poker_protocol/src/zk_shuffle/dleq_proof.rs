@@ -1,4 +1,4 @@
-use crate::crypto::curve::{Curve, CurveScalar, ElGamalCiphertextGeneric};
+use crate::crypto::curve::{Curve, CurvePoint, CurveScalar, ElGamalCiphertextGeneric};
 use crate::zk_shuffle::transcript_ext::CryptoTranscript;
 use rand_core::OsRng;
 use std::marker::PhantomData;
@@ -28,6 +28,11 @@ pub trait DLEqProofKind<C: Curve> {
 
     /// Compute the d2 value from input and output ciphertext c2 components.
     fn compute_d2(input_c2: &C::Point, output_c2: &C::Point) -> C::Point;
+
+    /// Whether to validate output ciphertexts with `is_valid()` in verify().
+    /// 兼容 Move 合约：remask_proof 校验输入和输出密文有效性，
+    /// leave_proof 仅校验输入密文有效性。
+    fn validates_output_ciphertexts() -> bool;
 }
 
 /// Marker type for remask DLEq proofs.
@@ -58,6 +63,11 @@ impl<C: Curve> DLEqProofKind<C> for RemaskKind {
     fn compute_d2(input_c2: &C::Point, output_c2: &C::Point) -> C::Point {
         output_c2.clone() - input_c2.clone()
     }
+
+    fn validates_output_ciphertexts() -> bool {
+        // 兼容 Move 合约 remask_proof::verify：校验输入和输出密文有效性
+        true
+    }
 }
 
 impl<C: Curve> DLEqProofKind<C> for LeaveKind {
@@ -79,6 +89,11 @@ impl<C: Curve> DLEqProofKind<C> for LeaveKind {
 
     fn compute_d2(input_c2: &C::Point, output_c2: &C::Point) -> C::Point {
         input_c2.clone() - output_c2.clone()
+    }
+
+    fn validates_output_ciphertexts() -> bool {
+        // 兼容 Move 合约 leave_proof::verify：仅校验输入密文有效性
+        false
     }
 }
 
@@ -132,7 +147,9 @@ impl<C: Curve, K: DLEqProofKind<C>> DLEqProof<C, K>
         player_pk: &C::Point,
         transcript: &mut impl CryptoTranscript,
     ) -> Self {
-        let n = input_cts.len().min(output_cts.len()).min(C::n_cards());
+        // 兼容 Move 合约：使用严格长度（无 n_cards 截断）。
+        // verify() 会强制 input_cts.len() == output_cts.len() == per_card_commitments.len()。
+        let n = input_cts.len().min(output_cts.len());
         let mut rng = OsRng;
 
         let omega = C::Scalar::random(&mut rng);
@@ -193,26 +210,61 @@ impl<C: Curve, K: DLEqProofKind<C>> DLEqProof<C, K>
         player_pk: &C::Point,
         transcript: &mut impl CryptoTranscript,
     ) -> bool {
-        let n = input_cts.len().min(output_cts.len()).min(C::n_cards());
+        // 兼容 Move 合约 leave_proof/remask_proof::verify：n 来源于 per_card_commitments 长度
+        let n = self.per_card_commitments.len();
 
-        if self.per_card_commitments.len() != n {
-            tracing::error!("Invalid per-card commitments {}", n);
+        // M-P15: 空输入校验——n == 0 时无任何牌需要 remask/leave，proof 无意义，拒绝验证。
+        if n == 0 {
+            tracing::error!("Invalid proof: n == 0");
             return false;
         }
 
-        for i in 0..n {
-            if input_cts[i].c1 != output_cts[i].c1 {
-                tracing::error!("Invalid input card c1: {:?}", input_cts[i].c1);
-                return false;
-            }
+        // 1. 检查长度一致（严格相等，匹配 Move 合约）
+        if n != input_cts.len() {
+            tracing::error!("Invalid input_cts length: {} != {}", n, input_cts.len());
+            return false;
+        }
+        if n != output_cts.len() {
+            tracing::error!("Invalid output_cts length: {} != {}", n, output_cts.len());
+            return false;
         }
 
-        // Compute d2 values using the kind-specific direction
-        let d2_values: Vec<C::Point> = (0..n)
-            .map(|i| K::compute_d2(&input_cts[i].c2, &output_cts[i].c2))
-            .collect();
+        // M6 修复：拒绝恒等元 player_pk——sk=0 时 d2=0，证明平凡成立但操作为 no-op
+        if player_pk.is_identity() {
+            tracing::error!("Invalid player_pk: identity");
+            return false;
+        }
 
-        // Derive challenge using Merlin Transcript
+        // 2. 检查 c1 不变性 + M7 修复：校验密文有效性 + 计算 d2 values
+        let mut d2_values: Vec<C::Point> = Vec::with_capacity(n);
+        for i in 0..n {
+            // M7: 校验输入密文有效性（c1/c2 非 identity）
+            if !input_cts[i].is_valid() {
+                tracing::error!("Invalid input ciphertext at index {}", i);
+                return false;
+            }
+            // M7: RemaskKind 也校验输出密文有效性（匹配 Move remask_proof::verify）
+            if K::validates_output_ciphertexts() && !output_cts[i].is_valid() {
+                tracing::error!("Invalid output ciphertext at index {}", i);
+                return false;
+            }
+            if input_cts[i].c1 != output_cts[i].c1 {
+                tracing::error!(
+                    "c1 mismatch at index {} (n={}): input_c1={:?} output_c1={:?}",
+                    i, n, input_cts[i].c1, output_cts[i].c1
+                );
+                return false;
+            }
+            d2_values.push(K::compute_d2(&input_cts[i].c2, &output_cts[i].c2));
+        }
+
+        // M-P17:点非 identity——点非 identity——identity 承诺削弱证明安全性
+        if self.commitment_pk.is_identity() {
+            tracing::error!("Invalid commitment_pk: identity");
+            return false;
+        }
+
+        // 3. 构建 challenge：追加到 transcript
         let labels = K::labels();
         transcript.append_point::<C>(labels.pk, player_pk);
         for ct in &input_cts[..n] {
@@ -233,14 +285,13 @@ impl<C: Curve, K: DLEqProofKind<C>> DLEqProof<C, K>
         transcript.append_scalar::<C>(labels.nonce, &self.nonce);
         let c = transcript.challenge::<C>(labels.challenge).scalar;
 
-        // Check pk DLEq: G * response == commitment_pk + pk * c
+        // 4. 验证 pk DLEq: G * response == commitment_pk + pk * c
         if C::base_g() * self.response != self.commitment_pk + *player_pk * c {
             tracing::error!("Invalid response: {:?}", self.response);
             return false;
         }
 
-        // Check per-card DLEq: input_cts[i].c1 * response == per_card_commitments[i] + d2_i * c
-        // This proves: input_cts[i].c1 * sk = d2_i for EACH card individually
+        // 5. 验证 per-card DLEq: input_cts[i].c1 * response == per_card_commitments[i] + d2_i * c
         for i in 0..n {
             if input_cts[i].c1 * self.response != self.per_card_commitments[i] + d2_values[i] * c {
                 tracing::error!("Invalid per-card commitment: {:?}", self.per_card_commitments[i]);

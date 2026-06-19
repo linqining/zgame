@@ -20,6 +20,11 @@ import { useContentContext } from '../context/content/contentContext';
 import { PlayerContext } from '../context/player/PlayerContext';
 import Loader from '../components/loading/Loader';
 import { FETCH_LOBBY_INFO } from '../pokergame/actions';
+import { getToken } from '../helpers/getToken';
+// ZK 密码学事件可视化（紧凑版）
+import CryptoEventStream from '../components/crypto/CryptoEventStream';
+import NarrationOverlay from '../components/crypto/NarrationOverlay';
+import { Shield, ChevronDown, ChevronUp } from 'lucide-react';
 
 const Play: React.FC = () => {
   const navigate = useNavigate();
@@ -38,6 +43,9 @@ const Play: React.FC = () => {
     check,
     call,
     raise,
+    kickNotification,
+    clearKickNotification,
+    cryptoEvents,
   } = useContext(gameContext)!;
   const { getLocalizedString } = useContentContext();
   const { pkHex } = useContext(PlayerContext)!;
@@ -45,9 +53,21 @@ const Play: React.FC = () => {
   const [bet, setBet] = useState(0);
   const [hasJoined, setHasJoined] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [isLeaving, setIsLeaving] = useState(false);
   const reconnectAttemptRef = useRef(0);
   const hasShownLostModalRef = useRef(false);
   const isUnmountingRef = useRef(false);
+  // 重试计数器：进入 /play 后若 currentTable 一直为空，则重试 FETCH_LOBBY_INFO + joinTable
+  const joinRetryRef = useRef(0);
+  const MAX_JOIN_RETRIES = 3;
+  // 用 ref 在 join effect 中读取最新的 currentTable，避免将其加入依赖数组导致频繁重跑
+  const currentTableRef = useRef(currentTable);
+  // ZK 密码学事件面板开关（默认收起，避免遮挡牌桌核心区域）
+  const [showCryptoPanel, setShowCryptoPanel] = useState(false);
+
+  useEffect(() => {
+    currentTableRef.current = currentTable;
+  }, [currentTable]);
 
   useEffect(() => {
     return () => {
@@ -56,19 +76,56 @@ const Play: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (!socket) return;
+    // 等待 socket 连接建立后再 joinTable。
+    if (!socket || !isConnected) return;
 
+    // 如果 currentTable 已经存在（例如从别的页面返回 /play，GameState 仍持有 table 状态），
+    // 直接跳过 joinTable 和 FETCH_LOBBY_INFO，避免每次进入都卡一下等 lobby 信息。
+    if (currentTableRef.current) {
+      setHasJoined(true);
+      return;
+    }
+
+    // 重置重试计数器
+    joinRetryRef.current = 0;
+
+    // 快速路径：WebSocketProvider 在 socket connect 时已 emit 过 FETCH_LOBBY_INFO，
+    // 服务器通常已注册当前玩家，直接 joinTable 即可拿到 TABLE_UPDATED。
+    // 若因竞态导致 joinTable 失败（currentTable 仍为空），由下方重试 effect 补发 FETCH_LOBBY_INFO。
     joinTable(1, pkHex || '');
     setHasJoined(true);
 
     return () => {
+      // 仅在组件真正卸载时 leaveTable，断线重连场景不触发
       if (isUnmountingRef.current) {
-        leaveTable(false, pkHex || undefined);
+        // 组件卸载时不需要等待完成，直接触发即可
+        leaveTable(false, pkHex || undefined, true);
+        setHasJoined(false);
       }
-      setHasJoined(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [socket]);
+  }, [socket, isConnected]);
+
+  // 重试机制：joinTable 后若 currentTable 仍为空，则重试 FETCH_LOBBY_INFO + joinTable。
+  // 解决因服务器端 FETCH_LOBBY_INFO 与 JOIN_TABLE 并发处理导致的竞态问题。
+  useEffect(() => {
+    if (!hasJoined || !socket || !isConnected || currentTable) return;
+    if (joinRetryRef.current >= MAX_JOIN_RETRIES) return;
+
+    const timer = setTimeout(() => {
+      joinRetryRef.current += 1;
+      console.log(`[Play] currentTable still null, retry ${joinRetryRef.current}/${MAX_JOIN_RETRIES}`);
+      // 重试时才补发 FETCH_LOBBY_INFO，确保服务器注册了当前玩家
+      const token = getToken();
+      if (token) {
+        socket.emit(FETCH_LOBBY_INFO, token);
+      }
+      joinTable(1, pkHex || '');
+    }, 1000);
+
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasJoined, socket, isConnected, currentTable]);
 
   // Handle reconnection when connection is lost after joining
   useEffect(() => {
@@ -87,7 +144,7 @@ const Play: React.FC = () => {
       setIsReconnecting(true);
       reconnectAttemptRef.current += 1;
 
-      const token = localStorage.token;
+      const token = getToken();
       if (token) {
         console.log(`[Reconnect] Attempt ${reconnectAttemptRef.current}, emitting FETCH_LOBBY_INFO`);
         socket.emit(FETCH_LOBBY_INFO, token);
@@ -116,13 +173,23 @@ const Play: React.FC = () => {
     }
   }, [currentTable, seatId]);
 
+  // Auto-dismiss kick notification after 5 seconds
+  useEffect(() => {
+    if (kickNotification) {
+      const timer = setTimeout(() => {
+        clearKickNotification();
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [kickNotification, clearKickNotification]);
+
   // Waiting for socket connection
   if (!socket) {
     return (
       <Container fullHeight contentCenteredMobile>
         <Loader />
         <Text textAlign="center" style={{ marginTop: '1rem' }}>
-          Connecting...
+          {getLocalizedString('play_connecting')}
         </Text>
       </Container>
     );
@@ -134,7 +201,7 @@ const Play: React.FC = () => {
       <Container fullHeight contentCenteredMobile>
         <Loader />
         <Text textAlign="center" style={{ marginTop: '1rem' }}>
-          Reconnecting...
+          {getLocalizedString('play_reconnecting')}
         </Text>
       </Container>
     );
@@ -142,6 +209,134 @@ const Play: React.FC = () => {
 
   return (
     <>
+      {isLeaving && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.7)',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+            alignItems: 'center',
+            zIndex: 9999,
+          }}
+        >
+          <Loader />
+          <Text textAlign="center" style={{ marginTop: '1rem', color: '#fff' }}>
+            {getLocalizedString('play_leaving') || '正在离开牌桌...'}
+          </Text>
+        </div>
+      )}
+      {kickNotification && (
+        <div
+          onClick={clearKickNotification}
+          style={{
+            position: 'fixed',
+            top: '1.5rem',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'rgba(239, 68, 68, 0.95)',
+            color: '#fff',
+            padding: '0.8rem 1.5rem',
+            borderRadius: '10px',
+            fontSize: '0.95rem',
+            fontWeight: 600,
+            zIndex: 1000,
+            cursor: 'pointer',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
+            maxWidth: '90vw',
+            textAlign: 'center',
+          }}
+        >
+          {kickNotification}
+        </div>
+      )}
+      {/* ZK 密码学事件浮动面板（可收起，位于右上角，不遮挡牌桌核心区域） */}
+      <div
+        style={{
+          position: 'fixed',
+          top: '1rem',
+          right: '1rem',
+          zIndex: 900,
+          maxWidth: '320px',
+          width: 'calc(100vw - 2rem)',
+          pointerEvents: 'auto',
+        }}
+      >
+        {/* 折叠/展开切换按钮 */}
+        <button
+          onClick={() => setShowCryptoPanel((v) => !v)}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.4rem',
+            width: '100%',
+            justifyContent: 'space-between',
+            background: showCryptoPanel
+              ? 'rgba(15, 23, 42, 0.92)'
+              : 'rgba(59, 130, 246, 0.92)',
+            color: '#fff',
+            border: 'none',
+            borderRadius: showCryptoPanel ? '8px 8px 0 0' : '8px',
+            padding: '0.45rem 0.7rem',
+            fontSize: '0.72rem',
+            fontWeight: 700,
+            cursor: 'pointer',
+            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.2)',
+            fontFamily: "'JetBrains Mono', monospace",
+          }}
+        >
+          <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+            <Shield size={13} />
+            {getLocalizedString('play_zk-crypto-events')}
+            {cryptoEvents.length > 0 && (
+              <span
+                style={{
+                  background: 'rgba(255, 255, 255, 0.25)',
+                  borderRadius: 10,
+                  padding: '0 0.4rem',
+                  fontSize: '0.62rem',
+                }}
+              >
+                {cryptoEvents.length}
+              </span>
+            )}
+          </span>
+          {showCryptoPanel ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+        </button>
+
+        {/* 展开后的面板内容 */}
+        {showCryptoPanel && (
+          <div
+            style={{
+              background: 'rgba(255, 255, 255, 0.97)',
+              borderRadius: '0 0 8px 8px',
+              padding: '0.5rem',
+              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+              maxHeight: '40vh',
+              overflowY: 'auto',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.4rem',
+            }}
+          >
+            {/* 当前阶段叙事（一行简短文案） */}
+            {currentTable && (
+              <NarrationOverlay
+                phase={currentTable.roundState}
+                cryptoEventCount={cryptoEvents.length}
+              />
+            )}
+            {/* 紧凑版密码学事件流 */}
+            <CryptoEventStream
+              events={cryptoEvents}
+              compact
+              compactMaxItems={6}
+            />
+          </div>
+        )}
+      </div>
       <RotateDevicePrompt />
       <Container fullHeight>
         {currentTable && (
@@ -152,8 +347,17 @@ const Play: React.FC = () => {
               scale="0.65"
               style={{ zIndex: '50' }}
             >
-              <Button small secondary onClick={() => leaveTable(true, pkHex || undefined)}>
-                {getLocalizedString('game_leave-table-btn')}
+              <Button small secondary onClick={async () => {
+                if (isLeaving) return;
+                setIsLeaving(true);
+                try {
+                  await leaveTable(true, pkHex || undefined);
+                } catch (e) {
+                  console.error('[Play] leaveTable failed:', e);
+                  setIsLeaving(false);
+                }
+              }} disabled={isLeaving}>
+                {isLeaving ? getLocalizedString('play_leaving') || '离开中...' : getLocalizedString('game_leave-table-btn')}
               </Button>
             </PositionedUISlot>
             {!isPlayerSeated && (

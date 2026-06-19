@@ -292,11 +292,27 @@ export class WasmClientPlayer {
         }
         return takeFromExternrefTable0(ret[0]);
     }
-    constructor() {
-        const ret = wasm.wasmclientplayer_new();
+    /**
+     * @param {string} wallet_address
+     */
+    constructor(wallet_address) {
+        const ptr0 = passStringToWasm0(wallet_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmclientplayer_new(ptr0, len0);
         this.__wbg_ptr = ret;
         WasmClientPlayerFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * 根据钱包地址确定性生成密钥对（与 new 行为相同，显式命名）
+     * @param {string} wallet_address
+     * @returns {WasmClientPlayer}
+     */
+    static new_with_wallet_address(wallet_address) {
+        const ptr0 = passStringToWasm0(wallet_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmclientplayer_new_with_wallet_address(ptr0, len0);
+        return WasmClientPlayer.__wrap(ret);
     }
     /**
      * @param {string} ct_json
@@ -510,6 +526,150 @@ export function encrypt_plaintext(plaintext_hex, pk_hex) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * 序列化 ElGamalCiphertext 数组为 Move 合约期望的 flat bytes 格式。
+ *
+ * 输入 JSON: [{"c1_hex":"...","c2_hex":"..."}, ...]
+ * 输出: flat c1(48) + c2(48) per card = 96*N bytes
+ * @param {string} cts_json
+ * @returns {Uint8Array}
+ */
+export function serialize_ciphertexts_to_move_bytes(cts_json) {
+    const ptr0 = passStringToWasm0(cts_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.serialize_ciphertexts_to_move_bytes(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * 一次性将 join_game_and_shuffle 的完整结果转换为 Move 合约期望的字节格式。
+ *
+ * 输入: join_game_and_shuffle 返回的 JSON 字符串
+ * 输出: JsValue (JSON 字符串) 包含 5 个 base64 编码的字段:
+ *   - pk: base64(48 bytes)
+ *   - pk_ownership_proof: base64(80 bytes)
+ *   - output_cards: base64(96*N bytes)
+ *   - remask_proof_bytes: base64(...)
+ *   - shuffle_proof_bytes: base64(...)
+ * @param {string} join_result_json
+ * @returns {any}
+ */
+export function serialize_join_and_shuffle_to_move_bytes(join_result_json) {
+    const ptr0 = passStringToWasm0(join_result_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.serialize_join_and_shuffle_to_move_bytes(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * 序列化 LeaveProof 为 Move 合约期望的字节格式（与 RemaskProof 格式相同）。
+ *
+ * 输入 JSON: {"per_card_commitments_hex":["...",...],"commitment_pk_hex":"...","response_hex":"...","nonce_hex":"..."}
+ * 输出: u16(count) + count*48 + 48 + 32 + 32
+ * @param {string} proof_json
+ * @returns {Uint8Array}
+ */
+export function serialize_leave_proof_to_move_bytes(proof_json) {
+    const ptr0 = passStringToWasm0(proof_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.serialize_leave_proof_to_move_bytes(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * 序列化 pk_ownership_proof 为 Move 合约期望的字节格式。
+ *
+ * 输入 JSON: {"commitment_hex":"...","response_hex":"..."}
+ * 输出: commitment(48) + response(32) = 80 bytes
+ * @param {string} proof_json
+ * @returns {Uint8Array}
+ */
+export function serialize_pk_ownership_proof_to_move_bytes(proof_json) {
+    const ptr0 = passStringToWasm0(proof_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.serialize_pk_ownership_proof_to_move_bytes(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * 序列化 pk（G1 compressed 48 bytes）为 Move 合约期望的字节格式。
+ *
+ * 输入: pk_hex (48 bytes hex)
+ * 输出: 48 bytes
+ * @param {string} pk_hex
+ * @returns {Uint8Array}
+ */
+export function serialize_pk_to_move_bytes(pk_hex) {
+    const ptr0 = passStringToWasm0(pk_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.serialize_pk_to_move_bytes(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * 序列化 RemaskProof 为 Move 合约期望的字节格式。
+ *
+ * 输入 JSON: {"per_card_commitments_hex":["...",...],"commitment_pk_hex":"...","response_hex":"...","nonce_hex":"..."}
+ * 输出: u16(count) + count*48(per_card_commitments) + 48(commitment_pk) + 32(response) + 32(nonce)
+ * @param {string} proof_json
+ * @returns {Uint8Array}
+ */
+export function serialize_remask_proof_to_move_bytes(proof_json) {
+    const ptr0 = passStringToWasm0(proof_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.serialize_remask_proof_to_move_bytes(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * 序列化 ShuffleProof 为 Move 合约期望的字节格式。
+ *
+ * 输入 JSON: {"sum_c1_commit_hex":"...","sum_c2_commit_hex":"...","combined_schnorr_proof":{...},"sum_c1_schnorr_proof":{...},"sum_c2_schnorr_proof":{...},"nonce_hex":"..."}
+ * 输出: 48(sum_c1_commit) + 48(sum_c2_commit) + 32(nonce) + 3*schnorr_proof
+ *   schnorr_proof: 48(commitment) + u16(count) + count*32(responses)
+ * @param {string} proof_json
+ * @returns {Uint8Array}
+ */
+export function serialize_shuffle_proof_to_move_bytes(proof_json) {
+    const ptr0 = passStringToWasm0(proof_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.serialize_shuffle_proof_to_move_bytes(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
 }
 function __wbg_get_imports() {
     const import0 = {

@@ -54,6 +54,11 @@ public fun verify(
         return false
     };
 
+    // M5 修复：拒绝恒等元公钥点 p1/p2——若 p1=p2=identity，x=0 即可使等式平凡成立
+    if (bls_scalar::g1_is_identity(p1) || bls_scalar::g1_is_identity(p2)) {
+        return false
+    };
+
     // 2. 反序列化证明元素
     let comm_a = bls12381::g1_from_bytes(&proof.commitment_a);
     let comm_b = bls12381::g1_from_bytes(&proof.commitment_b);

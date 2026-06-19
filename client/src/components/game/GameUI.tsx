@@ -11,7 +11,7 @@ interface GameUIProps {
   bet: number;
   setBet: (bet: number) => void;
   raise: (amount: number) => void;
-  standUp: () => void;
+  standUp: () => Promise<void>;
   fold: () => void;
   check: () => void;
   call: () => void;
@@ -41,7 +41,7 @@ export const GameUI: React.FC<GameUIProps> = ({
       <Button small onClick={() => raise(bet + currentTable.seats[seatId].bet)}>
         {getLocalizedString('game_ui_bet')} {bet}
       </Button>
-      <Button small secondary onClick={standUp}>
+      <Button small secondary onClick={() => { standUp().catch(e => console.error('[GameUI] standUp failed:', e)); }}>
         {getLocalizedString('game_ui_stand-up')}
       </Button>
       <Button small secondary onClick={fold}>

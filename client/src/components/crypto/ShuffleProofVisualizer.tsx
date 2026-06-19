@@ -1,35 +1,31 @@
 import type { ReactNode } from 'react'
 import { ShieldCheck, CheckCircle2 } from 'lucide-react'
+import { useContentContext } from '../../context/content/contentContext'
 
-// ShuffleProofVisualizer 组件的 Props
 interface ShuffleProofVisualizerProps {
-  // 证明数据（可选，无则展示占位说明）
   proof?: {
-    sum_c1_commit?: string // hex
-    sum_c2_commit?: string // hex
-    nonce?: string // hex
+    sum_c1_commit?: string
+    sum_c2_commit?: string
+    nonce?: string
   } | null
-  // 关联的 crypto 事件（用于显示验证状态）
   verified?: boolean | null
 }
 
-// 将 hex 字符串截断为前 10 字符 + … 的形式，便于展示
 function truncateHex(hex: string | undefined, prefix = 10): string {
   if (!hex) return '—'
-  // 去除可能的 0x 前缀后再截断
   const clean = hex.startsWith('0x') ? hex.slice(2) : hex
   if (clean.length <= prefix) return `0x${clean}`
   return `0x${clean.slice(0, prefix)}…`
 }
 
-// 颜色常量
 const COLOR_BLUE = '#3b82f6'
 const COLOR_GREEN = '#10b981'
 const COLOR_RED = '#ef4444'
 const COLOR_HEX = '#64748b'
 
 export default function ShuffleProofVisualizer({ proof, verified }: ShuffleProofVisualizerProps) {
-  // 根据 verified 状态决定边框颜色
+  const { getLocalizedString: t } = useContentContext()
+
   const borderColor =
     verified === true
       ? COLOR_GREEN
@@ -49,17 +45,15 @@ export default function ShuffleProofVisualizer({ proof, verified }: ShuffleProof
         color: '#0f172a',
       }}
     >
-      {/* 标题区 */}
       <div style={{ marginBottom: '0.75rem' }}>
         <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700, color: '#0f172a' }}>
-          ShuffleProof 结构
+          {t('shuffle-proof_title')}
         </h3>
         <p style={{ margin: '0.2rem 0 0', fontSize: '0.78rem', color: COLOR_BLUE, fontWeight: 600 }}>
-          3 层 Schnorr 防置换映射攻击
+          {t('shuffle-proof_subtitle')}
         </p>
       </div>
 
-      {/* 主体：proof 为 null 时显示占位 */}
       {proof === null || proof === undefined ? (
         <div
           style={{
@@ -70,11 +64,10 @@ export default function ShuffleProofVisualizer({ proof, verified }: ShuffleProof
             fontSize: '0.85rem',
           }}
         >
-          暂无洗牌证明数据，等待玩家提交…
+          {t('shuffle-proof_placeholder')}
         </div>
       ) : (
         <>
-          {/* 1. 承诺层 */}
           <div style={{ marginBottom: '0.75rem' }}>
             <div
               style={{
@@ -86,7 +79,7 @@ export default function ShuffleProofVisualizer({ proof, verified }: ShuffleProof
                 fontWeight: 600,
               }}
             >
-              承诺层 · 输入密文加权和承诺
+              {t('shuffle-proof_commitment-layer')}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
               <HexRow label="sum_c1_commit" value={truncateHex(proof.sum_c1_commit)} />
@@ -94,7 +87,6 @@ export default function ShuffleProofVisualizer({ proof, verified }: ShuffleProof
             </div>
           </div>
 
-          {/* 2. 证明层：3 个 Schnorr 证明 */}
           <div style={{ marginBottom: '0.75rem' }}>
             <div
               style={{
@@ -106,16 +98,15 @@ export default function ShuffleProofVisualizer({ proof, verified }: ShuffleProof
                 fontWeight: 600,
               }}
             >
-              证明层 · GeneralizedSchnorrProof ×3
+              {t('shuffle-proof_proof-layer')}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-              <ProofRow icon={<ShieldCheck size={16} color={COLOR_BLUE} />} name="combined_schnorr_proof" desc="c1+c2 合并证明" />
-              <ProofRow icon={<ShieldCheck size={16} color={COLOR_BLUE} />} name="sum_c1_schnorr_proof" desc="仅 c1 证明" />
-              <ProofRow icon={<ShieldCheck size={16} color={COLOR_BLUE} />} name="sum_c2_schnorr_proof" desc="仅 c2 证明" />
+              <ProofRow icon={<ShieldCheck size={16} color={COLOR_BLUE} />} name="combined_schnorr_proof" desc={t('shuffle-proof_combined')} />
+              <ProofRow icon={<ShieldCheck size={16} color={COLOR_BLUE} />} name="sum_c1_schnorr_proof" desc={t('shuffle-proof_c1-only')} />
+              <ProofRow icon={<ShieldCheck size={16} color={COLOR_BLUE} />} name="sum_c2_schnorr_proof" desc={t('shuffle-proof_c2-only')} />
             </div>
           </div>
 
-          {/* 3. 防重放 */}
           <div style={{ marginBottom: '0.75rem' }}>
             <div
               style={{
@@ -127,14 +118,13 @@ export default function ShuffleProofVisualizer({ proof, verified }: ShuffleProof
                 fontWeight: 600,
               }}
             >
-              防重放 · anti-replay nonce
+              {t('shuffle-proof_anti-replay')}
             </div>
             <HexRow label="nonce" value={truncateHex(proof.nonce)} />
           </div>
         </>
       )}
 
-      {/* 底部：技术亮点 */}
       <div
         style={{
           marginTop: '0.5rem',
@@ -152,19 +142,18 @@ export default function ShuffleProofVisualizer({ proof, verified }: ShuffleProof
             fontWeight: 600,
           }}
         >
-          技术亮点
+          {t('shuffle-proof_highlights')}
         </div>
         <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
-          <HighlightItem text="3 层 Schnorr 证明防止置换映射攻击" />
-          <HighlightItem text="Fiat-Shamir 非交互式零知识证明" />
-          <HighlightItem text="Sui 原生 BLS12-381 链上验证" />
+          <HighlightItem text={t('shuffle-proof_highlight-1')} />
+          <HighlightItem text={t('shuffle-proof_highlight-2')} />
+          <HighlightItem text={t('shuffle-proof_highlight-3')} />
         </ul>
       </div>
     </div>
   )
 }
 
-// hex 行：左侧标签，右侧 monospace 截断值
 function HexRow({ label, value }: { label: string; value: string }) {
   return (
     <div
@@ -192,7 +181,6 @@ function HexRow({ label, value }: { label: string; value: string }) {
   )
 }
 
-// 证明行：图标 + 名称 + 用途说明
 function ProofRow({ icon, name, desc }: { icon: ReactNode; name: string; desc: string }) {
   return (
     <div
@@ -221,7 +209,6 @@ function ProofRow({ icon, name, desc }: { icon: ReactNode; name: string; desc: s
   )
 }
 
-// 技术亮点条目
 function HighlightItem({ text }: { text: string }) {
   return (
     <li style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>

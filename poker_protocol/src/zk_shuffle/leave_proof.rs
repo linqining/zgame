@@ -64,15 +64,15 @@ mod tests {
         let (sk, pk) = gen_keypair::<RistrettoCurve>(&mut rng);
 
         let plaintexts: Vec<_> = (0..RistrettoCurve::n_cards()).map(|i| RistrettoCurve::base_g() * <RistrettoCurve as Curve>::Scalar::from_u64(i as u64)).collect();
+        let r_values: Vec<_> = (0..RistrettoCurve::n_cards()).map(|_| <RistrettoCurve as Curve>::Scalar::random(&mut rng)).collect();
 
-        // Create input with identity c1 (remasked cards)
+        // 兼容 Move 合约 M7 修复：使用有效密文（c1/c2 非 identity），而非 identity c1
+        let original_cts: Vec<RistrettoElGamalCiphertext> = (0..RistrettoCurve::n_cards())
+            .map(|i| RistrettoElGamalCiphertext::encrypt(&plaintexts[i], &pk, &r_values[i])).collect();
+        // Remask to create input for leave
         let input_cts: Vec<RistrettoElGamalCiphertext> = (0..RistrettoCurve::n_cards())
-            .map(|i| RistrettoElGamalCiphertext {
-                c1: <RistrettoCurve as Curve>::Point::identity(),
-                c2: plaintexts[i],
-            }).collect();
-
-        // Manually construct leave output (identity * sk = identity, so c2 unchanged)
+            .map(|i| ElGamalCiphertextGeneric { c1: original_cts[i].c1, c2: original_cts[i].c2 + original_cts[i].c1 * sk }).collect();
+        // Leave to create output
         let mut output_cts = Vec::new();
         for i in 0..input_cts.len() {
             let mut mask_card = input_cts[i].clone();
@@ -275,8 +275,10 @@ mod tests {
         let mut rng = OsRng;
         let (sk, pk) = gen_keypair::<RistrettoCurve>(&mut rng);
         let pt = RistrettoCurve::base_g() * <RistrettoCurve as Curve>::Scalar::from_u64(42u64);
-        let input = RistrettoElGamalCiphertext { c1: <RistrettoCurve as Curve>::Point::identity(), c2: pt };
-        // Remask (identity c1 * sk = identity, so c2 unchanged)
+        // 兼容 Move 合约 M7 修复：使用有效密文（c1/c2 非 identity）
+        let r = <RistrettoCurve as Curve>::Scalar::random(&mut rng);
+        let input = RistrettoElGamalCiphertext::encrypt(&pt, &pk, &r);
+        // Remask
         let mut remasked = input.clone();
         remasked.c2 = remasked.c2 + remasked.c1 * sk;
 
@@ -372,20 +374,21 @@ mod tests {
         assert_eq!(manual_output.c2, input.c2,
             "c2 unchanged when c1 is identity");
 
+        // 兼容 Move 合约 M7 修复：verify 现在拒绝 identity c1 密文
         let mut transcript = MerlinTranscript::new(b"test_identity_c1");
         let proof = LeaveProof::prove(&[input.clone()], &[manual_output.clone()], &sk, &pk, &mut transcript);
         let mut transcript_v = MerlinTranscript::new(b"test_identity_c1");
-        assert!(proof.verify(&[input.clone()], &[manual_output.clone()], &pk, &mut transcript_v),
-            "Proof passes for identity c1, but per-card check is vacuous");
+        assert!(!proof.verify(&[input.clone()], &[manual_output.clone()], &pk, &mut transcript_v),
+            "M7 fix: verify should reject identity c1 ciphertext");
 
-        // If attacker modifies manual_output.c2, proof should fail
+        // Tampered output should also be rejected (identity c1)
         let mut tampered_output = manual_output.clone();
         tampered_output.c2 = tampered_output.c2 + RistrettoCurve::base_g();
         let mut transcript2 = MerlinTranscript::new(b"test_identity_c1_tampered");
         let proof2 = LeaveProof::prove(&[input.clone()], &[tampered_output.clone()], &sk, &pk, &mut transcript2);
         let mut transcript2_v = MerlinTranscript::new(b"test_identity_c1_tampered");
         assert!(!proof2.verify(&[input.clone()], &[tampered_output.clone()], &pk, &mut transcript2_v),
-            "Tampered c2 should fail when c1 is identity");
+            "M7 fix: verify should reject identity c1 ciphertext (tampered)");
     }
 
     #[test]

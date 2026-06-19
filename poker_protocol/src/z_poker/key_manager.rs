@@ -1,6 +1,5 @@
-use crate::crypto::{EcPoint, Scalar, BASE_G};
+use crate::crypto::{EcPoint, Scalar, BASE_G, hash_to_scalar};
 use crate::crypto::curve::{CurvePoint, CurveScalar};
-use sha2::{Sha256, Digest};
 use rand_core::{RngCore, CryptoRng};
 use std::collections::HashMap;
 use hex;
@@ -41,12 +40,14 @@ impl PKOwnershipProof {
         let w = Scalar::random(rng);
         let commitment = *BASE_G * w;
 
-        let mut hasher = Sha256::new();
-        hasher.update(BASE_G.compress().as_ref());
-        hasher.update(pk.compress().as_ref());
-        hasher.update(commitment.compress().as_ref());
-        let challenge_bytes = hasher.finalize();
-        let challenge = Scalar::from_bytes_mod_order(&challenge_bytes);
+        // 兼容 Move 合约 zk_verifier::verify_pk_ownership (M-D12 修复)：
+        // 使用 hash_to_scalar（SHA3-256 + 清位 & 0x3F）替代 SHA-256 + from_bytes_mod_order。
+        // 输入: G_bytes || pk_bytes || commitment_bytes
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(BASE_G.compress().as_ref());
+        hash_input.extend_from_slice(pk.compress().as_ref());
+        hash_input.extend_from_slice(commitment.compress().as_ref());
+        let challenge = hash_to_scalar(&hash_input);
 
         let response = w + challenge * sk;
 
@@ -58,12 +59,13 @@ impl PKOwnershipProof {
             return false;
         }
 
-        let mut hasher = Sha256::new();
-        hasher.update(BASE_G.compress().as_ref());
-        hasher.update(pk.compress().as_ref());
-        hasher.update(self.commitment.compress().as_ref());
-        let challenge_bytes = hasher.finalize();
-        let challenge = Scalar::from_bytes_mod_order(&challenge_bytes);
+        // 兼容 Move 合约 zk_verifier::verify_pk_ownership (M-D12 修复)：
+        // 使用 hash_to_scalar（SHA3-256 + 清位 & 0x3F）替代 SHA-256 + from_bytes_mod_order。
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(BASE_G.compress().as_ref());
+        hash_input.extend_from_slice(pk.compress().as_ref());
+        hash_input.extend_from_slice(self.commitment.compress().as_ref());
+        let challenge = hash_to_scalar(&hash_input);
 
         let lhs = *BASE_G * &self.response;
         let rhs = self.commitment + *pk * &challenge;
@@ -151,6 +153,11 @@ impl KeyManager {
 
     pub fn get_aggregated_pk(&self) -> EcPoint {
         self.aggregated_pk
+    }
+
+    /// 设置聚合公钥（供 on-chain 模式从链上快照同步使用）
+    pub fn set_aggregated_pk(&mut self, pk: EcPoint) {
+        self.aggregated_pk = pk;
     }
 
 

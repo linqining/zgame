@@ -27,12 +27,32 @@ pub struct SaltResponse {
     salt: String,
 }
 
+/// Normalize the zkLogin issuer to match the Sui SDK's `normalizeZkLoginIssuer`.
+///
+/// The SDK normalizes `accounts.google.com` to `https://accounts.google.com`
+/// when deriving the zkLogin address (see `@mysten/sui/zklogin/utils.ts`).
+/// The salt derivation MUST use the same normalization, otherwise the same
+/// OAuth user can receive different salts (and therefore different zkLogin
+/// addresses) across logins if the provider returns different `iss` formats.
+fn normalize_zklogin_issuer(iss: &str) -> &str {
+    if iss == "accounts.google.com" {
+        "https://accounts.google.com"
+    } else {
+        iss
+    }
+}
+
 /// Derive a deterministic salt for a zkLogin user.
-/// Salt = blake2b(jwt_iss || jwt_sub || server_secret), truncated to 16 bytes (128 bits),
+/// Salt = blake2b(normalized_iss || sub || server_secret), truncated to 16 bytes (128 bits),
 /// returned as a decimal string (u128) as required by the Sui zkLogin prover.
+///
+/// The `iss` is normalized via `normalize_zklogin_issuer` to stay consistent
+/// with the Sui SDK's address derivation, guaranteeing a stable salt (and
+/// therefore a stable zkLogin address) for the same OAuth user across logins.
 fn derive_zklogin_salt(iss: &str, sub: &str, secret: &str) -> String {
     use blake2b_simd::blake2b;
-    let input = format!("{}:{}:{}", iss, sub, secret);
+    let normalized_iss = normalize_zklogin_issuer(iss);
+    let input = format!("{}:{}:{}", normalized_iss, sub, secret);
     let hash = blake2b(input.as_bytes());
     // Take first 16 bytes (128 bits) and convert to u128 decimal string
     let bytes: [u8; 16] = hash.as_bytes()[..16].try_into().expect("slice has correct length");
@@ -61,9 +81,112 @@ pub async fn get_zklogin_salt(
     };
 
     let salt = derive_zklogin_salt(&iss, &sub, &state.config.zklogin_salt_secret);
-    tracing::debug!("[get_zklogin_salt] salt derived for iss={}, sub={}", iss, sub);
+    tracing::info!(
+        "[get_zklogin_salt] iss={}, normalized_iss={}, sub={}, salt_prefix={}",
+        iss,
+        normalize_zklogin_issuer(&iss),
+        sub,
+        &salt[..salt.len().min(8)]
+    );
 
     (StatusCode::OK, Json(SaltResponse { salt })).into_response()
+}
+
+// ============================================================
+// zkLogin Prover Proxy (Shinami)
+// ============================================================
+//
+// Shinami's zkProver does not support CORS and requires an X-API-Key header,
+// so the frontend cannot call it directly. This endpoint receives the proof
+// inputs from the frontend, forwards them to Shinami's JSON-RPC prover, and
+// returns the resulting zkProof. Shinami's prover works with any salt
+// (Shinami-managed, self-managed, or third-party), so we keep using the salt
+// derived by derive_zklogin_salt above — the user's zkLogin address stays
+// stable.
+
+const SHINAMI_ZKPROVER_URL: &str = "https://api.us1.shinami.com/sui/zkprover/v1";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZkProverRequest {
+    jwt: String,
+    extended_ephemeral_public_key: String,
+    max_epoch: String,
+    jwt_randomness: String,
+    salt: String,
+}
+
+/// POST /api/auth/zklogin/prover
+pub async fn post_zklogin_prover(
+    Extension(state): Extension<Arc<AppState>>,
+    req: Body,
+) -> Response {
+    if state.config.shinami_api_key.is_empty() {
+        return err_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Shinami prover not configured (SHINAMI_API_KEY missing)",
+        );
+    }
+
+    let body = match axum::body::to_bytes(req, 1024 * 64).await {
+        Ok(b) => b,
+        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid request body"),
+    };
+    let req_body = match serde_json::from_slice::<ZkProverRequest>(&body) {
+        Ok(v) => v,
+        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
+    };
+
+    let http = shared_http_client();
+    let rpc_payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "shinami_zkp_createZkLoginProof",
+        "params": [
+            req_body.jwt,
+            req_body.max_epoch,
+            req_body.extended_ephemeral_public_key,
+            req_body.jwt_randomness,
+            req_body.salt,
+        ],
+        "id": 1,
+    });
+
+    let resp = match http
+        .post(SHINAMI_ZKPROVER_URL)
+        .header("X-API-Key", &state.config.shinami_api_key)
+        .json(&rpc_payload)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("[post_zklogin_prover] Shinami request failed: {}", e);
+            return err_resp(StatusCode::BAD_GATEWAY, &format!("Prover request failed: {}", e));
+        }
+    };
+
+    let json: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("[post_zklogin_prover] failed to parse Shinami response: {}", e);
+            return err_resp(StatusCode::BAD_GATEWAY, &format!("Invalid prover response: {}", e));
+        }
+    };
+
+    if let Some(error) = json.get("error") {
+        tracing::warn!("[post_zklogin_prover] Shinami error: {}", error);
+        return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": error }))).into_response();
+    }
+
+    let zk_proof = match json.pointer("/result/zkProof") {
+        Some(v) => v.clone(),
+        None => {
+            tracing::error!("[post_zklogin_prover] missing zkProof in Shinami response: {}", json);
+            return err_resp(StatusCode::BAD_GATEWAY, "Missing zkProof in prover response");
+        }
+    };
+
+    (StatusCode::OK, Json(zk_proof)).into_response()
 }
 
 /// Decode JWT payload without verification to extract iss and sub.
@@ -109,26 +232,26 @@ pub async fn zklogin_auth(
     Extension(state): Extension<Arc<AppState>>,
     req: Body,
 ) -> Response {
-    tracing::debug!("[zklogin_auth] request received");
+    // tracing::debug!("[zklogin_auth] request received");
     let body = match axum::body::to_bytes(req, 1024 * 64).await {
         Ok(b) => b,
         Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid request body"),
     };
     let body = match serde_json::from_slice::<ZkLoginAuthRequest>(&body) {
         Ok(v) => {
-            tracing::debug!("[zklogin_auth] parsed body, address={}", v.address);
+            // tracing::debug!("[zklogin_auth] parsed body, address={}", v.address);
             v
         }
         Err(e) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
     };
 
     // 验证签名：确保 signature 对 message 有效，且签名地址与 body.address 一致
-    match wallet_auth::verify_sui_wallet_signature(&body.message, &body.signature, &body.address).await {
+    match wallet_auth::verify_sui_wallet_signature(&body.message, &body.signature, &body.address, &state.config.sui_network).await {
         Ok(_) => {
-            tracing::debug!("[zklogin_auth] signature verified, address={}", body.address);
+            // tracing::debug!("[zklogin_auth] signature verified, address={}", body.address);
         }
         Err(e) => {
-            tracing::warn!("[zklogin_auth] signature verification failed, address={}, error={}", body.address, e);
+            // tracing::warn!("[zklogin_auth] signature verification failed, address={}, error={}", body.address, e);
             return err_resp(StatusCode::UNAUTHORIZED, &e);
         }
     }
@@ -137,21 +260,17 @@ pub async fn zklogin_auth(
     let user_id = format!("zklogin:{}", address);
 
     if state.db.find_user_by_id(&user_id).await.is_none() {
-        tracing::debug!("[zklogin_auth] new zkLogin user, creating user_id={}", user_id);
+        // tracing::debug!("[zklogin_auth] new zkLogin user, creating user_id={}", user_id);
         let name = body.email.clone().unwrap_or_else(|| address.clone());
         let user = crate::models::User {
             id: user_id.clone(),
             name,
-            email: body.email.clone().unwrap_or_else(|| format!("{}@zklogin", address)),
-            password: bcrypt::hash(&uuid::Uuid::new_v4().to_string(), 10).unwrap_or_default(),
-            chips_amount: state.config.initial_chips_amount,
-            user_type: 2,
-            created: chrono::Utc::now().to_rfc3339(),
             address: address.clone(),
-            last_free_chips_at: None,
+            created: chrono::Utc::now().to_rfc3339(),
+            locked_chips: 0,
         };
         if let Err(e) = state.db.save_user(&user).await {
-            tracing::error!("[zklogin_auth] failed to save zkLogin user, user_id={}, error={}", user_id, e);
+            // tracing::error!("[zklogin_auth] failed to save zkLogin user, user_id={}, error={}", user_id, e);
             return err_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to save user: {}", e));
         }
     } else {
@@ -160,31 +279,245 @@ pub async fn zklogin_auth(
 
     match auth::create_token(&user_id, &state.config.jwt_secret, state.config.jwt_token_expires_in) {
         Ok(token) => {
-            tracing::debug!("[zklogin_auth] token created, user_id={}", user_id);
+            // tracing::debug!("[zklogin_auth] token created, user_id={}", user_id);
             (StatusCode::OK, Json(serde_json::json!({
                 "token": token,
                 "address": address,
             }))).into_response()
         }
         Err(_) => {
-            tracing::error!("[zklogin_auth] failed to create token, user_id={}", user_id);
+            // tracing::error!("[zklogin_auth] failed to create token, user_id={}", user_id);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response()
         }
     }
 }
 
 // ============================================================
-// Sponsored Transaction Service
+// Sponsored Transaction Service (Shinami Gas Station)
 // ============================================================
 //
-// Two-endpoint approach:
-// 1. GET /api/sponsor/gas-info  - Returns sponsor's gas coin details for the frontend
-// 2. POST /api/sponsor/transaction - Signs the complete transaction bytes
+// Single-endpoint approach using Shinami's Gas Station API:
+// POST /api/sponsor/transaction - Forwards a gasless transaction to Shinami,
+//                                 returns the sponsored txBytes + gas signature.
 //
-// The frontend builds the complete TransactionData (with gas info) and sends
-// it to the backend for signing. This avoids TransactionKind deserialization
-// on the backend and sidesteps type compatibility issues between sui_sdk
-// and sui_sdk_types crates.
+// Flow:
+// 1. Frontend builds a gasless transaction (TransactionKind + sender, no gas info)
+// 2. Frontend POSTs it to this endpoint
+// 3. Backend forwards to Shinami Gas Station (gas_sponsorTransactionBlock)
+// 4. Shinami returns fully-sponsored txBytes + gas owner signature
+// 5. Backend returns them to the frontend
+// 6. Frontend signs the sponsored txBytes with zkLogin and submits both signatures
+//
+// The gas-info endpoint is no longer needed — Shinami selects gas coins.
+
+const SHINAMI_GAS_STATION_URL: &str = "https://api.us1.shinami.com/sui/gas/v1";
+
+#[derive(Deserialize)]
+pub struct SponsorTransactionRequest {
+    /// Base64-encoded TransactionKind bytes (no gas info)
+    tx_kind: String,
+    /// Sender address (hex, e.g. 0x...)
+    sender: String,
+    /// Optional gas budget. If omitted, Shinami estimates it.
+    gas_budget: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct SponsorTransactionResponse {
+    /// Base64-encoded complete TransactionData bytes (with gas info filled in by Shinami)
+    tx_bytes: String,
+    /// Gas owner's (Shinami's) signature over the transaction
+    signature: String,
+    /// Transaction digest, can be used to query sponsorship status
+    tx_digest: String,
+}
+
+/// POST /api/sponsor/transaction
+/// Proxies a gasless transaction to Shinami's Gas Station for sponsorship.
+/// The frontend sends a TransactionKind + sender; Shinami returns sponsored
+/// txBytes + gas signature. The frontend then signs the txBytes with zkLogin
+/// and submits both signatures to the Sui network.
+pub async fn sponsor_transaction(
+    headers: HeaderMap,
+    Extension(state): Extension<Arc<AppState>>,
+    req: Body,
+) -> Response {
+    let claims = match verify_auth(&headers, &state.config.jwt_secret) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
+    if state.config.shinami_api_key.is_empty() {
+        return err_resp(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Shinami Gas Station not configured (SHINAMI_API_KEY missing)",
+        );
+    }
+
+    let body = match axum::body::to_bytes(req, 1024 * 256).await {
+        Ok(b) => b,
+        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid request body"),
+    };
+
+    let req = match serde_json::from_slice::<SponsorTransactionRequest>(&body) {
+        Ok(v) => v,
+        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
+    };
+
+    // Verify sender matches the JWT-authenticated user
+    let user = match state.db.find_user_by_id(&claims.user.id).await {
+        Some(u) => u,
+        None => return err_resp(StatusCode::UNAUTHORIZED, "User not found"),
+    };
+    let expected_sender = match wallet_auth::normalize_address(&user.address) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[sponsor_transaction] invalid user address: {}", e);
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid user address");
+        }
+    };
+    let actual_sender = match wallet_auth::normalize_address(&req.sender) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[sponsor_transaction] invalid sender address: {}", e);
+            return err_resp(StatusCode::BAD_REQUEST, "Invalid sender address");
+        }
+    };
+    if actual_sender != expected_sender {
+        tracing::warn!(
+            "[sponsor_transaction] sender mismatch: tx_sender={}, user_address={}",
+            actual_sender, expected_sender
+        );
+        return err_resp(StatusCode::FORBIDDEN, "Sender mismatch");
+    }
+
+    // Enforce gas budget cap if provided
+    if let Some(budget) = req.gas_budget {
+        if budget > state.config.sponsor_gas_budget {
+            tracing::warn!(
+                "[sponsor_transaction] gas budget too high: {} > {}",
+                budget, state.config.sponsor_gas_budget
+            );
+            return err_resp(StatusCode::FORBIDDEN, "Gas budget too high");
+        }
+    }
+
+    // Forward to Shinami Gas Station: gas_sponsorTransactionBlock(txKind, sender, gasBudget?, gasPrice?)
+    let http = shared_http_client();
+    let mut params = vec![
+        serde_json::Value::String(req.tx_kind.clone()),
+        serde_json::Value::String(req.sender.clone()),
+    ];
+    if let Some(budget) = req.gas_budget {
+        params.push(serde_json::Value::Number(serde_json::Number::from(budget)));
+    }
+    // gasPrice omitted — Shinami uses the reference gas price
+
+    let rpc_payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "gas_sponsorTransactionBlock",
+        "params": params,
+        "id": 1,
+    });
+
+    let resp = match http
+        .post(SHINAMI_GAS_STATION_URL)
+        .header("X-API-Key", &state.config.shinami_api_key)
+        .json(&rpc_payload)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("[sponsor_transaction] Shinami request failed: {}", e);
+            return err_resp(
+                StatusCode::BAD_GATEWAY,
+                &format!("Gas station request failed: {}", e),
+            );
+        }
+    };
+
+    let json: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("[sponsor_transaction] failed to parse Shinami response: {}", e);
+            return err_resp(
+                StatusCode::BAD_GATEWAY,
+                &format!("Invalid gas station response: {}", e),
+            );
+        }
+    };
+
+    if let Some(error) = json.get("error") {
+        tracing::warn!("[sponsor_transaction] Shinami error: {}", error);
+        return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": error })))
+            .into_response();
+    }
+
+    let result = match json.get("result") {
+        Some(v) => v,
+        None => {
+            tracing::error!(
+                "[sponsor_transaction] missing result in Shinami response: {}",
+                json
+            );
+            return err_resp(StatusCode::BAD_GATEWAY, "Missing result in gas station response");
+        }
+    };
+
+    let tx_bytes = match result.get("txBytes").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            return err_resp(
+                StatusCode::BAD_GATEWAY,
+                "Missing txBytes in gas station response",
+            )
+        }
+    };
+    let signature = match result.get("signature").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            return err_resp(
+                StatusCode::BAD_GATEWAY,
+                "Missing signature in gas station response",
+            )
+        }
+    };
+    let tx_digest = match result.get("txDigest").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            return err_resp(
+                StatusCode::BAD_GATEWAY,
+                "Missing txDigest in gas station response",
+            )
+        }
+    };
+
+    tracing::debug!(
+        "[sponsor_transaction] sponsorship successful, tx_digest={}",
+        tx_digest
+    );
+
+    (
+        StatusCode::OK,
+        Json(SponsorTransactionResponse {
+            tx_bytes,
+            signature,
+            tx_digest,
+        }),
+    )
+        .into_response()
+}
+
+
+// ============================================================
+// Relayer-internal gas info helpers (backend-only, not exposed via HTTP)
+// ============================================================
+//
+// These helpers are kept for the relayer's tick/sponsored submission flow
+// (relayer/submit.rs), which still uses the sponsor's own private key to
+// sign as sender for tick transactions. The frontend-facing sponsor flow
+// now goes through Shinami Gas Station (see sponsor_transaction above).
 
 #[derive(Serialize)]
 pub struct GasInfoResponse {
@@ -196,43 +529,24 @@ pub struct GasInfoResponse {
     pub(crate) gas_budget: u64,
 }
 
-/// GET /api/sponsor/gas-info
-/// Returns the sponsor's gas coin details so the frontend can build
-/// a complete sponsored transaction.
-pub async fn get_gas_info(
-    Extension(state): Extension<Arc<AppState>>,
-) -> Response {
-    if state.config.sponsor_private_key.is_empty() {
-        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "Sponsor service not configured");
-    }
-
-    match fetch_gas_info(&state.config).await {
-        Ok(info) => (StatusCode::OK, Json(info)).into_response(),
-        Err(e) => {
-            tracing::error!("[get_gas_info] failed: {}", e);
-            err_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to fetch gas info: {}", e))
-        }
-    }
-}
-
 pub(crate) async fn fetch_gas_info(config: &Config) -> Result<GasInfoResponse, String> {
     let private_key = parse_sponsor_private_key(&config.sponsor_private_key)?;
     let public_key = private_key.public_key();
-    let sponsor_address: sui_sdk_types::Address = public_key.derive_address();
+    let sponsor_address = public_key.derive_address();
     let sponsor_address_str = sponsor_address.to_string();
 
-    // G9 修复：复用全局 reqwest::Client，避免每次调用都创建新实例
     let http = shared_http_client();
 
-    // Get gas coins via JSON-RPC
     let coins_resp = sui_jsonrpc(
         &http,
         &config.fullnode_url,
         "suix_getCoins",
         vec![serde_json::to_value(&sponsor_address).map_err(|e| format!("{}", e))?],
-    ).await?;
+    )
+    .await?;
 
-    let coins = coins_resp.get("data")
+    let coins = coins_resp
+        .get("data")
         .and_then(|v| v.as_array())
         .ok_or("Invalid gas coins response")?;
 
@@ -245,15 +559,16 @@ pub(crate) async fn fetch_gas_info(config: &Config) -> Result<GasInfoResponse, S
     let gas_coin_version = coin["version"].as_str().unwrap_or("0").to_string();
     let gas_coin_digest = coin["digest"].as_str().unwrap_or("").to_string();
 
-    // Get gas price via JSON-RPC
     let price_resp = sui_jsonrpc(
         &http,
         &config.fullnode_url,
         "suix_getReferenceGasPrice",
         vec![],
-    ).await?;
+    )
+    .await?;
 
-    let gas_price = price_resp.as_str()
+    let gas_price = price_resp
+        .as_str()
         .and_then(|s| s.parse::<String>().ok())
         .or_else(|| price_resp.as_u64().map(|v| v.to_string()))
         .ok_or("Invalid gas price response")?;
@@ -266,149 +581,6 @@ pub(crate) async fn fetch_gas_info(config: &Config) -> Result<GasInfoResponse, S
         gas_price,
         gas_budget: config.sponsor_gas_budget,
     })
-}
-
-#[derive(Deserialize)]
-pub struct SponsorTransactionRequest {
-    /// Base64-encoded complete TransactionData bytes (with gas info already filled in)
-    tx_bytes: String,
-}
-
-#[derive(Serialize)]
-pub struct SponsorTransactionResponse {
-    /// The sponsor's signature over the transaction
-    gas_signature: String,
-}
-
-/// POST /api/sponsor/transaction
-/// Signs a complete transaction as the sponsor (gas owner).
-/// The frontend builds the full TransactionData with gas info from /api/sponsor/gas-info,
-/// then sends it here for the sponsor's signature.
-pub async fn sponsor_transaction(
-    headers: HeaderMap,
-    Extension(state): Extension<Arc<AppState>>,
-    req: Body,
-) -> Response {
-    let claims = match verify_auth(&headers, &state.config.jwt_secret) {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
-
-    if state.config.sponsor_private_key.is_empty() {
-        tracing::warn!("[sponsor_transaction] sponsor not configured");
-        return err_resp(StatusCode::SERVICE_UNAVAILABLE, "Sponsor service not configured");
-    }
-
-    let body = match axum::body::to_bytes(req, 1024 * 256).await {
-        Ok(b) => b,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid request body"),
-    };
-
-    let body = match serde_json::from_slice::<SponsorTransactionRequest>(&body) {
-        Ok(v) => v,
-        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
-    };
-
-    // A6: 校验 tx_bytes —— 反序列化并验证 sender 与 gas budget
-    let tx_bytes_bytes = match base64_decode(&body.tx_bytes) {
-        Ok(b) => b,
-        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid tx_bytes: {}", e)),
-    };
-    let tx_data: sui_sdk_types::Transaction = match bcs::from_bytes(&tx_bytes_bytes) {
-        Ok(t) => t,
-        Err(_) => return err_resp(StatusCode::BAD_REQUEST, "Invalid tx_bytes format"),
-    };
-
-    // 校验 sender 与 JWT claims 中的用户地址一致
-    let user = match state.db.find_user_by_id(&claims.user.id).await {
-        Some(u) => u,
-        None => return err_resp(StatusCode::UNAUTHORIZED, "User not found"),
-    };
-    let sender_str = tx_data.sender.to_string();
-    // G19 修复：normalize_address 现在返回 Result，需处理校验失败
-    let expected_sender = match wallet_auth::normalize_address(&user.address) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("[sponsor_transaction] invalid user address: {}", e);
-            return err_resp(StatusCode::BAD_REQUEST, "Invalid user address");
-        }
-    };
-    let actual_sender = match wallet_auth::normalize_address(&sender_str) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("[sponsor_transaction] invalid tx sender address: {}", e);
-            return err_resp(StatusCode::BAD_REQUEST, "Invalid sender address");
-        }
-    };
-    if actual_sender != expected_sender {
-        tracing::warn!(
-            "[sponsor_transaction] sender mismatch: tx_sender={}, user_address={}",
-            actual_sender, expected_sender
-        );
-        return err_resp(StatusCode::FORBIDDEN, "Sender mismatch");
-    }
-
-    // 校验 gas budget 不超过配置上限
-    let max_budget = state.config.sponsor_gas_budget;
-    if tx_data.gas_payment.budget > max_budget {
-        tracing::warn!(
-            "[sponsor_transaction] gas budget too high: {} > {}",
-            tx_data.gas_payment.budget, max_budget
-        );
-        return err_resp(StatusCode::FORBIDDEN, "Gas budget too high");
-    }
-
-    match sign_transaction_as_sponsor(&state.config, &body.tx_bytes).await {
-        Ok(signature) => {
-            tracing::debug!("[sponsor_transaction] sponsorship successful");
-            (StatusCode::OK, Json(SponsorTransactionResponse {
-                gas_signature: signature,
-            })).into_response()
-        }
-        Err(e) => {
-            tracing::error!("[sponsor_transaction] failed: {}", e);
-            err_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("Sponsorship failed: {}", e))
-        }
-    }
-}
-
-/// Sign a complete transaction as the sponsor.
-///
-/// Uses `sui_crypto::ed25519::Ed25519PrivateKey` which implements
-/// `Signer<UserSignature>`. We compute the Sui signing digest
-/// (blake2b of intent + tx_bytes) and sign it, then serialize
-/// the result as a Sui signature (flag + sig + pubkey in base64).
-pub(crate) async fn sign_transaction_as_sponsor(
-    config: &Config,
-    tx_bytes_b64: &str,
-) -> Result<String, String> {
-    let private_key = parse_sponsor_private_key(&config.sponsor_private_key)?;
-
-    // Decode the transaction bytes
-    let tx_bytes = base64_decode(tx_bytes_b64)?;
-
-    // Compute the signing digest
-    // Intent for Sui transaction: [purpose=0, scope=0, version=0, app_id=0]
-    let intent_bytes: [u8; 4] = [0, 0, 0, 0];
-    let mut signing_input = Vec::with_capacity(4 + tx_bytes.len());
-    signing_input.extend_from_slice(&intent_bytes);
-    signing_input.extend_from_slice(&tx_bytes);
-
-    let digest = blake2b_simd::blake2b(&signing_input);
-    let digest_bytes = digest.as_bytes();
-
-    // Sign using sui_crypto's Ed25519PrivateKey
-    use sui_crypto::Signer;
-    use sui_sdk_types::UserSignature;
-    let user_signature: UserSignature = private_key
-        .try_sign(digest_bytes)
-        .map_err(|e| format!("Signing failed: {}", e))?;
-
-    // Serialize the UserSignature to bytes (Sui wire format)
-    let sig_bytes = bcs::to_bytes(&user_signature)
-        .map_err(|e| format!("Signature serialization failed: {}", e))?;
-
-    Ok(base64_encode(&sig_bytes))
 }
 
 // ============================================================
@@ -428,19 +600,55 @@ pub(crate) fn shared_http_client() -> &'static reqwest::Client {
     })
 }
 
+pub(crate) async fn sign_transaction_as_sponsor(
+    config: &Config,
+    tx_bytes_b64: &str,
+) -> Result<String, String> {
+    use sui_crypto::SuiSigner;
+
+    let private_key = parse_sponsor_private_key(&config.sponsor_private_key)?;
+    let tx_bytes = base64_decode(tx_bytes_b64)?;
+
+    // 反序列化为 sui_sdk_types::Transaction
+    let tx_data: sui_sdk_types::Transaction = bcs::from_bytes(&tx_bytes)
+        .map_err(|e| format!("Transaction deserialization failed: {}", e))?;
+
+    // 使用官方标准 API: SuiSigner::sign_transaction
+    // 内部自动计算 blake2b(Intent::sui_transaction() || BCS(tx_data)) 并签名
+    let user_signature = private_key
+        .sign_transaction(&tx_data)
+        .map_err(|e| format!("Signing failed: {}", e))?;
+
+    // 关键修复：使用 `UserSignature::to_bytes()` 获取原始签名字节
+    // （flag + sig + pubkey，例如 Ed25519 为 1+64+32=97 字节），
+    // 而非 `bcs::to_bytes(&sig)`，后者会额外附加 ULEB128 长度前缀，
+    // 导致 `sui_executeTransactionBlock` 报错 -32602 "Invalid value was given to the function"。
+    let sig_bytes = user_signature.to_bytes();
+
+    Ok(base64_encode(&sig_bytes))
+}
+
 /// Parse the sponsor's Ed25519 private key from a string.
 ///
 /// Supports two formats:
-/// 1. `suiprivkey<base64>` - Sui CLI export format (flag byte + 32-byte key)
+/// 1. `suiprivkey1<base64>` - Sui CLI export format (flag byte + 32-byte key)
 /// 2. Raw base64 of 32-byte Ed25519 private key
 pub(crate) fn parse_sponsor_private_key(private_key: &str) -> Result<sui_crypto::ed25519::Ed25519PrivateKey, String> {
-    // Handle suiprivkey prefix
-    let key_str = private_key.strip_prefix("suiprivkey").unwrap_or(private_key);
-    let key_bytes = base64_decode(key_str)?;
+    // Sui keystore format: suiprivkey1<bech32-data>
+    let key_bytes = if private_key.starts_with("suiprivkey1") {
+        let (hrp, data_u5, _variant) = bech32::decode(private_key)
+            .map_err(|e| format!("Bech32 decode error: {}", e))?;
+        if hrp != "suiprivkey" {
+            return Err(format!("Unexpected bech32 HRP: {} (expected suiprivkey)", hrp));
+        }
+        bech32::FromBase32::from_base32(&data_u5)
+            .map_err(|e| format!("Bech32 data convert error: {:?}", e))?
+    } else {
+        let key_str = private_key.strip_prefix("suiprivkey").unwrap_or(private_key);
+        let key_str = key_str.trim_start_matches(|c: char| c == '1' || c == '_');
+        base64_decode(key_str)?
+    };
 
-    // The key bytes should be either:
-    // - 33 bytes: 1 flag byte (0x00 for Ed25519) + 32 private key bytes
-    // - 32 bytes: raw Ed25519 private key
     let pk_bytes: [u8; 32] = if key_bytes.len() == 33 {
         if key_bytes[0] != 0 {
             return Err(format!("Unsupported key flag: {} (only Ed25519=0 is supported)", key_bytes[0]));
@@ -489,8 +697,13 @@ pub(crate) async fn sui_jsonrpc(
 
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     use base64::Engine;
-    let engine = base64::engine::general_purpose::STANDARD;
-    engine.decode(input).map_err(|e| format!("Base64 decode error: {}", e))
+    let std = base64::engine::general_purpose::STANDARD;
+    // Sui keys/transactions may use base64url (- and _ instead of + and /),
+    // so fall back to URL_SAFE_NO_PAD if STANDARD fails.
+    std.decode(input)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(input))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(input))
+        .map_err(|e| format!("Base64 decode error: {}", e))
 }
 
 fn base64_encode(input: &[u8]) -> String {

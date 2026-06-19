@@ -4,7 +4,12 @@ module texas_poker::side_pot;
 // u64 最大值约 1.8*10^19，此处限制为 10^18 留足安全余量。
 const MAX_TOTAL_BET: u64 = 1000000000000000000;
 
-// ========== 边池 ==========
+#[error]
+const EBetOverflow: vector<u8> = b"total bets exceed MAX_TOTAL_BET, possible overflow";
+
+#[error]
+const ELengthMismatch: vector<u8> = b"bets/folded/all_in vectors must have same length";
+
 public struct SidePot has store, copy, drop {
     amount: u64,
     eligible_seats: vector<u64>,
@@ -25,6 +30,8 @@ public fun calculate_side_pots(
     all_in: &vector<bool>,
 ): (u64, vector<SidePot>) {
     let n = bets.length();
+    // m4 修复：校验三个向量长度一致，防止越界访问
+    assert!(folded.length() == n && all_in.length() == n, ELengthMismatch);
     let total_pot = sum_bets(bets);
     let mut all_in_bets = collect_all_in_bets(bets, all_in);
 
@@ -108,6 +115,11 @@ public fun calculate_side_pots(
                 };
                 let pot_ref = vector::borrow_mut(&mut side_pots, merge_idx);
                 pot_ref.amount = pot_ref.amount + merge_amount;
+            } else {
+                // m5 修复：pop_back 后 side_pots 为空（原本仅一个 pot 且 eligible 为空），
+                // 将 merge_amount 重新放回，避免金额丢失。此时 eligible 为空，
+                // 由调用方处理（通常归还给唯一未弃牌玩家或主池）。
+                side_pots.push_back(new_side_pot(merge_amount, vector[]));
             };
         };
     };
@@ -133,7 +145,7 @@ fun sum_bets(bets: &vector<u64>): u64 {
     let mut i = 0;
     while (i < bets.length()) {
         total = total + bets[i];
-        assert!(total <= MAX_TOTAL_BET, 0);
+        assert!(total <= MAX_TOTAL_BET, EBetOverflow);
         i = i + 1;
     };
     total

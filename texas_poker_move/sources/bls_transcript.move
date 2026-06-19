@@ -99,7 +99,8 @@ public fun challenge_vec(t: &mut Transcript, label: &vector<u8>, n: u64): vector
 
 // ========== 访问器 ==========
 
-/// 获取当前状态（用于调试）
+/// 获取当前状态（仅用于测试调试）
+#[test_only]
 public fun state(t: &Transcript): &vector<u8> {
     &t.state
 }

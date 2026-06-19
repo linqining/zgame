@@ -1,6 +1,5 @@
 use crate::crypto::{
-    ElGamalCiphertext, Plaintext, Scalar, EcPoint,
-    BASE_G, DefaultCurve,
+    BASE_G, DefaultCurve, EcPoint, ElGamalCiphertext, Plaintext, Scalar, hash_to_scalar
 };
 use crate::z_poker::convert::{hex_to_scalar, scalar_to_hex, ecpoint_to_hex};
 use crate::zk_shuffle::error::VerificationError;
@@ -26,6 +25,12 @@ pub struct ClientPlayer {
 impl ClientPlayer {
     pub fn new() -> Self {
         let sk = Scalar::random(&mut OsRng);
+        let pk = *BASE_G * sk;
+        Self { sk, pk }
+    }
+    
+    pub fn new_with_wallet_address(wallet_address: &str) -> Self {
+        let sk = hash_to_scalar(wallet_address.as_bytes());
         let pk = *BASE_G * sk;
         Self { sk, pk }
     }

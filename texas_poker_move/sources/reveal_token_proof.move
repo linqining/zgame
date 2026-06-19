@@ -16,6 +16,7 @@ public struct RevealTokenProof has store, copy, drop {
     commitment_t1: vector<u8>,     // T1 = G * omega (G1 compressed bytes)
     commitment_t2: vector<u8>,     // T2 = c1 * omega (G1 compressed bytes)
     response_s: vector<u8>,        // s = omega + c * sk (scalar bytes)
+    nonce: vector<u8>,             // M4 修复：anti-replay nonce (scalar bytes)
 }
 
 // ========== 访问器 ==========
@@ -24,6 +25,7 @@ public fun user_public_key(proof: &RevealTokenProof): &vector<u8> { &proof.user_
 public fun commitment_t1(proof: &RevealTokenProof): &vector<u8> { &proof.commitment_t1 }
 public fun commitment_t2(proof: &RevealTokenProof): &vector<u8> { &proof.commitment_t2 }
 public fun response_s(proof: &RevealTokenProof): &vector<u8> { &proof.response_s }
+public fun nonce(proof: &RevealTokenProof): &vector<u8> { &proof.nonce }
 
 // ========== 构造函数 ==========
 
@@ -32,8 +34,9 @@ public fun new(
     commitment_t1: vector<u8>,
     commitment_t2: vector<u8>,
     response_s: vector<u8>,
+    nonce: vector<u8>,
 ): RevealTokenProof {
-    RevealTokenProof { user_public_key, commitment_t1, commitment_t2, response_s }
+    RevealTokenProof { user_public_key, commitment_t1, commitment_t2, response_s, nonce }
 }
 
 // ========== 验证 ==========
@@ -62,15 +65,11 @@ public fun verify(
     };
 
     // 4. 创建独立 transcript
-    // M-P14: TODO 安全改进——当前 RevealTokenProof 无 nonce 字段且使用独立 transcript，
-    // 存在重放风险（同一 proof 可能在不同上下文重用）。
-    // 建议改进：
-    //   1) 在 RevealTokenProof 结构体中新增 nonce: vector<u8> 字段；
-    //   2) 将 nonce 追加到 transcript（bls_transcript::append_message(&mut t, &b"nonce", &proof.nonce)）；
-    //   3) 在 table 层维护已使用 nonce 集合，拒绝重复 nonce。
-    // 当前未实现是因为改动会破坏已发布的 proof 结构和 table.move 的验证流程，
-    // 需要协调客户端同步升级。短期依赖 reveal_token 绑定到具体 encrypted_card 来缓解。
+    // M4 修复：将 nonce 加入 transcript，防止同一 proof 在不同上下文重放
     let mut t = bls_transcript::new(&b"reveal_token_proof_v3");
+
+    // M4 修复：追加 nonce 到 transcript
+    bls_transcript::append_message(&mut t, &b"reveal_token_nonce", &proof.nonce);
 
     // 反序列化证明元素
     let t1 = bls12381::g1_from_bytes(&proof.commitment_t1);

@@ -123,11 +123,16 @@ fun multiple_raises_update_min_raise() {
 }
 
 #[test]
-fun can_raise_requires_min_raise_above_call() {
+fun can_raise_requires_chips_beyond_call() {
     let round = betting::new_preflop(100);
-    // stack=150, to_call=100, remaining=50 < min_raise=100
-    assert!(!betting::can_raise(&round, 0, 150));
-    // stack=250, to_call=100, remaining=150 >= min_raise=100
+    // M-D7: can_raise allows any raise where stack > to_call (including short all-in)
+    // stack=100, to_call=100, remaining=0 → cannot raise
+    assert!(!betting::can_raise(&round, 0, 100));
+    // stack=50, to_call=100 → cannot even call, cannot raise
+    assert!(!betting::can_raise(&round, 0, 50));
+    // stack=150, to_call=100, remaining=50 → can raise (short all-in)
+    assert!(betting::can_raise(&round, 0, 150));
+    // stack=250, to_call=100, remaining=150 → can raise (full raise)
     assert!(betting::can_raise(&round, 0, 250));
 }
 

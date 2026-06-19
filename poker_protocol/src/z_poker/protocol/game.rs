@@ -25,11 +25,13 @@ use std::collections::HashMap;
 ///
 /// Uses BLS12-381 hash_to_g1 with label "texas_poker/card/{i}",
 /// matching the Move contract's `generate_plaintext_cards()`.
+/// DST 必须与 Sui `bls12381::hash_to_g1` 一致：`BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_`
 pub fn new_plain_text() -> Vec<Plaintext> {
+    const BLS_DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
     (0..N_CARDS)
         .map(|i| {
             let label = format!("texas_poker/card/{}", i);
-            G1Projective::hash_to_curve(label.as_bytes(), b"", b"")
+            G1Projective::hash_to_curve(label.as_bytes(), BLS_DST, b"")
         })
         .collect()
 }

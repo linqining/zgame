@@ -14,10 +14,9 @@ use tokio::sync::RwLock as TokioRwLock;
 
 use crate::auth;
 use crate::config::Config;
-use crate::models::{Database, UserResponse};
+use crate::models::{chips_from_mist, Database, UserResponse};
 use crate::pokergame::player::{Player, WalletAddress};
 use crate::pokergame::game_state::SubmitRevealTokenJson;
-use crate::relayer::RelayerState;
 use crate::socket::SocketState;
 use crate::socket::broadcast::CryptoEventType;
 use crate::pokergame::game_state::RevealPhase;
@@ -32,26 +31,71 @@ pub struct AppState {
     pub db: Database,
     pub config: Config,
     pub socket_state: Arc<SocketState>,
-    pub relayer_state: Arc<RelayerState>,
+    /// C2 去重：已处理的玩家行动事件去重缓存。
+    /// key 为 `(table_id, seat_index, action, round_state)`。
+    pub processed_actions: Arc<std::sync::RwLock<HashSet<String>>>,
     /// C3 修复：已处理的 webhook 事件 ID 集合，用于重放保护。
     /// 使用 tokio RwLock 因为 webhook handler 是 async 且需要持有锁跨越 await。
     pub processed_webhook_ids: Arc<TokioRwLock<HashSet<String>>>,
+    /// Task 10: 玩家行动事件重试队列。
+    /// 当行动事件因 `summary=None` 或 game_loop 通道关闭而无法立即处理时，
+    /// 推入此队列由后台任务定期重试。使用 std::sync::Mutex 因为锁内操作很短
+    /// （仅 push/pop），实际的 async 工作在释放锁后执行。
+    pub action_retry_queue: Arc<std::sync::Mutex<Vec<crate::relayer::PendingAction>>>,
 }
 
 /// processed_webhook_ids 的最大容量，超过后清空重建。
 const MAX_PROCESSED_WEBHOOK_IDS: usize = 10000;
 
-#[derive(Deserialize,Debug)]
-struct LoginRequest {
-    email: String,
-    password: String,
-}
+/// processed_actions 的最大容量，超过后清空重建。
+const MAX_PROCESSED_ACTIONS: usize = 10000;
 
-#[derive(Deserialize)]
-struct RegisterRequest {
-    name: String,
-    email: String,
-    password: String,
+impl AppState {
+    /// C2 修复：检查并标记玩家行动事件是否已处理。
+    /// 返回 `true` 表示首次处理（已写入缓存），`false` 表示重复事件（应跳过）。
+    pub fn check_and_mark_action(
+        &self,
+        table_id: &str,
+        seat_index: u64,
+        action: &str,
+        round_state: u8,
+    ) -> bool {
+        let key = format!("{}_{}_{}_{}", table_id, seat_index, action, round_state);
+        let mut processed = self
+            .processed_actions
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if processed.contains(&key) {
+            return false;
+        }
+        // 容量控制：超过上限时清空（简单策略，避免无界增长）
+        if processed.len() >= MAX_PROCESSED_ACTIONS {
+            processed.clear();
+        }
+        processed.insert(key);
+        true
+    }
+
+    /// Task 16: 全事件去重 - 对所有 SuiChainEvent 变体进行去重。
+    ///
+    /// 与 `check_and_mark_action` 不同，本方法对所有事件类型（不仅是行动事件）
+    /// 进行去重。key 由 `build_event_dedup_key` 生成，带 `evt:` 前缀以与
+    /// 行动事件的 key 区分。返回 `true` 表示首次处理，`false` 表示重复事件。
+    pub fn check_and_mark_event(&self, event: &crate::sui_events::SuiChainEvent) -> bool {
+        let key = crate::relayer::build_event_dedup_key(event);
+        let mut processed = self
+            .processed_actions
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if processed.contains(&key) {
+            return false;
+        }
+        if processed.len() >= MAX_PROCESSED_ACTIONS {
+            processed.clear();
+        }
+        processed.insert(key);
+        true
+    }
 }
 
 pub fn get_token_from_headers(headers: &HeaderMap) -> Option<String> {
@@ -61,13 +105,14 @@ pub fn get_token_from_headers(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn user_to_response(user: &crate::models::User) -> serde_json::Value {
+fn user_to_response(user: &crate::models::User, sui_balance_mist: u64) -> serde_json::Value {
+    let chips_amount = chips_from_mist(sui_balance_mist) - user.locked_chips;
     let resp = UserResponse {
         id: user.id.clone(),
         name: user.name.clone(),
-        email: user.email.clone(),
-        chips_amount: user.chips_amount,
-        user_type: user.user_type,
+        address: user.address.clone(),
+        chips_amount,
+        sui_balance: sui_balance_mist,
         created: user.created.clone(),
     };
     serde_json::to_value(&resp).unwrap_or_else(|_| serde_json::json!({}))
@@ -77,37 +122,72 @@ pub async fn get_current_user(
     headers: HeaderMap,
     Extension(state): Extension<Arc<AppState>>,
 ) -> Response {
-    tracing::debug!("[get_current_user] request received");
+    // tracing::debug!("[get_current_user] request received");
     let token = match get_token_from_headers(&headers) {
         Some(t) => {
-            tracing::debug!("[get_current_user] token found in headers");
+            // tracing::debug!("[get_current_user] token found in headers");
             t
         }
         None => {
-            tracing::warn!("[get_current_user] no x-auth-token header found");
+            // tracing::warn!("[get_current_user] no x-auth-token header found");
             return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response();
         }
     };
 
     match auth::verify_token(&token, &state.config.jwt_secret) {
         Ok(claims) => {
-            tracing::debug!("[get_current_user] token verified, user_id={}", claims.user.id);
+            // tracing::debug!("[get_current_user] token verified, user_id={}", claims.user.id);
             match state.db.find_user_by_id(&claims.user.id).await {
                 Some(user) => {
-                    tracing::debug!("[get_current_user] user found, id={}, name={}", user.id, user.name);
-                    (StatusCode::OK, Json(user_to_response(&user))).into_response()
+                    let sui_balance = match crate::sui_query::fetch_sui_balance(&state.config.fullnode_url, &user.address).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            // tracing::warn!("[get_current_user] failed to fetch SUI balance for {}: {}", user.address, e);
+                            0
+                        }
+                    };
+                    (StatusCode::OK, Json(user_to_response(&user, sui_balance))).into_response()
                 }
                 None => {
-                    tracing::warn!("[get_current_user] user not found in db, id={}", claims.user.id);
+                    // tracing::warn!("[get_current_user] user not found in db, id={}", claims.user.id);
                     (StatusCode::NOT_FOUND, Json(serde_json::json!({"msg": "User not found"}))).into_response()
                 }
             }
         }
         Err(_) => {
-            tracing::warn!("[get_current_user] token verification failed");
+            // tracing::warn!("[get_current_user] token verification failed");
             (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response()
         }
     }
+}
+
+/// GET /api/sui/balance — 返回当前认证用户的 SUI 余额和筹码余额
+pub async fn get_sui_balance(
+    headers: HeaderMap,
+    Extension(state): Extension<Arc<AppState>>,
+) -> Response {
+    let claims = match verify_auth(&headers, &state.config.jwt_secret) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
+    let user = match state.db.find_user_by_id(&claims.user.id).await {
+        Some(u) => u,
+        None => return err_resp(StatusCode::NOT_FOUND, "User not found"),
+    };
+
+    let sui_balance = match crate::sui_query::fetch_sui_balance(&state.config.fullnode_url, &user.address).await {
+        Ok(b) => b,
+        Err(e) => return err_resp(StatusCode::BAD_GATEWAY, &format!("Failed to fetch SUI balance: {}", e)),
+    };
+
+    let chips_amount = chips_from_mist(sui_balance) - user.locked_chips;
+    (StatusCode::OK, Json(serde_json::json!({
+        "suiBalance": sui_balance,
+        "chipsAmount": chips_amount,
+        "lockedChips": user.locked_chips,
+        "address": user.address,
+    }))).into_response()
 }
 
 #[derive(Deserialize)]
@@ -221,17 +301,17 @@ pub async fn join_game(
             return err_resp(StatusCode::UNAUTHORIZED, "User not found");
         }
     };
-    let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
-    let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
-    if user_pk != req_pk {
-        tracing::warn!(
-            "[join_game] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
-            claims.user.id,
-            user_pk,
-            req_pk
-        );
-        return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
-    }
+    // let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
+    // let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
+    // if user_pk != req_pk {
+    //     tracing::warn!(
+    //         "[join_game] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
+    //         claims.user.id,
+    //         user_pk,
+    //         req_pk
+    //     );
+    //     return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
+    // }
 
     let pk_hex = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
 
@@ -319,17 +399,17 @@ pub async fn player_action(
 
     // A2 修复：验证请求中的 pk_hex 属于已认证用户
     // User.address 存储的是用户绑定的 pk_hex（钱包登录时为 pk_hex，注册时为生成的 pk_hex）
-    let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
-    let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
-    if user_pk != req_pk {
-        tracing::warn!(
-            "[player_action] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
-            claims.user.id,
-            user_pk,
-            req_pk
-        );
-        return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
-    }
+    // let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
+    // let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
+    // if user_pk != req_pk {
+    //     tracing::warn!(
+    //         "[player_action] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
+    //         claims.user.id,
+    //         user_pk,
+    //         req_pk
+    //     );
+    //     return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
+    // }
 
 
     let sender = match state.socket_state.get_action_sender(table_id).await {
@@ -408,17 +488,18 @@ pub async fn submit_reveal_token(
             return err_resp(StatusCode::UNAUTHORIZED, "User not found");
         }
     };
-    let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
-    let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
-    if user_pk != req_pk {
-        tracing::warn!(
-            "[submit_reveal_token] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
-            claims.user.id,
-            user_pk,
-            req_pk
-        );
-        return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
-    }
+    //todo find game pk
+    // let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
+    // let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
+    // if user_pk != req_pk {
+    //     tracing::warn!(
+    //         "[submit_reveal_token] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
+    //         claims.user.id,
+    //         user_pk,
+    //         req_pk
+    //     );
+    //     return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
+    // }
 
     let player_pk = match hex_to_ecpoint(&body.pk_hex) {
         Ok(pt) => pt,
@@ -475,6 +556,7 @@ pub async fn submit_reveal_token(
             None,
             false,
             Some(format!("reveal_token proof verification failed: {}", e)),
+            None,
         ).await;
         return err_resp(StatusCode::BAD_REQUEST, &e);
     }
@@ -488,6 +570,7 @@ pub async fn submit_reveal_token(
         None,
         true,
         Some("reveal_token proof verified".to_string()),
+        None,
     ).await;
 
     // todo 发送完成通知
@@ -504,6 +587,9 @@ pub async fn submit_reveal_token(
 
     if all_complete {
         match reveal_phase {
+            RevealPhase::None => {
+                tracing::warn!("[submit_reveal_token] all_complete but reveal_phase is None, table_id={}", table_id);
+            }
             RevealPhase::HandReveal  => {
                 state.socket_state.broadcast_hand_reveal_result(table_id).await;
             }
@@ -530,52 +616,11 @@ pub async fn submit_reveal_token(
 }
 
 pub async fn login(
-    Extension(state): Extension<Arc<AppState>>,
-    req: Request<Body>,
+    Extension(_state): Extension<Arc<AppState>>,
+    _req: Request<Body>,
 ) -> Response {
-    tracing::debug!("[login] request received");
-    let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
-        Ok(b) => b,
-        Err(_) => {
-            tracing::warn!("[login] failed to read request body");
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid request body"}]}))).into_response();
-        }
-    };
-    let body = match serde_json::from_slice::<LoginRequest>(&body) {
-        Ok(v) => {
-            tracing::debug!("[login] parsed body, email={}", v.email);
-            v
-        }
-        Err(_) => {
-            tracing::warn!("[login] failed to parse JSON body");
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid JSON"}]}))).into_response();
-        }
-    };
-    
-    let Some(user) = state.db.find_user_by_email(&body.email).await else {
-        tracing::warn!("[login] user not found, email={}", body.email);
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid credentials"}]}))).into_response();
-    };
-
-    match bcrypt::verify(&body.password, &user.password) {
-        Ok(true) => {
-            tracing::debug!("[login] password verified, user_id={}", user.id);
-            match auth::create_token(&user.id, &state.config.jwt_secret, state.config.jwt_token_expires_in) {
-                Ok(token) => {
-                    tracing::debug!("[login] token created, user_id={}", user.id);
-                    (StatusCode::OK, Json(serde_json::json!({"token": token}))).into_response()
-                }
-                Err(_) => {
-                    tracing::error!("[login] failed to create token, user_id={}", user.id);
-                    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response()
-                }
-            }
-        }
-        _ => {
-            tracing::warn!("[login] password verification failed, email={}", body.email);
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid credentials"}]}))).into_response()
-        }
-    }
+    // 钱包登录模式下已禁用邮箱/密码登录
+    (StatusCode::NOT_FOUND, Json(serde_json::json!({"msg": "Email/password login is disabled. Please use wallet login."}))).into_response()
 }
 
 #[derive(Deserialize, Debug)]
@@ -608,7 +653,7 @@ pub async fn wallet_login(
         }
     };
 
-    let (address, pk_hex) = match wallet_auth::verify_sui_wallet_signature(&body.message, &body.signature, &body.address).await {
+    let (address, pk_hex) = match wallet_auth::verify_sui_wallet_signature(&body.message, &body.signature, &body.address, &state.config.sui_network).await {
         Ok(result) => {
             tracing::debug!("[wallet_login] wallet signature verified, address={}", result.0);
             result
@@ -626,13 +671,9 @@ pub async fn wallet_login(
         let user = crate::models::User {
             id: user_id.clone(),
             name: address.clone(),
-            email: format!("{}@wallet", address),
-            password: bcrypt::hash(&uuid::Uuid::new_v4().to_string(), 10).unwrap_or_default(),
-            chips_amount: state.config.initial_chips_amount,
-            user_type: 1,
-            created: chrono::Utc::now().to_rfc3339(),
             address: address.clone(),
-            last_free_chips_at: None,
+            created: chrono::Utc::now().to_rfc3339(),
+            locked_chips: 0,
         };
         if let Err(e) = state.db.save_user(&user).await {
             tracing::error!("[wallet_login] failed to save wallet user, user_id={}, error={}", user_id, e);
@@ -705,125 +746,19 @@ pub async fn wallet_logout(
 }
 
 pub async fn register(
-    Extension(state): Extension<Arc<AppState>>,
-    req: Request<Body>,
+    Extension(_state): Extension<Arc<AppState>>,
+    _req: Request<Body>,
 ) -> Response {
-    tracing::debug!("[register] request received");
-    let body = match axum::body::to_bytes(req.into_body(), 1024 * 64).await {
-        Ok(b) => b,
-        Err(_) => {
-            tracing::warn!("[register] failed to read request body");
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid request body"}]}))).into_response();
-        }
-    };
-    let body = match serde_json::from_slice::<RegisterRequest>(&body) {
-        Ok(v) => {
-            tracing::debug!("[register] parsed body, name={}, email={}", v.name, v.email);
-            v
-        }
-        Err(_) => {
-            tracing::warn!("[register] failed to parse JSON body");
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid JSON"}]}))).into_response();
-        }
-    };
-
-    if state.db.find_user_by_email(&body.email).await.is_some()
-        || state.db.find_user_by_name(&body.name).await.is_some()
-    {
-        tracing::warn!("[register] email or name already exists, name={}, email={}", body.name, body.email);
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid credentials"}]}))).into_response();
-    }
-
-    let Ok(hashed) = bcrypt::hash(&body.password, 10) else {
-        tracing::error!("[register] failed to hash password");
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response();
-    };
-    
-    let client_player = ClientPlayer::new();
-    let (_sk_hex, pk_hex) = client_player.get_sk_and_pk_hex();
-    tracing::debug!("[register] generated keys, pk_hex={}", pk_hex);
-    let user = crate::models::User {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: body.name.clone(),
-        email: body.email.clone(),
-        password: hashed,
-        chips_amount: state.config.initial_chips_amount,
-        user_type: 0,
-        created: chrono::Utc::now().to_rfc3339(),
-        address: pk_hex,
-        last_free_chips_at: None,
-    };
-
-    let user_id = user.id.clone();
-    if state.db.save_user(&user).await.is_err() {
-        tracing::error!("[register] failed to save user, user_id={}", user_id);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response();
-    }
-    tracing::debug!("[register] user saved, user_id={}", user_id);
-
-    match auth::create_token(&user_id, &state.config.jwt_secret, state.config.jwt_token_expires_in) {
-        Ok(token) => {
-            tracing::debug!("[register] token created, user_id={}", user_id);
-            (StatusCode::OK, Json(serde_json::json!({"token": token}))).into_response()
-        }
-        Err(_) => {
-            tracing::error!("[register] failed to create token, user_id={}", user_id);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"msg": "Internal server error"}))).into_response()
-        }
-    }
+    // 钱包登录模式下已禁用注册
+    (StatusCode::NOT_FOUND, Json(serde_json::json!({"msg": "Registration is disabled. Please use wallet login."}))).into_response()
 }
 
 pub async fn free_chips(
-    headers: HeaderMap,
-    Extension(state): Extension<Arc<AppState>>,
+    _headers: HeaderMap,
+    Extension(_state): Extension<Arc<AppState>>,
 ) -> Response {
-    tracing::debug!("[free_chips] request received");
-    let token = match get_token_from_headers(&headers) {
-        Some(t) => {
-            tracing::debug!("[free_chips] token found in headers");
-            t
-        }
-        None => {
-            tracing::warn!("[free_chips] no x-auth-token header found");
-            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response();
-        }
-    };
-
-    match auth::verify_token(&token, &state.config.jwt_secret) {
-        Ok(claims) => {
-            tracing::debug!("[free_chips] token verified, user_id={}", claims.user.id);
-            match state.db.find_user_by_id(&claims.user.id).await {
-                Some(user) if user.chips_amount < 1000 => {
-                    // F12: 使用原子操作避免竞态绕过冷却
-                    // set_chips_with_cooldown 内部在 update filter 中包含冷却时间检查，
-                    // 只有冷却已过才会匹配并更新，避免 check-then-update 竞态
-                    tracing::debug!("[free_chips] user eligible, user_id={}, current_chips={}", user.id, user.chips_amount);
-                    match state.db.set_chips_with_cooldown(&user.id, state.config.initial_chips_amount).await {
-                        Some(updated) => {
-                            tracing::debug!("[free_chips] chips updated, user_id={}, new_chips={}", updated.id, updated.chips_amount);
-                            (StatusCode::OK, Json(user_to_response(&updated))).into_response()
-                        }
-                        None => {
-                            tracing::warn!("[free_chips] cooldown active or update failed, user_id={}", user.id);
-                            (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"errors": [{"msg": "Please wait before claiming free chips again"}]}))).into_response()
-                        }
-                    }
-                }
-                Some(user) => {
-                    tracing::warn!("[free_chips] user has enough chips, user_id={}, chips={}", user.id, user.chips_amount);
-                    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"errors": [{"msg": "Invalid request"}]}))).into_response()
-                }
-                None => {
-                    tracing::warn!("[free_chips] user not found after token verification, user_id={}", claims.user.id);
-                    StatusCode::NOT_FOUND.into_response()
-                }
-            }
-        }
-        Err(_) => {
-            tracing::warn!("[free_chips] token verification failed");
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"msg": "Unauthorized request!"}))).into_response()
-        }
-    }
+    // 钱包登录模式下筹码由 SUI 余额决定，不再提供免费筹码
+    (StatusCode::NOT_FOUND, Json(serde_json::json!({"msg": "Free chips is disabled. Chips are derived from SUI wallet balance (1 SUI = 10000 chips)."}))).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -832,7 +767,11 @@ pub async fn free_chips(
 
 /// GET /api/sui/tables — 返回所有缓存的 TableSummary 列表
 pub async fn list_sui_tables(Extension(state): Extension<Arc<AppState>>) -> Response {
-    let tables = state.relayer_state.list();
+    let gs = state.socket_state.state.read().await;
+    let tables: Vec<crate::sui_events::TableSummaryV2> = gs.tables.values()
+        .filter(|t| t.chain_table_id.is_some())
+        .map(|t| t.summary.clone())
+        .collect();
     (StatusCode::OK, Json(tables)).into_response()
 }
 
@@ -841,20 +780,27 @@ pub async fn get_sui_table(
     Extension(state): Extension<Arc<AppState>>,
     Path(table_id): Path<String>,
 ) -> Response {
-    match state.relayer_state.get(&table_id) {
+    let gs = state.socket_state.state.read().await;
+    let found = gs.tables.values()
+        .find(|t| t.chain_table_id.as_deref() == Some(&table_id))
+        .map(|t| t.summary.clone());
+    match found {
         Some(summary) => (StatusCode::OK, Json(summary)).into_response(),
-        None => err_resp(StatusCode::NOT_FOUND, &format!("Table {} not cached", table_id)),
+        None => err_resp(StatusCode::NOT_FOUND, &format!("Table {} not found", table_id)),
     }
 }
 
-/// POST /api/sui/tables/:table_id/refresh — 从链上重新拉取 TableSummary 并更新缓存
+/// POST /api/sui/tables/:table_id/refresh — 从链上重新拉取 TableSummary 并更新 GameState
 pub async fn refresh_sui_table(
     Extension(state): Extension<Arc<AppState>>,
     Path(table_id): Path<String>,
 ) -> Response {
     match crate::sui_query::fetch_table_summary(&state.config.fullnode_url, &state.config.sui_package_id, &table_id).await {
         Ok(summary) => {
-            state.relayer_state.insert(table_id, summary.clone());
+            let mut gs = state.socket_state.state.write().await;
+            if let Some(table) = gs.tables.values_mut().find(|t| t.chain_table_id.as_deref() == Some(&table_id)) {
+                table.summary = summary.clone();
+            }
             (StatusCode::OK, Json(summary)).into_response()
         }
         Err(e) => err_resp(StatusCode::BAD_GATEWAY, &format!("Failed to fetch table: {}", e)),
@@ -872,13 +818,30 @@ struct BuildActionRequest {
     seat_index: u64,
     // raise 特有
     total_bet: Option<u64>,
-    // join_and_shuffle 特有
-    buy_in: Option<u64>,
+    // join_and_shuffle_verified 特有
+    /// 买入用的 SUI Coin 对象 ID (hex)，合约已改为接收 Coin<SUI>
+    coin_object_id: Option<String>,
+    /// 买入筹码数量（1 chip = 100_000 MIST），用于 SplitCoins 精确拆分
+    amount: Option<u64>,
     pk: Option<String>,
     pk_ownership_proof: Option<String>,
+    mask_cards: Option<String>,
     output_cards: Option<String>,
     remask_proof_bytes: Option<String>,
     shuffle_proof_bytes: Option<String>,
+    // Task 7: reconstruct 特有
+    swap_cards: Option<String>,
+    user_readable_cards: Option<String>,
+    reconstruct_proof_bytes: Option<String>,
+    // Task 7: reveal 特有
+    // assignment_indices 为逗号分隔的 u64 列表（如 "0,1,2"）
+    assignment_indices: Option<String>,
+    // reveal_tokens / reveal_proof_bytes_list 为分号分隔的 hex/base64 列表（如 "aabb;ccdd"）
+    reveal_tokens: Option<String>,
+    reveal_proof_bytes_list: Option<String>,
+    // leave_with_proof_verified 特有
+    /// leave 证明字节（hex 或 base64），对应 Move 合约的 leave_proof_bytes 参数
+    leave_proof_bytes: Option<String>,
 }
 
 /// 解码 hex 或 base64 字符串为 Vec<u8>。
@@ -923,46 +886,182 @@ pub async fn build_action_ptb(
             };
             crate::relayer::ptb::build_raise_ptb(package_id, table_id, seat_index, total_bet)
         }
-        "join_and_shuffle" => {
-            let buy_in = match req.buy_in {
+        "join_and_shuffle_verified" => {
+            let coin_object_id = match req.coin_object_id {
                 Some(v) => v,
-                None => return err_resp(StatusCode::BAD_REQUEST, "Missing buy_in for join_and_shuffle action"),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing coin_object_id for join_and_shuffle_verified action"),
             };
             let pk = match req.pk.as_deref().map(decode_hex_or_base64) {
                 Some(Ok(v)) => v,
                 Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid pk: {}", e)),
-                None => return err_resp(StatusCode::BAD_REQUEST, "Missing pk for join_and_shuffle action"),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing pk for join_and_shuffle_verified action"),
             };
             let pk_ownership_proof = match req.pk_ownership_proof.as_deref().map(decode_hex_or_base64) {
                 Some(Ok(v)) => v,
                 Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid pk_ownership_proof: {}", e)),
-                None => return err_resp(StatusCode::BAD_REQUEST, "Missing pk_ownership_proof for join_and_shuffle action"),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing pk_ownership_proof for join_and_shuffle_verified action"),
+            };
+            let mask_cards = match req.mask_cards.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid mask_cards: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing mask_cards for join_and_shuffle_verified action"),
             };
             let output_cards = match req.output_cards.as_deref().map(decode_hex_or_base64) {
                 Some(Ok(v)) => v,
                 Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid output_cards: {}", e)),
-                None => return err_resp(StatusCode::BAD_REQUEST, "Missing output_cards for join_and_shuffle action"),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing output_cards for join_and_shuffle_verified action"),
             };
             let remask_proof_bytes = match req.remask_proof_bytes.as_deref().map(decode_hex_or_base64) {
                 Some(Ok(v)) => v,
                 Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid remask_proof_bytes: {}", e)),
-                None => return err_resp(StatusCode::BAD_REQUEST, "Missing remask_proof_bytes for join_and_shuffle action"),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing remask_proof_bytes for join_and_shuffle_verified action"),
             };
             let shuffle_proof_bytes = match req.shuffle_proof_bytes.as_deref().map(decode_hex_or_base64) {
                 Some(Ok(v)) => v,
                 Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid shuffle_proof_bytes: {}", e)),
-                None => return err_resp(StatusCode::BAD_REQUEST, "Missing shuffle_proof_bytes for join_and_shuffle action"),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing shuffle_proof_bytes for join_and_shuffle_verified action"),
+            };
+            let amount_mist = match req.amount {
+                Some(v) => v * 100_000, // chips → MIST
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing amount for join_and_shuffle_verified action"),
             };
             crate::relayer::ptb::build_join_and_shuffle_ptb(
                 package_id,
                 table_id,
                 seat_index,
-                buy_in,
+                &coin_object_id,
+                amount_mist,
                 pk,
                 pk_ownership_proof,
+                mask_cards,
                 output_cards,
                 remask_proof_bytes,
                 shuffle_proof_bytes,
+            )
+        }
+        "shuffle" => {
+            let output_cards = match req.output_cards.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid output_cards: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing output_cards for shuffle action"),
+            };
+            let shuffle_proof_bytes = match req.shuffle_proof_bytes.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid shuffle_proof_bytes: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing shuffle_proof_bytes for shuffle action"),
+            };
+            crate::relayer::ptb::build_submit_shuffle_ptb(
+                package_id,
+                table_id,
+                output_cards,
+                shuffle_proof_bytes,
+            )
+        }
+        "reconstruct" => {
+            let output_cards = match req.output_cards.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid output_cards: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing output_cards for reconstruct action"),
+            };
+            let swap_cards = match req.swap_cards.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid swap_cards: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing swap_cards for reconstruct action"),
+            };
+            let user_readable_cards = match req.user_readable_cards.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid user_readable_cards: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing user_readable_cards for reconstruct action"),
+            };
+            let reconstruct_proof_bytes = match req.reconstruct_proof_bytes.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid reconstruct_proof_bytes: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing reconstruct_proof_bytes for reconstruct action"),
+            };
+            crate::relayer::ptb::build_submit_reconstruct_deck_ptb(
+                package_id,
+                table_id,
+                output_cards,
+                swap_cards,
+                user_readable_cards,
+                reconstruct_proof_bytes,
+            )
+        }
+        "reveal" => {
+            // assignment_indices: 逗号分隔的 u64 列表
+            let assignment_indices: Vec<u64> = match req.assignment_indices.as_deref() {
+                Some(s) => {
+                    let parsed: Result<Vec<u64>, _> = s
+                        .split(',')
+                        .map(|p| p.trim().parse::<u64>())
+                        .collect();
+                    match parsed {
+                        Ok(v) => v,
+                        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid assignment_indices: {}", e)),
+                    }
+                }
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing assignment_indices for reveal action"),
+            };
+            // reveal_tokens: 分号分隔的 hex/base64 列表
+            let reveal_tokens: Vec<Vec<u8>> = match req.reveal_tokens.as_deref() {
+                Some(s) => {
+                    let parsed: Result<Vec<Vec<u8>>, String> = s
+                        .split(';')
+                        .map(decode_hex_or_base64)
+                        .collect();
+                    match parsed {
+                        Ok(v) => v,
+                        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &e),
+                    }
+                }
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing reveal_tokens for reveal action"),
+            };
+            // reveal_proof_bytes_list: 分号分隔的 hex/base64 列表
+            let reveal_proof_bytes_list: Vec<Vec<u8>> = match req.reveal_proof_bytes_list.as_deref() {
+                Some(s) => {
+                    let parsed: Result<Vec<Vec<u8>>, String> = s
+                        .split(';')
+                        .map(decode_hex_or_base64)
+                        .collect();
+                    match parsed {
+                        Ok(v) => v,
+                        Err(e) => return err_resp(StatusCode::BAD_REQUEST, &e),
+                    }
+                }
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing reveal_proof_bytes_list for reveal action"),
+            };
+            crate::relayer::ptb::build_submit_reveal_tokens_ptb(
+                package_id,
+                table_id,
+                assignment_indices,
+                reveal_tokens,
+                reveal_proof_bytes_list,
+            )
+        }
+        "leave_with_proof_verified" => {
+            let output_cards = match req.output_cards.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid output_cards: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing output_cards for leave_with_proof_verified action"),
+            };
+            let leave_proof_bytes = match req.leave_proof_bytes.as_deref().map(decode_hex_or_base64) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return err_resp(StatusCode::BAD_REQUEST, &format!("Invalid leave_proof_bytes: {}", e)),
+                None => return err_resp(StatusCode::BAD_REQUEST, "Missing leave_proof_bytes for leave_with_proof_verified action"),
+            };
+            crate::relayer::ptb::build_leave_with_proof_ptb(
+                package_id,
+                table_id,
+                seat_index,
+                output_cards,
+                leave_proof_bytes,
+            )
+        }
+        "leave_table" => {
+            crate::relayer::ptb::build_leave_table_ptb(
+                package_id,
+                table_id,
+                seat_index,
             )
         }
         other => {
@@ -973,6 +1072,25 @@ pub async fn build_action_ptb(
     let ptb = match ptb_result {
         Ok(p) => p,
         Err(e) => return err_resp(StatusCode::BAD_REQUEST, &e),
+    };
+
+    // Resolve shared object initial_shared_version for Shinami Gas Station compatibility.
+    // Shinami does not resolve version 0 automatically (unlike Sui fullnode RPC).
+    let http = crate::sponsor::shared_http_client();
+    let ptb = match crate::relayer::ptb::resolve_shared_object_versions(
+        http,
+        &state.config.fullnode_url,
+        ptb,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            return err_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to resolve shared object versions: {}", e),
+            )
+        }
     };
 
     match crate::relayer::ptb::serialize_tx_kind(ptb) {
@@ -997,11 +1115,13 @@ pub async fn manual_tick(
     }
 
     // 检查 active_count，空桌或单桌不提交 tick，避免浪费 gas
-    let active_count = state
-        .relayer_state
-        .get(&table_id)
-        .map(|s| s.meta.active_count)
-        .unwrap_or(0);
+    let active_count = {
+        let gs = state.socket_state.state.read().await;
+        gs.tables.values()
+            .find(|t| t.chain_table_id.as_deref() == Some(&table_id))
+            .map(|t| t.summary.meta.active_count)
+            .unwrap_or(0)
+    };
     if active_count < 2 {
         return err_resp(
             StatusCode::OK,

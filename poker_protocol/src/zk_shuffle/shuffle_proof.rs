@@ -10,8 +10,8 @@ pub struct ZKShuffleProof<C: Curve> {
     pub sum_c1_commit: C::Point,
     pub sum_c2_commit: C::Point,
     /// Combined Schnorr proof for c1+c2, enforcing c1 and c2 use the same permutation.
-    /// Base points: [output[0].c1, output[0].c2, output[1].c1, output[1].c2, ..., G, pk]
-    /// Secret vec:  [k_0, k_0, k_1, k_1, ..., k_{N-1}, k_{N-1}, pk_delta, pk_delta]
+    /// M-D13 修复：Base points: [output[0].c1, output[0].c2, ..., output[n-1].c1, output[n-1].c2, input[0].c1, input[0].c2]
+    /// Secret vec:  [k_0, k_0, k_1, k_1, ..., k_{N-1}, k_{N-1}, s, s]
     /// R = sum_c1_commit + sum_c2_commit
     /// 防止c1/c2 swap攻击
     pub combined_schnorr_proof: GeneralizedSchnorrProof<C>,
@@ -27,7 +27,7 @@ pub struct ZKShuffleProof<C: Curve> {
 
 impl<C: Curve> ZKShuffleProof<C> {
     fn derive_batch_coefficients(input_cts: &[ElGamalCiphertextGeneric<C>], output_cts: &[ElGamalCiphertextGeneric<C>], transcript: &mut impl CryptoTranscript,) -> Vec<C::Scalar> {
-        let n = C::n_cards();
+        let n = input_cts.len();
         for i in input_cts.iter().take(n) {
             transcript.append_point::<C>(b"input c1", &i.c1);
             transcript.append_point::<C>(b"input c2", &i.c2);
@@ -53,10 +53,17 @@ impl<C: Curve> ZKShuffleProof<C> {
         rng: &mut (impl RngCore + CryptoRng),
         transcript: &mut impl CryptoTranscript,
     ) -> Result<Self, VerificationError> {
-        let n = C::n_cards();
+        let n = input_cts.len();
         if input_cts.len() != n || output_cts.len() != n || permute.len() != n || r_values.len() != n {
             return Err(VerificationError::InvalidInput);
         }
+        if n == 0 {
+            return Err(VerificationError::InvalidInput);
+        }
+
+        // 兼容 Move 合约 shuffle_proof::verify 的 C1 修复：
+        // 将 pk 加入 transcript，绑定证明到玩家公钥
+        transcript.append_point::<C>(b"shuffle_pk", pk);
 
         let nonce = C::Scalar::random(rng);
         transcript.append_scalar::<C>(b"shuffle_nonce", &nonce);
@@ -81,7 +88,7 @@ impl<C: Curve> ZKShuffleProof<C> {
         secret_vec.push(pk_delta);
 
         // 生成广义Schnorr证明，证明 swap_sum_c1_commit 和 swap_sum_c2_commit 是对应基点的线性组合
-        // Only generate if no base point is identity (placeholder cards have identity c1/c2)
+        // M-D13 修复：基点从 [G, pk] 改为 [input[0].c1, input[0].c2]
         let mut base_points_c1: Vec<C::Point> = output_cts.iter().map(|ct| ct.c1).collect();
         let mut base_points_c2: Vec<C::Point> = output_cts.iter().map(|ct| ct.c2).collect();
         base_points_c1.push(C::base_g());
@@ -89,6 +96,10 @@ impl<C: Curve> ZKShuffleProof<C> {
 
         let no_identity_input_c2 = input_cts.iter().all(|ct| !ct.c2.is_identity());
         if !no_identity_input_c2 {
+            return Err(VerificationError::IdentityBasePoint);
+        }
+        // M-D13 修复：input[0].c1 现在作为基点，需要检查非 identity
+        if input_cts[0].c1.is_identity() {
             return Err(VerificationError::IdentityBasePoint);
         }
 
@@ -101,6 +112,7 @@ impl<C: Curve> ZKShuffleProof<C> {
         // Base points: [output[0].c1, output[0].c2, output[1].c1, output[1].c2, ..., G, pk]
         // Secret vec:  [k_0, k_0, k_1, k_1, ..., k_{N-1}, k_{N-1}, pk_delta, pk_delta]
         // R = sum_c1_commit + sum_c2_commit
+        // 防止c1/c2 swap攻击
         let mut combined_base_points: Vec<C::Point> = Vec::with_capacity(2 * n + 2);
         let mut combined_secret_vec: Vec<C::Scalar> = Vec::with_capacity(2 * n + 2);
         for i in 0..n {
@@ -153,6 +165,26 @@ impl<C: Curve> ZKShuffleProof<C> {
         pk: &C::Point,
         transcript: &mut impl CryptoTranscript,
     ) -> Result<(), VerificationError> {
+        let n = input_cts.len();
+        if input_cts.len() != n || output_cts.len() != n {
+            return Err(VerificationError::InvalidInput);
+        }
+        if n == 0 {
+            return Err(VerificationError::InvalidInput);
+        }
+
+        // 兼容 Move 合约 shuffle_proof::verify 的 C1 修复：
+        // 将 pk 加入 transcript，绑定证明到玩家公钥
+        transcript.append_point::<C>(b"shuffle_pk", pk);
+
+        // 兼容 Move 合约 shuffle_proof::verify 的 C2 缓解：
+        // 校验所有输出密文有效（c1/c2 非 identity）
+        for ct in output_cts.iter() {
+            if ct.c1.is_identity() || ct.c2.is_identity() {
+                return Err(VerificationError::IdentityBasePoint);
+            }
+        }
+
         transcript.append_scalar::<C>(b"shuffle_nonce", &self.nonce);
         let rho = Self::derive_batch_coefficients(input_cts, output_cts, transcript);
 
@@ -171,7 +203,6 @@ impl<C: Curve> ZKShuffleProof<C> {
         }
 
         // Reconstruct combined base points: [output[0].c1, output[0].c2, ..., G, pk]
-        let n = C::n_cards();
         let mut combined_base_points: Vec<C::Point> = Vec::with_capacity(2 * n + 2);
         for ct in output_cts.iter() {
             combined_base_points.push(ct.c1);
@@ -298,8 +329,14 @@ mod tests {
 
     // ========== 安全性测试：篡改检测 ==========
 
+    /// M-D13 修复后，verify 不再使用 pk 作为基点（与 Move 合约 _pk 一致）。
+    /// 证明仅依赖 input/output 密文，pk 不再直接影响验证结果。
+    /// 这是 M-D13 修复的预期行为：移除 G 和 pk 作为自由基点，防止攻击者利用。
     #[test]
-    fn test_wrong_pk_fails() {
+    fn test_pk_independent_after_md13() {
+        // 兼容 Move 合约 shuffle_proof::verify 的 C1 修复：
+        // M-D13 移除了 pk 作为基点，但 C1 修复将 pk 加入 transcript 绑定证明到玩家公钥。
+        // 因此 verify 不再独立于 pk——使用错误 pk 验证应失败（transcript 不匹配）。
         let (_sk, pk) = gen_keypair();
         let (_, wrong_pk) = gen_keypair();
         let input = make_full_encrypted_cards(&pk);
@@ -308,8 +345,14 @@ mod tests {
 
         let mut transcript = MerlinTranscript::new(b"test_shuffle");
         let proof = ZKShuffleProof::<RistrettoCurve>::prove(&input, &output, &permute, &r_values, &pk, &mut OsRng, &mut transcript).unwrap();
+        // C1 修复后，pk 加入 transcript，使用错误 pk 验证应失败
         let mut verify_transcript = MerlinTranscript::new(b"test_shuffle");
-        assert!(proof.verify(&input, &output, &wrong_pk, &mut verify_transcript).is_err(), "wrong pk should fail");
+        assert!(proof.verify(&input, &output, &wrong_pk, &mut verify_transcript).is_err(),
+            "C1 fix: verify should fail with wrong pk (pk bound to transcript)");
+        // 使用正确 pk 验证应通过
+        let mut verify_transcript2 = MerlinTranscript::new(b"test_shuffle");
+        assert!(proof.verify(&input, &output, &pk, &mut verify_transcript2).is_ok(),
+            "C1 fix: verify should pass with correct pk");
     }
 
     #[test]

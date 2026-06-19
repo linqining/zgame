@@ -1,6 +1,7 @@
 import React, { useEffect, useContext, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import authContext from '../context/auth/authContext';
+import contentContext from '../context/content/contentContext';
 import styled from 'styled-components';
 
 const CallbackWrapper = styled.div`
@@ -8,7 +9,7 @@ const CallbackWrapper = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: #f8fafc;
+  background-color: ${({ theme }) => theme.colors.fontColorLight};
 `;
 
 const CallbackCard = styled.div`
@@ -32,6 +33,7 @@ const Spinner = styled.div`
 
 const StatusText = styled.div`
   font-size: 0.95rem;
+  /* TODO: #475569 提取到 theme */
   color: #475569;
   margin-bottom: 0.5rem;
 `;
@@ -47,15 +49,22 @@ const RetryButton = styled.button`
   padding: 0.5rem 1.5rem;
   border-radius: 8px;
   border: 1px solid #cbd5e1;
-  background: white;
+  background: ${({ theme }) => theme.colors.lightestBg};
   color: #334155;
   cursor: pointer;
   font-size: 0.85rem;
 
   &:hover {
-    background: #f8fafc;
+    background: ${({ theme }) => theme.colors.fontColorLight};
   }
 `;
+
+/**
+ * Module-level flag to prevent React StrictMode from double-processing the
+ * OAuth callback. StrictMode invokes effects twice; the first invocation
+ * reads and clears sessionStorage, so the second would find nothing and error.
+ */
+let callbackProcessed = false;
 
 /**
  * OAuth callback page for zkLogin.
@@ -64,16 +73,40 @@ const RetryButton = styled.button`
  */
 const ZkLoginCallback: React.FC = () => {
   const { handleZkLoginCallback, isLoggedIn } = useContext(authContext)!;
+  const { getLocalizedString: t } = useContext(contentContext)!;
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState('Processing OAuth callback...');
+  const [status, setStatus] = useState(t('zklogin_processing'));
 
   useEffect(() => {
+    // Guard against React StrictMode double-invoking effects.
+    // The first invocation reads and clears sessionStorage; the second
+    // would find it empty and throw. Use a module-level flag to prevent
+    // the second invocation from running.
+    if (callbackProcessed) return;
+    callbackProcessed = true;
+
     const processCallback = async () => {
       try {
-        // Extract JWT - try sessionStorage first (captured in main.tsx before React renders),
-        // then fall back to URL hash/search params
+        // Extract JWT - try multiple sources:
+        // 1. sessionStorage (captured in main.tsx before React renders)
+        // 2. URL hash fragment (Google implicit flow: #id_token=xxx)
+        // 3. URL search params (some providers use query string)
         let jwt: string | null = sessionStorage.getItem('oauth_id_token');
+
+        if (!jwt && window.location.hash) {
+          const hashParams = new URLSearchParams(window.location.hash.slice(1));
+          jwt = hashParams.get('id_token');
+          if (jwt) console.log('[ZkLoginCallback] Found id_token in URL hash');
+        }
+
+        if (!jwt && window.location.search) {
+          const searchParams = new URLSearchParams(window.location.search);
+          jwt = searchParams.get('id_token');
+          if (jwt) console.log('[ZkLoginCallback] Found id_token in URL search params');
+        }
+
+        console.log('[ZkLoginCallback] processCallback started, jwt exists:', !!jwt);
 
         // Check for OAuth error
         const oauthError = sessionStorage.getItem('oauth_error')
@@ -88,7 +121,7 @@ const ZkLoginCallback: React.FC = () => {
           throw new Error(`OAuth error: ${decodeURIComponent(errorDesc)}`);
         }
 
-        // Clean up sessionStorage
+        // Clean up sessionStorage AFTER reading all values
         sessionStorage.removeItem('oauth_id_token');
         sessionStorage.removeItem('oauth_error');
         sessionStorage.removeItem('oauth_error_desc');
@@ -97,19 +130,21 @@ const ZkLoginCallback: React.FC = () => {
           throw new Error('No id_token found in OAuth callback. Please try again.');
         }
 
-        setStatus('Generating ZK proof...');
+        setStatus(t('zklogin_generating-proof'));
         await handleZkLoginCallback(jwt);
 
-        setStatus('Login successful! Redirecting...');
+        setStatus(t('zklogin_success'));
         setTimeout(() => navigate('/', { replace: true }), 500);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Unknown error';
         console.error('[ZkLoginCallback] Error:', msg);
         setError(msg);
-        setStatus('Login failed');
+        setStatus(t('zklogin_failed'));
+        callbackProcessed = false; // Allow retry on error
       }
     };
 
+    console.log('[ZkLoginCallback] useEffect fired, isLoggedIn:', isLoggedIn);
     if (!isLoggedIn) {
       processCallback();
     } else {
@@ -129,8 +164,8 @@ const ZkLoginCallback: React.FC = () => {
           <>
             <StatusText>{status}</StatusText>
             <ErrorText>{error}</ErrorText>
-            <RetryButton onClick={() => navigate('/login')}>
-              Back to Login
+            <RetryButton onClick={() => navigate('/')}>
+              {t('zklogin_back-login')}
             </RetryButton>
           </>
         )}

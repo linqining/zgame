@@ -232,6 +232,7 @@ fun verify_reveal_token_returns_false_for_bad_proof() {
         bls_scalar::g1_to_bytes(&make_g1_point(b"wrong_t1")),
         bls_scalar::g1_to_bytes(&make_g1_point(b"wrong_t2")),
         bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(999)),
+        bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(1)),
     );
 
     let result = zk_verifier::verify_reveal_token(&ct, &reveal_token, &pk, &proof);
@@ -386,6 +387,7 @@ fun verify_reveal_token_or_abort_aborts_on_bad_proof() {
         bls_scalar::g1_to_bytes(&make_g1_point(b"wrong_t1")),
         bls_scalar::g1_to_bytes(&make_g1_point(b"wrong_t2")),
         bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(999)),
+        bls_scalar::scalar_to_bytes(&bls_scalar::scalar_from_u64(1)),
     );
 
     zk_verifier::verify_reveal_token_or_abort(&ct, &reveal_token, &pk, &proof);

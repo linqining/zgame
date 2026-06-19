@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
-import Axios from 'axios';
+import httpClient from '../helpers/httpClient';
 import setAuthToken from '../helpers/setAuthToken';
+import { getToken } from '../helpers/getToken';
 import { useGlobalContext } from '../context/global/globalContext';
 import { useCurrentAccount } from '@mysten/dapp-kit-react';
 import { dAppKit, ZKLOGIN_CONFIG } from '../sui/config';
@@ -13,12 +14,9 @@ import type { AuthMethod, ZkLoginState, SponsoredTxState } from '../types/sui';
 
 interface UseAuthReturn {
   isLoggedIn: boolean;
-  login: (email: string, password: string) => Promise<void>;
   logout: () => void;
-  register: (name: string, email: string, password: string) => Promise<void>;
   loadUser: (token: string) => Promise<void>;
   walletAddress: string | null;
-  connectWallet: () => void;
   disconnectWallet: () => void;
   // zkLogin
   zkLoginState: ZkLoginState;
@@ -30,7 +28,7 @@ interface UseAuthReturn {
 }
 
 const useAuth = (): UseAuthReturn => {
-  const token = localStorage.getItem('token');
+  const token = getToken();
   if (token) setAuthToken(token);
 
   const {
@@ -39,14 +37,13 @@ const useAuth = (): UseAuthReturn => {
     setUserName,
     setEmail,
     setChipsAmount,
+    setSuiBalance,
   } = useGlobalContext();
 
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [walletAddress, setWalletAddress] = useState<string | null>(
     localStorage.getItem('walletAddress')
   );
-  const [prevWalletAddress, setPrevWalletAddress] = useState<string | null>(null);
-  const [authRetryCount, setAuthRetryCount] = useState(0);
   const [authMethod, setAuthMethod] = useState<AuthMethod | null>(
     (localStorage.getItem('authMethod') as AuthMethod) || null
   );
@@ -71,46 +68,59 @@ const useAuth = (): UseAuthReturn => {
   const currentAccount = useCurrentAccount();
 
   useEffect(() => {
-    setIsLoading(true);
+    let cancelled = false;
+    const init = async () => {
+      setIsLoading(true);
 
-    const storedToken = localStorage.getItem('token');
-    if (storedToken) loadUser(storedToken);
+      // If there's no stored token, clear stale auth state. We intentionally
+      // do NOT call dAppKit.disconnectWallet() here — doing so races with
+      // manual wallet connection. The wallet auto-authenticate effect below
+      // only fires when currentAccount is set and there is no stored token,
+      // which is the expected behavior for both auto-reconnect and manual
+      // connect.
+      const storedToken = getToken();
+      if (!storedToken) {
+        localStorage.removeItem('walletAddress');
+        localStorage.removeItem('authMethod');
+        localStorage.removeItem('zklogin_provider');
+        setWalletAddress(null);
+        setAuthMethod(null);
+      }
 
-    // Check existing zkLogin session
-    checkZkLoginSession();
+      if (storedToken) await loadUser(storedToken);
 
-    setIsLoading(false);
+      // Check existing zkLogin session
+      await checkZkLoginSession();
+
+      if (!cancelled) setIsLoading(false);
+    };
+    init();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Sync wallet address from dApp Kit and handle disconnect
+  // Sync wallet address from dApp Kit
   useEffect(() => {
     if (currentAccount) {
       setWalletAddress(currentAccount.address);
-      setPrevWalletAddress(currentAccount.address);
       localStorage.setItem('walletAddress', currentAccount.address);
     } else {
       setWalletAddress(null);
-      if (prevWalletAddress && isLoggedIn && authMethod === 'wallet') {
-        disconnectWallet();
-      }
-      setPrevWalletAddress(null);
       localStorage.removeItem('walletAddress');
     }
-  }, [currentAccount]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentAccount]);
 
-  // Auto-authenticate with backend when wallet connects
+  // 钱包连接后自动向后端认证。zkLogin 回调在 /auth/callback 路由独立完成，
+  // 不经过此 effect，因此不会互相干扰。
   useEffect(() => {
-    if (walletAddress && !isLoggedIn && authRetryCount < 3 && authMethod === 'wallet') {
-      const storedToken = localStorage.getItem('token');
+    if (currentAccount && !isLoggedIn) {
+      const storedToken = getToken();
       if (!storedToken) {
-        authenticateWithWallet(walletAddress);
-      } else {
-        loadUser(storedToken);
+        authenticateWithWallet(currentAccount.address);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walletAddress, isLoggedIn, authRetryCount, authMethod]);
+  }, [currentAccount, isLoggedIn]);
 
   // Check zkLogin session validity periodically
   useEffect(() => {
@@ -146,20 +156,39 @@ const useAuth = (): UseAuthReturn => {
       const session = manager.getSession();
       if (session) {
         const isValid = await manager.isSessionValid();
-        setZkLoginState({
-          isInitialized: true,
-          isLoggedIn: isValid,
-          address: isValid ? session.address : null,
-          provider: localStorage.getItem('zklogin_provider'),
-          isSessionValid: isValid,
-        });
         if (isValid) {
+          setZkLoginState({
+            isInitialized: true,
+            isLoggedIn: true,
+            address: session.address,
+            provider: localStorage.getItem('zklogin_provider'),
+            isSessionValid: true,
+          });
           setAuthMethod((localStorage.getItem('authMethod') as AuthMethod) || null);
           setSponsoredTxState(prev => ({ ...prev, isAvailable: true }));
           // Auto-authenticate with backend if not already
           if (!isLoggedIn) {
             await authenticateWithZkLogin(session);
           }
+        } else {
+          // Session expired — clear stale zkLogin state. We intentionally
+          // do NOT call dAppKit.disconnectWallet() here: dAppKit does not
+          // distinguish between native wallet accounts and zkLogin accounts,
+          // so disconnecting would also kill a native wallet the user is
+          // actively trying to log in with. The zkLogin session itself is
+          // cleared via manager.clearSession(), which is sufficient.
+          console.warn('[Auth] zkLogin session expired, clearing session');
+          manager.clearSession();
+          setAuthMethod(null);
+          localStorage.removeItem('authMethod');
+          localStorage.removeItem('zklogin_provider');
+          setZkLoginState({
+            isInitialized: true,
+            isLoggedIn: false,
+            address: null,
+            provider: null,
+            isSessionValid: false,
+          });
         }
       } else {
         setZkLoginState(prev => ({ ...prev, isInitialized: true }));
@@ -171,12 +200,25 @@ const useAuth = (): UseAuthReturn => {
 
   // zkLogin: Initiate OAuth flow
   const loginWithZkLogin = async (provider: string): Promise<void> => {
+    console.log('[Auth] loginWithZkLogin called, provider:', provider);
     setIsLoading(true);
     try {
       const providerConfig = ZKLOGIN_CONFIG[provider as keyof typeof ZKLOGIN_CONFIG];
       if (!providerConfig?.clientId) {
         throw new Error(`OAuth client ID not configured for ${provider}. Set VITE_${provider.toUpperCase()}_CLIENT_ID in .env`);
       }
+
+      // Clear ALL stale auth state before redirecting to OAuth. The callback
+      // page (ZkLoginCallback) only calls handleZkLoginCallback when
+      // isLoggedIn is false. If a stale token remains, loadUser() succeeds
+      // on the callback page, sets isLoggedIn=true, and the zkLogin flow is
+      // skipped entirely — /auth/zklogin/salt and /auth/zklogin never fire.
+      localStorage.removeItem('token');
+      localStorage.removeItem('walletAddress');
+      setAuthToken(null);
+      setIsLoggedIn(false);
+      setWalletAddress(null);
+      setAuthMethod(null);
 
       const manager = getZkLoginSessionManager();
       const { url } = await manager.prepareOAuthUrl(
@@ -235,13 +277,16 @@ const useAuth = (): UseAuthReturn => {
   // Authenticate zkLogin user with backend
   const authenticateWithZkLogin = async (session: ZkLoginSession): Promise<void> => {
     try {
-      // Sign a message with the ephemeral key to prove ownership
+      // Sign a message with zkLogin signature to prove ownership.
+      // Must use zkLogin signature format (not plain Ed25519) so the backend
+      // can verify it as a UserSignature::ZkLogin and derive the correct address.
       const message = `zgame-zklogin:${session.address}:${Date.now()}`;
       const messageBytes = new TextEncoder().encode(message);
 
-      const { signature } = await session.ephemeralKeyPair.signPersonalMessage(messageBytes);
+      const manager = getZkLoginSessionManager();
+      const signature = await manager.signPersonalMessage(messageBytes);
 
-      const res = await Axios.post('/api/auth/zklogin', {
+      const res = await httpClient.post('/auth/zklogin', {
         address: session.address,
         signature,
         message,
@@ -254,11 +299,9 @@ const useAuth = (): UseAuthReturn => {
         localStorage.setItem('token', backendToken);
         setAuthToken(backendToken);
         await loadUser(backendToken);
-        setAuthRetryCount(0);
       }
     } catch (error) {
       console.error('zkLogin backend auth failed:', error);
-      setAuthRetryCount(prev => prev + 1);
     }
   };
 
@@ -267,99 +310,45 @@ const useAuth = (): UseAuthReturn => {
     try {
       const message = `zgame-login:${address}:${Date.now()}`;
       const messageBytes = new TextEncoder().encode(message);
+      const signResult = await dAppKit.signPersonalMessage({ message: messageBytes });
 
-      const signResult = await dAppKit.signPersonalMessage({
-        message: messageBytes,
-      });
-
-      const res = await Axios.post('/api/auth/wallet', {
+      const res = await httpClient.post('/auth/wallet', {
         address,
         signature: signResult.signature,
         message,
       });
 
       const token = res.data.token;
-
       if (token) {
         localStorage.setItem('token', token);
         setAuthToken(token);
         await loadUser(token);
         setAuthMethod('wallet');
         localStorage.setItem('authMethod', 'wallet');
-        setAuthRetryCount(0);
       }
     } catch (error) {
-      const err = error as Error;
-      console.error('Wallet authentication failed:', error);
-      if (err.message?.includes('Incorrect password') || err.message?.includes('User rejected')) {
-        console.warn('[Auth] Wallet signing rejected or failed, will not auto-retry');
-      }
-      setAuthRetryCount(prev => prev + 1);
-    }
-    setIsLoading(false);
-  };
-
-  const register = async (name: string, email: string, password: string): Promise<void> => {
-    setIsLoading(true);
-    try {
-      const res = await Axios.post('/api/users', {
-        name,
-        email,
-        password,
-      });
-
-      const token = res.data.token;
-
-      if (token) {
-        localStorage.setItem('token', token);
-        setAuthToken(token);
-        await loadUser(token);
-      }
-    } catch (error) {
-      alert(error);
-    }
-    setIsLoading(false);
-  };
-
-  const login = async (emailAddress: string, password: string): Promise<void> => {
-    setIsLoading(true);
-    try {
-      const res = await Axios.post('/api/auth', {
-        email: emailAddress,
-        password,
-      });
-
-      const token = res.data.token;
-
-      if (token) {
-        localStorage.setItem('token', token);
-        setAuthToken(token);
-        await loadUser(token);
-      }
-    } catch (error) {
-      alert(error);
+      console.error('[Auth] Wallet authentication failed:', error);
     }
     setIsLoading(false);
   };
 
   const loadUser = async (token: string): Promise<void> => {
     try {
-      const res = await Axios.get('/api/auth', {
-        headers: {
-          'x-auth-token': token,
-        },
-      });
+      const res = await httpClient.get('/auth');
 
-      const { _id, name, email, chipsAmount } = res.data;
+      const { _id, name, address, chipsAmount, suiBalance } = res.data;
 
       setIsLoggedIn(true);
       setId(_id);
       setUserName(name);
-      setEmail(email);
-      setChipsAmount(chipsAmount);
+      if (address) {
+        setWalletAddress(address);
+        localStorage.setItem('walletAddress', address);
+      }
+      setChipsAmount(chipsAmount ?? 0);
+      setSuiBalance(suiBalance ?? 0);
     } catch (error) {
       localStorage.removeItem('token');
-      setAuthRetryCount(prev => prev + 1);
       console.error('loadUser failed:', error);
     }
   };
@@ -374,6 +363,7 @@ const useAuth = (): UseAuthReturn => {
     setUserName(null);
     setEmail(null);
     setChipsAmount(null);
+    setSuiBalance(null);
     setAuthMethod(null);
 
     // Clear zkLogin session
@@ -396,18 +386,12 @@ const useAuth = (): UseAuthReturn => {
       isSubmitting: false,
       error: null,
     });
-  }, [setId, setUserName, setEmail, setChipsAmount]);
-
-  const connectWallet = useCallback((): void => {
-    console.log('Use the ConnectButton component to connect wallet');
-  }, []);
+  }, [setId, setUserName, setEmail, setChipsAmount, setSuiBalance]);
 
   const disconnectWallet = useCallback((): void => {
-    const token = localStorage.getItem('token');
+    const token = getToken();
     if (token) {
-      Axios.post('/api/auth/wallet/logout', {}, {
-        headers: { 'x-auth-token': token },
-      }).catch((err) => {
+      httpClient.post('/auth/wallet/logout', {}).catch((err) => {
         console.error('wallet_logout backend call failed:', err);
       });
     }
@@ -417,12 +401,9 @@ const useAuth = (): UseAuthReturn => {
 
   return {
     isLoggedIn,
-    login,
     logout,
-    register,
     loadUser,
-    walletAddress: walletAddress || zkLoginState.address,
-    connectWallet,
+    walletAddress,
     disconnectWallet,
     zkLoginState,
     loginWithZkLogin,

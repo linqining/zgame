@@ -1,9 +1,2 @@
-<https://testnet.suivision.xyz/txblock/5ogCSVCxqdV35Pu3zwqjcGbwb7V8R4JGsc6y3P1GXbvV?tab=Changes>
-
-部署交易
-
-upgradecap: 0x22587c4eb3ead6cda770c4144f8e0935d311a1da10ef40799d88b86d86e596ec
-
-packageid: 
-
-0x4c37888f96b62ebf4ada5b31147fa407b2bbe23006c238ecb55c341cfbb65aad
+// kill sui process
+pkill -9 -f sui

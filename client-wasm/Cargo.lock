@@ -849,7 +849,9 @@ name = "sui-serialization"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "group",
  "hex",
+ "poker_protocol",
  "serde",
  "serde_json",
 ]

@@ -154,7 +154,7 @@ pub async fn inodra_webhook(
     mark_webhook_processed(&state, &payload.id).await;
 
     // 处理链上事件
-    handle_chain_event(chain_event, &state).await;
+    handle_chain_event(chain_event, &state, if payload.transaction_digest.is_empty() { None } else { Some(payload.transaction_digest.as_str()) }).await;
 
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response()
 }
@@ -170,7 +170,7 @@ async fn mark_webhook_processed(state: &Arc<AppState>, event_id: &str) {
 
 /// 处理解析后的链上事件
 /// 当前仅记录日志，后续可根据事件类型触发游戏逻辑
-async fn handle_chain_event(event: crate::sui_events::SuiChainEvent, state: &Arc<AppState>) {
+async fn handle_chain_event(event: crate::sui_events::SuiChainEvent, state: &Arc<AppState>, tx_digest: Option<&str>) {
     match &event {
         crate::sui_events::SuiChainEvent::PlayerJoined { table_id, player, buy_in, .. } => {
             tracing::info!(
@@ -198,6 +198,6 @@ async fn handle_chain_event(event: crate::sui_events::SuiChainEvent, state: &Arc
         }
     }
 
-    crate::relayer::process_event(&state.relayer_state, &state.config.fullnode_url, &state.config.sui_package_id, &event).await;
-    crate::relayer::apply_event_to_socket(state, &event).await;
+    let summary = crate::relayer::process_event(&state.config.fullnode_url, &state.config.sui_package_id, &event).await;
+    crate::relayer::apply_event_to_socket(state, &event, summary.as_ref(), tx_digest).await;
 }

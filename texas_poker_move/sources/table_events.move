@@ -10,7 +10,7 @@ module texas_poker::table_events;
 /// 3. 下注操作: PlayerFolded, PlayerChecked, PlayerCalled, PlayerRaised, PlayerAllIn
 /// 4. 洗牌协议: ShuffleVerified, ShuffleTurnEvt, ShuffleCompleteEvt, ShuffleTimeout
 /// 5. 揭示协议: RevealPhaseEvt, RevealTokenSubmitted, RevealPhaseComplete, RevealTimeout,
-///    CardIsIdentity, IdentityRedeal, RedealRequested, CommunityCardRevealed
+///    CardIsIdentity, IdentityRedeal, CommunityCardRevealed, ShowdownHoleCardsRevealed
 /// 6. 重构协议: ReconstructInitiated, ReconstructDeckSubmitted, ReconstructCompleteEvt, ReconstructTimeout
 /// 7. 玩家管理: PlayerKicked, PlayerRefund
 
@@ -32,11 +32,16 @@ const RESET_REASON_TIMEOUT: u8 = 0;
 const RESET_REASON_KICK: u8 = 1;
 const RESET_REASON_RECONSTRUCT_FAIL: u8 = 2;
 const RESET_REASON_LAST_PLAYER_STANDING: u8 = 3;
+const RESET_REASON_STATE_INCONSISTENT: u8 = 4;
 
 // ========== 弃牌原因常量 ==========
 const FOLD_REASON_MANUAL: u8 = 0;
 const FOLD_REASON_AUTO_TIMEOUT: u8 = 1;
 const FOLD_REASON_FORCE_ADMIN: u8 = 2;
+
+// ========== 牌组重建原因常量 ==========
+const DECK_REBUILT_REASON_SHUFFLE_TIMEOUT: u8 = 0;
+const DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE: u8 = 1;
 
 // ========== 常量访问器 ==========
 public fun refund_type_stack_only(): u8 { REFUND_TYPE_STACK_ONLY }
@@ -51,10 +56,14 @@ public fun reset_reason_timeout(): u8 { RESET_REASON_TIMEOUT }
 public fun reset_reason_kick(): u8 { RESET_REASON_KICK }
 public fun reset_reason_reconstruct_fail(): u8 { RESET_REASON_RECONSTRUCT_FAIL }
 public fun reset_reason_last_player_standing(): u8 { RESET_REASON_LAST_PLAYER_STANDING }
+public fun reset_reason_state_inconsistent(): u8 { RESET_REASON_STATE_INCONSISTENT }
 
 public fun fold_reason_manual(): u8 { FOLD_REASON_MANUAL }
 public fun fold_reason_auto_timeout(): u8 { FOLD_REASON_AUTO_TIMEOUT }
 public fun fold_reason_force_admin(): u8 { FOLD_REASON_FORCE_ADMIN }
+
+public fun deck_rebuilt_reason_shuffle_timeout(): u8 { DECK_REBUILT_REASON_SHUFFLE_TIMEOUT }
+public fun deck_rebuilt_reason_reconstruct_complete(): u8 { DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE }
 
 // ========== 1. 牌桌生命周期 ==========
 
@@ -277,6 +286,15 @@ public struct CommunityCardRevealed has copy, drop {
     card_suits: vector<u8>,
 }
 
+public struct ShowdownHoleCardsRevealed has copy, drop {
+    table_id: ID,
+    seat_index: u64,
+    player: address,
+    card_indices: vector<u64>,
+    card_ranks: vector<u8>,
+    card_suits: vector<u8>,
+}
+
 // ========== 6. 重构协议 ==========
 
 public struct ReconstructInitiated has copy, drop {
@@ -314,6 +332,23 @@ public struct PlayerRefund has copy, drop {
     player: address,
     amount: u64,
     refund_type: u8,
+}
+
+// ========== 8. 配置与牌组重建 ==========
+
+public struct TimeoutConfigUpdated has copy, drop {
+    table_id: ID,
+    betting_timeout_ms: u64,
+    shuffle_timeout_ms: u64,
+    reveal_timeout_ms: u64,
+    reconstruct_timeout_ms: u64,
+    showdown_display_ms: u64,
+}
+
+public struct DeckRebuilt has copy, drop {
+    table_id: ID,
+    reason: u8,
+    deck_size: u64,
 }
 
 // ========== 便捷发射函数 ==========
@@ -439,6 +474,10 @@ public fun emit_community_card_revealed(table_id: ID, phase: u8, card_indices: v
     event::emit(CommunityCardRevealed { table_id, phase, card_indices, card_ranks, card_suits });
 }
 
+public fun emit_showdown_hole_cards_revealed(table_id: ID, seat_index: u64, player: address, card_indices: vector<u64>, card_ranks: vector<u8>, card_suits: vector<u8>) {
+    event::emit(ShowdownHoleCardsRevealed { table_id, seat_index, player, card_indices, card_ranks, card_suits });
+}
+
 // --- 重构协议 ---
 public fun emit_reconstruct_initiated(table_id: ID, expected_players: vector<u64>, round_state: u8) {
     event::emit(ReconstructInitiated { table_id, expected_players, round_state });
@@ -463,4 +502,13 @@ public fun emit_player_kicked(table_id: ID, seat_index: u64, player: address, re
 
 public fun emit_player_refund(table_id: ID, seat_index: u64, player: address, amount: u64, refund_type: u8) {
     event::emit(PlayerRefund { table_id, seat_index, player, amount, refund_type });
+}
+
+// --- 配置与牌组重建 ---
+public fun emit_timeout_config_updated(table_id: ID, betting_timeout_ms: u64, shuffle_timeout_ms: u64, reveal_timeout_ms: u64, reconstruct_timeout_ms: u64, showdown_display_ms: u64) {
+    event::emit(TimeoutConfigUpdated { table_id, betting_timeout_ms, shuffle_timeout_ms, reveal_timeout_ms, reconstruct_timeout_ms, showdown_display_ms });
+}
+
+public fun emit_deck_rebuilt(table_id: ID, reason: u8, deck_size: u64) {
+    event::emit(DeckRebuilt { table_id, reason, deck_size });
 }

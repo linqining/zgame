@@ -1,7 +1,7 @@
 import React from 'react';
 import styled from 'styled-components';
 import userImages from './userImages';
-import { EmptySeat } from './EmptySeat';
+import { EmptySeat } from './seatStyles';
 
 interface OccupiedSeatProps {
   hasTurn: boolean;

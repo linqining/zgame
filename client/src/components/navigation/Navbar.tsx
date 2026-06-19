@@ -8,21 +8,16 @@ import Hider from '../layout/Hider';
 import Button from '../buttons/Button';
 import HamburgerButton from '../buttons/HamburgerButton';
 import Spacer from '../layout/Spacer';
-import Text from '../typography/Text';
 import contentContext from '../../context/content/contentContext';
-import { ConnectButton } from '@mysten/dapp-kit-react/ui';
+import authContext from '../../context/auth/authContext';
 
 interface NavbarProps {
   loggedIn: boolean;
   chipsAmount: number | null;
-  openModal: (
-    children: () => React.ReactNode,
-    headingText: string,
-    btnText: string,
-    btnCallBack?: () => void,
-    onCloseCallBack?: () => void,
-  ) => void;
+  suiBalance: number | null;
   openNavMenu: () => void;
+  onSignIn?: () => void;
+  onLogout?: () => void;
   className?: string;
   variant?: 'light' | 'dark';
 }
@@ -38,36 +33,34 @@ const StyledNav = styled.nav`
 `;
 
 const ChipAmount = styled.div`
-  color: #b45309;
+  color: #4DA2FF;
   font-family: 'JetBrains Mono', monospace;
   font-weight: 600;
   font-size: 0.95rem;
-  padding: 0.4rem 1rem;
-  background: rgba(251, 191, 36, 0.12);
-  border: 1px solid rgba(251, 191, 36, 0.25);
+  padding: 0.4rem 0.75rem;
+  background: rgba(77, 162, 255, 0.12);
+  border: 1px solid rgba(77, 162, 255, 0.25);
   border-radius: 8px;
-`;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
 
-const StyledButton = styled(Button)`
-  background: linear-gradient(135deg, #667eea, #764ba2);
-  color: white;
-  border: none;
-  box-shadow: 0 4px 20px rgba(102, 126, 234, 0.25);
-  &:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 12px 35px rgba(102, 126, 234, 0.45);
+  img {
+    width: 18px;
+    height: 18px;
   }
 `;
 
 const StyledHamburgerButton = styled(HamburgerButton)`
   .hamburger-line {
-    background-color: #0f172a;
+    background-color: ${({ theme }) => theme.colors.fontColorDark};
   }
 `;
 
 const LoginButton = styled(Button)`
-  background: linear-gradient(135deg, #667eea, #764ba2);
-  color: white;
+  /* TODO: #764ba2 提取到 theme */
+  background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2);
+  color: ${({ theme }) => theme.colors.lightestBg};
   border: none;
   box-shadow: 0 4px 20px rgba(102, 126, 234, 0.25);
   &:hover {
@@ -76,26 +69,61 @@ const LoginButton = styled(Button)`
   }
 `;
 
+const LogoutButton = styled(Button)`
+  background: rgba(241, 245, 249, 0.8);
+  /* TODO: #475569 提取到 theme */
+  color: #475569;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  min-width: auto;
+
+  &:hover {
+    transform: translateY(-3px);
+    border-color: rgba(239, 68, 68, 0.4);
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.06);
+    box-shadow: 0 8px 25px rgba(239, 68, 68, 0.15);
+  }
+`;
+
+const LogoutAddrDot = styled.span`
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  flex-shrink: 0;
+`;
+
 const Navbar: React.FC<NavbarProps> = ({
   loggedIn,
   chipsAmount,
-  openModal,
+  suiBalance,
   openNavMenu,
+  onSignIn,
+  onLogout,
   className,
 }) => {
   const { getLocalizedString } = useContext(contentContext)!;
+  const { walletAddress } = useContext(authContext)!;
   const navigate = useNavigate();
 
-  const openShopModal = () =>
-    openModal(
-      () => (
-        <Text textAlign="center">
-            {getLocalizedString('shop-coming_soon-modal_text')}
-          </Text>
-      ),
-      getLocalizedString('shop-coming_soon-modal_heading'),
-      getLocalizedString('shop-coming_soon-modal_btn_text'),
-    );
+  const shortAddress = walletAddress
+    ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
+    : '';
+
+  const handleSignIn = () => {
+    if (onSignIn) {
+      onSignIn();
+    } else {
+      navigate('/');
+    }
+  };
 
   // 未登录状态
   if (!loggedIn) {
@@ -106,11 +134,8 @@ const Navbar: React.FC<NavbarProps> = ({
             <LogoWithText />
           </Link>
           <Spacer>
-            <Hider hideOnMobile>
-              <ConnectButton />
-            </Hider>
-            <LoginButton onClick={() => navigate('/login')}>
-              Sign In
+            <LoginButton onClick={handleSignIn}>
+              {getLocalizedString('navbar-signin_btn')}
             </LoginButton>
           </Spacer>
         </Container>
@@ -131,15 +156,14 @@ const Navbar: React.FC<NavbarProps> = ({
           </Hider>
         </Link>
         <Spacer>
-          <ChipAmount>
-            ${(chipsAmount ?? 0).toLocaleString()}
+          <ChipAmount title={`SUI 余额: ${suiBalance ?? 0} MIST`}>
+            <img src="/sui-sui-logo.svg" alt="SUI" />
+            {((suiBalance ?? 0) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 4 })} SUI
           </ChipAmount>
-          <ConnectButton />
-          <Hider hideOnMobile>
-            <StyledButton onClick={openShopModal}>
-              {getLocalizedString('navbar-buychips_btn')}
-            </StyledButton>
-          </Hider>
+          <LogoutButton onClick={onLogout} title={walletAddress || ''}>
+            <LogoutAddrDot />
+            {shortAddress || getLocalizedString('navmenu-logout_btn')}
+          </LogoutButton>
           <StyledHamburgerButton clickHandler={openNavMenu} />
         </Spacer>
       </Container>

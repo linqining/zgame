@@ -6,8 +6,9 @@ pub async fn verify_sui_wallet_signature<'a>(
     message: &'a str,
     signature: &'a sui_sdk_types::UserSignature,
     expected_address: &'a str,
+    network: &'a str,
 ) -> Result<(String, String), String> {
-    tracing::debug!("[verify_sui_wallet_signature] verifying signature, expected_address={}", expected_address);
+    // tracing::debug!("[verify_sui_wallet_signature] verifying signature, expected_address={}, network={}", expected_address, network);
     let personal_msg = sui_sdk_types::PersonalMessage(message.as_bytes().into());
 
     match signature {
@@ -15,10 +16,10 @@ pub async fn verify_sui_wallet_signature<'a>(
             verify_simple_signature(&personal_msg, simple_sig, expected_address)
         }
         sui_sdk_types::UserSignature::ZkLogin(zklogin) => {
-            verify_zklogin_signature(&personal_msg, zklogin, expected_address).await
+            verify_zklogin_signature(&personal_msg, zklogin, expected_address, network).await
         }
         _ => {
-            tracing::warn!("[verify_sui_wallet_signature] unsupported signature scheme");
+            // tracing::warn!("[verify_sui_wallet_signature] unsupported signature scheme");
             Err("Unsupported signature scheme. Only Ed25519, Secp256k1, Secp256r1, zkLogin are supported".to_string())
         }
     }
@@ -34,21 +35,21 @@ pub fn verify_simple_signature(
     let signing_digest = personal_msg.signing_digest();
     verifier.verify(signing_digest.as_ref(), simple_sig)
         .map_err(|e| {
-            tracing::warn!("[verify_sui_wallet_signature] simple signature verification failed: {}", e);
+            // tracing::warn!("[verify_sui_wallet_signature] simple signature verification failed: {}", e);
             format!("Signature verification failed: {}", e)
         })?;
 
     let derived_address = match simple_sig {
         sui_sdk_types::SimpleSignature::Ed25519 { public_key, .. } => {
-            tracing::debug!("[verify_sui_wallet_signature] ed25519 signature detected");
+            // tracing::debug!("[verify_sui_wallet_signature] ed25519 signature detected");
             public_key.derive_address().to_string()
         }
         sui_sdk_types::SimpleSignature::Secp256k1 { public_key, .. } => {
-            tracing::debug!("[verify_sui_wallet_signature] secp256k1 signature detected");
+            // tracing::debug!("[verify_sui_wallet_signature] secp256k1 signature detected");
             public_key.derive_address().to_string()
         }
         sui_sdk_types::SimpleSignature::Secp256r1 { public_key, .. } => {
-            tracing::debug!("[verify_sui_wallet_signature] secp256r1 signature detected");
+            // tracing::debug!("[verify_sui_wallet_signature] secp256r1 signature detected");
             public_key.derive_address().to_string()
         }
         _ => return Err("Unsupported simple signature type".to_string()),
@@ -57,7 +58,7 @@ pub fn verify_simple_signature(
     let expected_normalized = normalize_address(expected_address)
         .map_err(|e| format!("Invalid expected address: {}", e))?;
     if derived_address != expected_normalized {
-        tracing::warn!("[verify_sui_wallet_signature] address mismatch: derived={} expected={}", derived_address, expected_normalized);
+        // tracing::warn!("[verify_sui_wallet_signature] address mismatch: derived={} expected={}", derived_address, expected_normalized);
         return Err(format!("Address mismatch: derived {} but expected {}", derived_address, expected_normalized));
     }
 
@@ -68,7 +69,7 @@ pub fn verify_simple_signature(
             match ecpoint {
                 Some(point) => hex::encode(point.compress().as_ref()),
                 None => {
-                    tracing::warn!("[verify_sui_wallet_signature] invalid EC point from secp256k1 public key");
+                    // tracing::warn!("[verify_sui_wallet_signature] invalid EC point from secp256k1 public key");
                     return Err("Invalid EC point from public key".to_string());
                 }
             }
@@ -82,7 +83,7 @@ pub fn verify_simple_signature(
         _ => return Err("Unsupported simple signature type".to_string()),
     };
 
-    tracing::debug!("[verify_sui_wallet_signature] simple verification successful, address={}, pk_hex={}", derived_address, pk_hex);
+    // tracing::debug!("[verify_sui_wallet_signature] simple verification successful, address={}, pk_hex={}", derived_address, pk_hex);
     Ok((derived_address, pk_hex))
 }
 
@@ -90,11 +91,22 @@ pub async fn verify_zklogin_signature<'a, 'b>(
     personal_msg: &'a sui_sdk_types::PersonalMessage<'b>,
     zklogin: &'a sui_sdk_types::ZkLoginAuthenticator,
     expected_address: &'a str,
+    network: &'a str,
 ) -> Result<(String, String), String> {
-    tracing::debug!("[verify_sui_wallet_signature] zkLogin signature detected, iss={}", zklogin.inputs.iss());
+    // tracing::debug!("[verify_sui_wallet_signature] zkLogin signature detected, iss={}", zklogin.inputs.iss());
 
-    // Build the zkLogin verifier with mainnet verifying key
-    let mut verifier = sui_sdk::sui_crypto::zklogin::ZkloginVerifier::new_mainnet();
+    // Pick the verifying key that matches the zkey used by the prover that
+    // generated this proof. devnet uses a distinct zkey from testnet/mainnet
+    // (which share the same zkey):
+    //   - devnet  → prover-dev.mystenlabs.com → dev verifying key
+    //   - testnet → prover.mystenlabs.com / Shinami → mainnet verifying key
+    //   - mainnet → prover.mystenlabs.com / Shinami → mainnet verifying key
+    // A mismatch causes "Groth16 proof verify failed".
+    let mut verifier = if network.eq_ignore_ascii_case("devnet") {
+        sui_sdk::sui_crypto::zklogin::ZkloginVerifier::new_dev()
+    } else {
+        sui_sdk::sui_crypto::zklogin::ZkloginVerifier::new_mainnet()
+    };
 
     // Fetch JWK from the OIDC provider and add to verifier
     let jwk_id = zklogin.inputs.jwk_id();
@@ -106,7 +118,7 @@ pub async fn verify_zklogin_signature<'a, 'b>(
     let signing_digest = personal_msg.signing_digest();
     verifier.verify(signing_digest.as_ref(), &sui_sdk_types::UserSignature::ZkLogin(Box::new(zklogin.clone())))
         .map_err(|e| {
-            tracing::warn!("[verify_sui_wallet_signature] zkLogin verification failed: {}", e);
+            // tracing::warn!("[verify_sui_wallet_signature] zkLogin verification failed: {}", e);
             format!("zkLogin verification failed: {}", e)
         })?;
 
@@ -120,7 +132,7 @@ pub async fn verify_zklogin_signature<'a, 'b>(
         .map(|a| a.to_string())
         .ok_or_else(|| {
             let derived_strs: Vec<String> = derived_addresses.iter().map(|a| a.to_string()).collect();
-            tracing::warn!("[verify_sui_wallet_signature] zkLogin address mismatch: derived={:?} expected={}", derived_strs, expected_normalized);
+            // tracing::warn!("[verify_sui_wallet_signature] zkLogin address mismatch: derived={:?} expected={}", derived_strs, expected_normalized);
             format!("Address mismatch: derived {:?} but expected {}", derived_strs, expected_normalized)
         })?;
 
@@ -143,7 +155,7 @@ pub async fn verify_zklogin_signature<'a, 'b>(
         _ => String::new(),
     };
 
-    tracing::debug!("[verify_sui_wallet_signature] zkLogin verification successful, address={}, pk_hex={}", derived_address, pk_hex);
+    // tracing::debug!("[verify_sui_wallet_signature] zkLogin verification successful, address={}, pk_hex={}", derived_address, pk_hex);
     Ok((derived_address, pk_hex))
 }
 
@@ -162,7 +174,7 @@ pub async fn fetch_jwk<'a>(iss: &'a str, kid: &'a str) -> Result<sui_sdk_types::
         return Err(format!("Unsupported issuer: {}", iss));
     };
 
-    tracing::debug!("[fetch_jwk] fetching JWK from iss={}, kid={}, url={}", iss, kid, jwks_url);
+    // tracing::debug!("[fetch_jwk] fetching JWK from iss={}, kid={}, url={}", iss, kid, jwks_url);
 
     // Asynchronous HTTP request to fetch JWKS
     let client = reqwest::Client::new();

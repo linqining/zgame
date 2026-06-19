@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use prost_types::value::Kind;
 use sui_rpc::Client;
+use sui_rpc::client::HeadersInterceptor;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 
 use crate::config::Config;
@@ -15,21 +16,44 @@ pub async fn subscribe_checkpoints(
     last_checkpoint: Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<(), String> {
     let package_id = &config.sui_package_id;
+    // 事件类型锚定到原始 Package ID，升级后仍用 origin 过滤
+    let origin_package_id = &config.sui_origin_package_id;
     if package_id.is_empty() {
         return Err("SUI_PACKAGE_ID not configured".to_string());
     }
 
-    let grpc_url = &config.fullnode_url;
-    tracing::info!("[sui_grpc] connecting to gRPC endpoint: {}", grpc_url);
+    let grpc_url = &config.grpc_url;
+    tracing::warn!("[sui_grpc] connecting to gRPC endpoint: {}", grpc_url);
 
-    let mut client = Client::new(grpc_url.as_str())
+    let client = Client::new(grpc_url.as_str())
         .map_err(|e| format!("Failed to create gRPC client: {}", e))?;
+
+    // Chainstack/QuickNode 等付费节点需要 x-token 认证
+    let mut client = client;
+    if !config.grpc_token.is_empty() {
+        let mut headers = HeadersInterceptor::new();
+        let token_value = tonic::metadata::MetadataValue::try_from(config.grpc_token.as_str())
+            .expect("GRPC_TOKEN contains invalid characters for gRPC header");
+        headers.headers_mut().insert("x-token", token_value);
+        client = client.with_headers(headers);
+        tracing::info!("[sui_grpc] x-token authentication enabled");
+    }
 
     let mut subscription_client = client.subscription_client();
 
     // SubscribeCheckpointsRequest 使用 Default 创建，并设置 read_mask 以获取交易和事件
+    // 注意：FieldMask 路径必须精确对应 proto 字段层级。
+    //   Checkpoint.transactions (Vec<Transaction>)
+    //     -> Transaction.events (Option<TxEvents>)
+    //       -> TxEvents.events (Vec<Event>)
+    //         -> Event.event_type / json / contents
+    // 直接请求 "transactions.events" 会返回整个 TxEvents 子消息（含全部 Event 及其字段）。
+    // 不要使用 "transactions.events.event_type" 这样的路径——它跳过了 TxEvents.events
+    // 这一层，Chainstack 等严格遵循 FieldMask 的节点会判定为无效路径而不填充 events 字段，
+    // 导致 tx.events 永远为 None（公共 testnet 节点会宽容地忽略无效路径，所以表现不同）。
     let read_mask = prost_types::FieldMask {
         paths: vec![
+            "digest".to_string(),
             "transactions.events".to_string(),
             "transactions.digest".to_string(),
             "sequence_number".to_string(),
@@ -39,7 +63,7 @@ pub async fn subscribe_checkpoints(
     let request = SubscribeCheckpointsRequest::default().with_read_mask(read_mask);
 
     let start_cp = last_checkpoint.load(std::sync::atomic::Ordering::SeqCst);
-    tracing::info!("[sui_grpc] subscribing to checkpoint stream (last processed={}), filtering package {}", start_cp, package_id);
+    tracing::warn!("[sui_grpc] subscribing to checkpoint stream (last processed={}), filtering package {}", start_cp, package_id);
 
     let response = subscription_client
         .subscribe_checkpoints(request)
@@ -48,7 +72,7 @@ pub async fn subscribe_checkpoints(
 
     let mut stream = response.into_inner();
 
-    tracing::info!("[sui_grpc] checkpoint stream established");
+    tracing::warn!("[sui_grpc] checkpoint stream established");
 
     while let Some(checkpoint_response) = stream
         .message()
@@ -59,6 +83,16 @@ pub async fn subscribe_checkpoints(
 
         if let Some(checkpoint) = checkpoint_response.checkpoint {
             let seq = checkpoint.sequence_number.unwrap_or_default();
+            let tx_count = checkpoint.transactions.len();
+            let event_count: usize = checkpoint
+                .transactions
+                .iter()
+                .map(|tx| tx.events.as_ref().map(|e| e.events.len()).unwrap_or(0))
+                .sum();
+            // tracing::info!(
+            //     "[sui_grpc] checkpoint #{}: {} transactions, {} events",
+            //     seq, tx_count, event_count
+            // );
 
             // 遍历检查点中的所有交易
             for tx in &checkpoint.transactions {
@@ -71,27 +105,44 @@ pub async fn subscribe_checkpoints(
                             None => continue,
                         };
 
-                        // 过滤：只处理目标合约的事件
-                        if !event_type.starts_with(&format!("{}::", package_id)) {
+                        // 过滤：只处理目标合约的事件（事件类型锚定到原始 Package ID）
+                        if !event_type.starts_with(&format!("{}::", origin_package_id)) {
                             continue;
                         }
+                        tracing::info!("[sui_grpc] event type from package: {}", event_type);
 
                         // 解析事件数据：优先使用 json 字段，回退到 BCS
                         let json_data = if let Some(json_val) = &event.json {
                             // 从 proto Value 转换
                             proto_value_to_serde(json_val)
+                        } else if let Some(bcs_data) = &event.contents {
+                            // json 字段未由服务端填充，尝试 BCS 反序列化
+                            if let Some(bytes) = &bcs_data.value {
+                                match crate::sui_events::parse_bcs_event(&event_type, bytes) {
+                                    Some(v) => v,
+                                    None => {
+                                        tracing::warn!(
+                                            "[sui_grpc] BCS parse failed for event '{}', bytes_len={}",
+                                            event_type, bytes.len()
+                                        );
+                                        serde_json::Value::Null
+                                    }
+                                }
+                            } else {
+                                serde_json::Value::Null
+                            }
                         } else {
-                            // BCS 反序列化需要类型信息，无法通用解析
                             serde_json::Value::Null
                         };
 
                         if let Some(chain_event) = parse_chain_event(&event_type, &json_data) {
-                            tracing::info!(
+                            tracing::warn!(
                                 "[sui_grpc] event at checkpoint {}: {:?}",
                                 seq,
                                 chain_event
                             );
-                            handle_grpc_event(chain_event, &state).await;
+                            let tx_digest = tx.digest.as_deref().filter(|s| !s.is_empty());
+                            handle_grpc_event(chain_event, &state, tx_digest).await;
                         }
                     }
                 }
@@ -99,15 +150,15 @@ pub async fn subscribe_checkpoints(
 
             // 记录已处理的检查点（可用于断点续传）
             last_checkpoint.store(seq, std::sync::atomic::Ordering::SeqCst);
-            tracing::trace!("[sui_grpc] processed checkpoint {}", seq);
+            // tracing::warn!("[sui_grpc] processed checkpoint {}", seq);
         } else {
             // checkpoint 为空时回退使用 cursor
             last_checkpoint.store(cursor, std::sync::atomic::Ordering::SeqCst);
-            tracing::trace!("[sui_grpc] processed checkpoint {}", cursor);
+            // tracing::warn!("[sui_grpc] processed checkpoint {}", cursor);
         }
     }
 
-    tracing::warn!("[sui_grpc] checkpoint stream ended");
+    // tracing::warn!("[sui_grpc] checkpoint stream ended");
     Ok(())
 }
 
@@ -159,6 +210,9 @@ pub async fn subscribe_with_reconnect(config: Config, state: Arc<AppState>) {
     let last_checkpoint = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     loop {
+        // 记录调用前的 checkpoint，用于判断本次调用是否取得进展
+        let cp_before = last_checkpoint.load(std::sync::atomic::Ordering::SeqCst);
+
         match subscribe_checkpoints(&config, state.clone(), last_checkpoint.clone()).await {
             Ok(()) => {
                 let cp = last_checkpoint.load(std::sync::atomic::Ordering::SeqCst);
@@ -191,6 +245,11 @@ pub async fn subscribe_with_reconnect(config: Config, state: Arc<AppState>) {
                     "[sui_grpc] subscription error at checkpoint {}: {}, reconnecting in {:?}",
                     cp, e, retry_delay
                 );
+                // 若断连前已成功推进 checkpoint，说明连接本身是通的，
+                // 此次错误属于短暂网络抖动，重置退避避免不必要的长延迟。
+                if cp > cp_before {
+                    retry_delay = std::time::Duration::from_secs(1);
+                }
                 // C1 修复：重连前先 backfill 断连期间丢失的事件
                 if cp > 0 {
                     tracing::info!(
@@ -215,7 +274,7 @@ pub async fn subscribe_with_reconnect(config: Config, state: Arc<AppState>) {
     }
 }
 
-async fn handle_grpc_event(event: SuiChainEvent, state: &Arc<AppState>) {
+async fn handle_grpc_event(event: SuiChainEvent, state: &Arc<AppState>, tx_digest: Option<&str>) {
     match &event {
         SuiChainEvent::PlayerJoined { table_id, player, buy_in, .. } => {
             tracing::info!(
@@ -240,8 +299,8 @@ async fn handle_grpc_event(event: SuiChainEvent, state: &Arc<AppState>) {
         }
     }
 
-    crate::relayer::process_event(&state.relayer_state, &state.config.fullnode_url, &state.config.sui_package_id, &event).await;
-    crate::relayer::apply_event_to_socket(state, &event).await;
+    let summary = crate::relayer::process_event(&state.config.fullnode_url, &state.config.sui_package_id, &event).await;
+    crate::relayer::apply_event_to_socket(state, &event, summary.as_ref(), tx_digest).await;
 }
 
 #[cfg(test)]

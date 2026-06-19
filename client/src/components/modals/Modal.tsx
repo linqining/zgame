@@ -61,7 +61,7 @@ const ModalHeading = styled.h2`
   font-family: 'Inter', -apple-system, sans-serif;
   font-size: 1.4rem;
   font-weight: 700;
-  color: #0f172a;
+  color: ${({ theme }) => theme.colors.fontColorDark};
   letter-spacing: -0.02em;
   margin: 0;
 `;
@@ -75,14 +75,15 @@ const IconWrapper = styled.div`
     color: #64748b !important;
 
     &:hover {
-      color: #0f172a !important;
+      color: ${({ theme }) => theme.colors.fontColorDark} !important;
     }
   }
 `;
 
 const ModalButton = styled(Button)`
-  background: linear-gradient(135deg, #667eea, #764ba2) !important;
-  color: white !important;
+  /* TODO: #764ba2 提取到 theme */
+  background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2) !important;
+  color: ${({ theme }) => theme.colors.lightestBg} !important;
   border: none !important;
   border-radius: 10px !important;
   font-weight: 600 !important;
@@ -97,6 +98,7 @@ const ModalButton = styled(Button)`
 `;
 
 const ModalText = styled(Text)`
+  /* TODO: #475569 提取到 theme */
   color: #475569;
   font-size: 0.95rem;
   line-height: 1.6;

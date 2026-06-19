@@ -12,7 +12,7 @@ pub async fn run_tick_loop(state: Arc<AppState>) {
         tracing::warn!(
             "[relayer::tick] sui_tick_interval_ms=0 would cause busy loop, falling back to 5000ms"
         );
-        5000
+        50000 //todo 先这样好调试
     } else {
         state.config.sui_tick_interval_ms
     };
@@ -29,6 +29,7 @@ pub async fn run_tick_loop(state: Arc<AppState>) {
             "[relayer::tick] starting tick loop in OFF-CHAIN mode, interval={}ms",
             interval_ms
         );
+        return;
     }
 
     loop {
@@ -36,43 +37,96 @@ pub async fn run_tick_loop(state: Arc<AppState>) {
         tokio::time::sleep(Duration::from_millis(interval_ms)).await;
 
         if on_chain_enabled {
-            // ===== 上链模式：遍历 relayer 缓存的 table_id，调用 submit_tick_tx =====
-            let table_ids = state.relayer_state.list_ids();
+            // ===== 上链模式：从 GameState.tables 读取所有已绑定 chain_table_id 的 table =====
+            // 注意：内存中的 summary 可能滞后（relayer 尚未处理 PlayerLeft 事件），
+            // 因此在 needs_tick 判断前从链上拉取最新 TableSummaryV2。
+            let chain_tables: Vec<String> = {
+                let gs = state.socket_state.state.read().await;
+                gs.tables.values()
+                    .filter(|t| t.chain_table_id.is_some())
+                    .map(|t| t.chain_table_id.clone().unwrap())
+                    .collect()
+            };
 
-            if table_ids.is_empty() {
+            if chain_tables.is_empty() {
                 continue;
             }
 
-            tracing::debug!("[relayer::tick] processing {} tables (on-chain)", table_ids.len());
-
-            for table_id in table_ids {
-                // F16 修复：更精细的 needs_tick 判断，减少不必要的链上 tick 交易
-                // - active_count >= 2：至少 2 个活跃玩家
-                // - round_state != 0：非 Waiting 状态
-                // - round_state != 13：非 HandComplete 状态（hand_complete_wait 由 game loop 处理）
-                // - current_turn.is_some()：有当前行动玩家（需要超时自动 fold）
-                //   或处于 reveal/reconstruct 阶段（可能需要超时推进）
+            for table_id in chain_tables {
+                // 从链上拉取最新 summary，避免内存缓存滞后导致 tick 误判
+                let summary = match crate::sui_query::fetch_table_summary(
+                    &state.config.fullnode_url,
+                    &state.config.sui_package_id,
+                    &table_id,
+                ).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(
+                            "[relayer::tick] fetch_table_summary failed for table={}: {}",
+                            table_id, e
+                        );
+                        continue;
+                    }
+                };
+                // needs_tick 判断：对齐 Move 合约 tick 函数的处理范围。
+                //
+                // Move tick 函数优先处理以下阶段（不检查 active_count）：
+                //   1. reconstruct_state.phase != none（reconstruct 进行中）
+                //   2. shuffle_state.phase == reconstruct(2) || before_preflop(3)
+                //   3. reveal_token_state.reveal_phase != none（reveal 进行中）
+                // 然后处理正常逻辑（需要 active_count >= 2 才能开始手牌）：
+                //   - round_waiting：检查是否可以 do_start_hand
+                //   - is_betting_round：检查下注超时
+                //   - round_showdown：检查是否可以 settle_hand
+                //
+                // 因此 needs_tick 分两部分：
+                //   A) shuffle/reveal/reconstruct 阶段活跃 → 无需 active_count >= 2
+                //   B) 正常游戏阶段 → 需要 active_count >= 2 且 round_state 有效
                 let needs_tick = {
-                    let summary = state.relayer_state.get(&table_id);
-                    match summary {
-                        Some(s) => {
-                            let rs = s.meta.round_state;
-                            s.meta.active_count >= 2
-                                && rs != 0
-                                && rs != 13
-                                && (s.meta.current_turn.is_some()
-                                    || rs == 2 || rs == 3 || rs == 4 || rs == 5
-                                    || rs == 7 || rs == 9 || rs == 11)
-                        }
-                        None => false,
+                    // A) shuffle/reveal/reconstruct 阶段（对齐 Move tick 优先处理逻辑）
+                    let in_reconstruct = summary.state.reconstruct_phase != 0;
+                    let in_shuffle = summary.state.shuffle_pending_count > 0
+                        || summary.state.shuffle_completed_count > 0;
+                    // shuffle_current_shuffler.is_some() 表示洗牌进行中
+                    let shuffle_active = summary.state.shuffle_current_shuffler.is_some()
+                        || in_shuffle;
+                    let reveal_active = summary.state.reveal_phase != 0;
+
+                    // active_count == 0 表示桌上没有活跃玩家，无论什么阶段都不需要 tick。
+                    // 修复：之前 shuffle_completed_count > 0 会导致 shuffle_active = true，
+                    // 即使所有玩家已离开（active_count=0），tick 仍继续运行。
+                    if summary.meta.active_count < 2 {
+                        // tracing::info!(
+                        //     "[relayer::tick] needs_tick table={}, no active needed (active_count=0)",
+                        //     table_id
+                        // );
+                        false
+                    } else if in_reconstruct || shuffle_active || reveal_active {
+                        tracing::info!(
+                            "[relayer::tick] needs_tick table={}, shuffle/reveal/reconstruct active{} {} {}",
+                            table_id,
+                            in_reconstruct,
+                            shuffle_active,
+                            reveal_active
+                        );
+                        true
+                    } else {
+                        tracing::info!(
+                            "[relayer::tick] needs_tick table={}, normal game stage",
+                            table_id
+                        );
+                        // B) 正常游戏阶段：需要 active_count >= 2
+                        summary.meta.active_count >= 2
                     }
                 };
 
                 if !needs_tick {
-                    tracing::trace!(
-                        "[relayer::tick] skip table={}, no tick needed (round_state=0 or active_count<2)",
-                        table_id
-                    );
+                    // tracing::info!(
+                    //     "[relayer::tick] skip table={}, no tick needed (round_state={}, active_count={})",
+                    //     table_id,
+                    //     summary.meta.round_state,
+                    //     summary.meta.active_count
+                    // );
                     continue;
                 }
 
@@ -105,7 +159,7 @@ pub async fn run_tick_loop(state: Arc<AppState>) {
                 continue;
             }
 
-            tracing::debug!("[relayer::tick] processing {} tables (off-chain)", table_ids.len());
+            // tracing::debug!("[relayer::tick] processing {} tables (off-chain)", table_ids.len());
 
             let io = match crate::socket::get_socket_io() {
                 Some(io) => io,

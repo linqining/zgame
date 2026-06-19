@@ -11,6 +11,7 @@ import {
 } from '../../pokergame/actions';
 import globalContext from '../global/globalContext';
 import config from '../../clientConfig';
+import { getToken } from '../../helpers/getToken';
 
 interface ReceiveLobbyInfoPayload {
   tables: unknown[];
@@ -56,9 +57,11 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   useEffect(() => {
     const isAuthenticated = isLoggedIn || !!walletAddress;
+    console.log('[WebSocketProvider] isAuthenticated:', isAuthenticated, 'isLoggedIn:', isLoggedIn, 'walletAddress:', walletAddress);
 
     if (isAuthenticated) {
       if (!socketRef.current) {
+        console.log('[WebSocketProvider] Creating new socket to:', config.socketURI);
         const newSocket = io(config.socketURI, {
           transports: ['websocket'],
           upgrade: false,
@@ -86,15 +89,28 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         });
 
         // On reconnect, re-emit FETCH_LOBBY_INFO to trigger server-side reconnection logic
+        // Note: FETCH_LOBBY_INFO is now emitted in the 'connect' handler above,
+        // which covers both initial connect and reconnects.
         newSocket.io.on('reconnect', () => {
-          console.log('[Socket] Reconnected, re-emitting FETCH_LOBBY_INFO');
-          const token = localStorage.token;
-          if (token) newSocket.emit(FETCH_LOBBY_INFO, token);
+          console.log('[Socket] Reconnected');
         });
 
         newSocket.on('connect', () => {
           console.log('[Socket] Connected');
           setIsConnected(true);
+          // Emit FETCH_LOBBY_INFO on every successful connection (initial + reconnects)
+          const token = getToken();
+          console.log('[Socket] connect event, token exists:', !!token);
+          if (token) {
+            console.log('[Socket] Emitting FETCH_LOBBY_INFO on connect');
+            newSocket.emit(FETCH_LOBBY_INFO, token);
+          } else {
+            console.warn('[Socket] No token found in localStorage, cannot emit FETCH_LOBBY_INFO');
+          }
+        });
+
+        newSocket.on('connect_error', (err) => {
+          console.error('[Socket] Connect error:', err.message);
         });
 
         newSocket.on('disconnect', (reason) => {
@@ -105,12 +121,11 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         socketRef.current = newSocket;
         window.socket = newSocket;
         setSocket(newSocket);
-
-        const token = localStorage.token;
-        if (token) newSocket.emit(FETCH_LOBBY_INFO, token);
+        // Note: FETCH_LOBBY_INFO is emitted in the 'connect' handler above,
+        // ensuring it's only sent after the connection is fully established.
       } else {
         // Socket already exists, just re-emit FETCH_LOBBY_INFO if we have a token
-        const token = localStorage.token;
+        const token = getToken();
         if (token) socketRef.current.emit(FETCH_LOBBY_INFO, token);
       }
     } else {

@@ -2,5 +2,9 @@
 name = "texas_poker"
 edition = "2024"
 
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "ff1fe0ec455153707136cffd0dc77dfb77ba9ad5" }
+MoveStdlib = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "ff1fe0ec455153707136cffd0dc77dfb77ba9ad5" }
+
 [addresses]
 texas_poker = "0x0"

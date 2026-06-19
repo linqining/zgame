@@ -1,7 +1,8 @@
-import React, { createContext, useState, useCallback, useEffect, useRef } from 'react';
+import React, { createContext, useState, useCallback, useEffect, useRef, useContext } from 'react';
 import { PlayerContextType, PkProofData } from '../../types/player';
 import init, { WasmClientPlayer } from '@linqining/client-wasm';
 import wasmUrl from '@linqining/client-wasm/client_wasm_bg.wasm?url';
+import authContext from '../auth/authContext';
 
 const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
 
@@ -29,6 +30,7 @@ function parsePkProof(proofVal: unknown): PkProofData {
 }
 
 const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { walletAddress } = useContext(authContext)!;
   const [playerKeys, setPlayerKeysState] = useState<WasmClientPlayer | null>(null);
   const [pkProof, setPkProof] = useState<PkProofData | null>(null);
   const [pkHex, setPkHex] = useState<string | null>(null);
@@ -39,6 +41,7 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
   const keysRef = useRef<WasmClientPlayer | null>(null);
   const restoreSessionRef = useRef<(() => boolean) | null>(null);
   const getPlayerKeysRef = useRef<(() => WasmClientPlayer | null) | null>(null);
+  const prevWalletRef = useRef<string | null>(null);
 
   useEffect(() => {
     ensureWasmReady().then(() => {
@@ -105,8 +108,12 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
 
     const storedSk = localStorage.getItem('sk');
     if (!storedSk) {
-      console.warn('[PlayerContext] No SK found in storage, generating new keys');
-      const newKeys = new WasmClientPlayer();
+      console.warn('[PlayerContext] No SK found in storage, generating new keys from wallet address');
+      if (!walletAddress) {
+        console.error('[PlayerContext] No wallet address available, cannot generate keys');
+        return null;
+      }
+      const newKeys = WasmClientPlayer.new_with_wallet_address(walletAddress);
       const sk = newKeys.get_sk_hex();
       const pk = newKeys.get_pk_hex();
       localStorage.setItem('sk', sk);
@@ -165,6 +172,28 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
 
   restoreSessionRef.current = restoreSession;
   getPlayerKeysRef.current = getPlayerKeys;
+
+  // 钱包地址变化时，重新生成密钥（与钱包一一对应）
+  useEffect(() => {
+    if (!wasmReady || !walletAddress) return;
+    // 首次或钱包未变化时跳过
+    if (prevWalletRef.current === walletAddress) return;
+    const prevWallet = prevWalletRef.current;
+    prevWalletRef.current = walletAddress;
+
+    // 非首次切换钱包：清除旧密钥，用新钱包地址生成
+    if (prevWallet !== null) {
+      console.log('[PlayerContext] Wallet address changed, regenerating keys');
+      clearPlayerKeys();
+      const newKeys = WasmClientPlayer.new_with_wallet_address(walletAddress);
+      const sk = newKeys.get_sk_hex();
+      const pk = newKeys.get_pk_hex();
+      localStorage.setItem('sk', sk);
+      localStorage.setItem('pk', pk);
+      const proof = parsePkProof(newKeys.generate_pk_proof());
+      setPlayerKeys(newKeys, proof, "", pk);
+    }
+  }, [walletAddress, wasmReady, clearPlayerKeys, setPlayerKeys]);
 
   useEffect(() => {
     console.log('[PlayerContext] Context updated:', {

@@ -39,6 +39,12 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
             return Err(VerificationError::IdentityBasePoint);
         }
 
+        // 兼容 Move 合约 chaum_pedersen::verify 的 M5 修复：
+        // 拒绝恒等元公钥点 P1/P2——若 P1=P2=identity，x=0 即可使等式平凡成立
+        if P1.is_identity() || P2.is_identity() {
+            return Err(VerificationError::IdentityBasePoint);
+        }
+
         // 兼容 Move 合约 chaum_pedersen::prove/verify 的 transcript 标签：
         // Move 使用 cp_G1/cp_G2/cp_P1/cp_P2，Rust 须保持一致。
         // Append public values to transcript
@@ -53,6 +59,11 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
         // Compute commitments: A = w*G1, B = w*G2
         let commitment_a = G1 * w;
         let commitment_b = G2 * w;
+
+        // 兼容 Move 合约 M-P17 修复：校验承诺点非 identity——identity 承诺削弱证明安全性
+        if commitment_a.is_identity() || commitment_b.is_identity() {
+            return Err(VerificationError::InvalidDLEQProof);
+        }
 
         // Append commitments to transcript
         transcript.append_point::<C>(b"cp_commitment_a", &commitment_a);
@@ -91,6 +102,17 @@ impl<C: Curve> ChaumPedersenDLEQProof<C> {
         // SECURITY: Reject identity base points to prevent trivial attacks
         if G1.is_identity() || G2.is_identity() {
             return Err(VerificationError::IdentityBasePoint);
+        }
+
+        // 兼容 Move 合约 chaum_pedersen::verify 的 M5 修复：
+        // 拒绝恒等元公钥点 P1/P2——若 P1=P2=identity，x=0 即可使等式平凡成立
+        if P1.is_identity() || P2.is_identity() {
+            return Err(VerificationError::IdentityBasePoint);
+        }
+
+        // 兼容 Move 合约 M-P17 修复：校验承诺点非 identity——identity 承诺削弱证明安全性
+        if self.commitment_a.is_identity() || self.commitment_b.is_identity() {
+            return Err(VerificationError::InvalidDLEQProof);
         }
 
         // 兼容 Move 合约 chaum_pedersen::verify 的 transcript 标签：

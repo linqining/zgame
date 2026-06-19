@@ -127,27 +127,8 @@ public fun new(
 
 // ========== 辅助函数 ==========
 
-/// 从字节反序列化 ElGamalCiphertext（96 bytes = 48 c1 + 48 c2）
-public fun ciphertext_from_bytes(data: &vector<u8>): ElGamalCiphertext {
-    // M-P16: 校验输入长度为 96 字节（48 c1 + 48 c2），防止越界访问
-    assert!(data.length() == 96, 0);
-    let mut c1_bytes = vector[];
-    let mut c2_bytes = vector[];
-    let mut i = 0;
-    while (i < 48) {
-        c1_bytes.push_back(*(vector::borrow(data, i)));
-        i = i + 1;
-    };
-    i = 48;
-    while (i < 96) {
-        c2_bytes.push_back(*(vector::borrow(data, i)));
-        i = i + 1;
-    };
-    bls_elgamal::new_ciphertext(
-        bls12381::g1_from_bytes(&c1_bytes),
-        bls12381::g1_from_bytes(&c2_bytes),
-    )
-}
+// M2/m1 修复：移除重复的 ciphertext_from_bytes，直接使用 bls_elgamal::ciphertext_from_bytes。
+// verify 内部在调用前会校验字节长度，避免 assert! abort (DoS)。
 
 // ========== 验证 ==========
 
@@ -170,6 +151,11 @@ public fun verify(
     let n = proof.swap_out_proofs.length();
     let g = bls12381::g1_generator();
 
+    // M1 修复：校验 cards 与 output_cards 长度一致，防止越界 abort
+    if (cards.length() != output_cards.length()) {
+        return false
+    };
+
     // ===== Step 1: Verify swap_out_proofs =====
     if (n != user_readable_cards.length()) {
         return false
@@ -181,9 +167,12 @@ public fun verify(
     let mut i = 0;
     while (i < n) {
         let sop = vector::borrow(&proof.swap_out_proofs, i);
-        // 反序列化
-        let deser_readable = ciphertext_from_bytes(&sop.user_readable_card);
-        let deser_swap_out = ciphertext_from_bytes(&sop.swap_out_card);
+        // M2 修复：校验字节长度后再反序列化，避免 assert! abort (DoS)
+        if (sop.user_readable_card.length() != 96) { return false };
+        if (sop.swap_out_card.length() != 96) { return false };
+        // 反序列化（使用 bls_elgamal 的统一实现）
+        let deser_readable = bls_elgamal::ciphertext_from_bytes(&sop.user_readable_card);
+        let deser_swap_out = bls_elgamal::ciphertext_from_bytes(&sop.swap_out_card);
 
         // 验证反序列化的 user_readable_card == user_readable_cards[i]
         let expected_readable = vector::borrow(user_readable_cards, i);

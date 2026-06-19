@@ -61,13 +61,11 @@ mod tests {
         let (sk, pk) = gen_keypair::<RistrettoCurve>(&mut rng);
 
         let plaintexts: Vec<_> = (0..RistrettoCurve::n_cards()).map(|i| RistrettoCurve::base_g() * <RistrettoCurve as Curve>::Scalar::from_u64(i as u64)).collect();
-        let _r_values: Vec<_> = (0..RistrettoCurve::n_cards()).map(|_| <RistrettoCurve as Curve>::Scalar::random(&mut rng)).collect();
+        let r_values: Vec<_> = (0..RistrettoCurve::n_cards()).map(|_| <RistrettoCurve as Curve>::Scalar::random(&mut rng)).collect();
 
+        // 兼容 Move 合约 M7 修复：使用有效密文（c1/c2 非 identity），而非 identity c1
         let input_cts: Vec<RistrettoElGamalCiphertext> = (0..RistrettoCurve::n_cards())
-            .map(|i| RistrettoElGamalCiphertext {
-                c1: <RistrettoCurve as Curve>::Point::identity(),
-                c2: plaintexts[i],
-            }).collect();
+            .map(|i| RistrettoElGamalCiphertext::encrypt(&plaintexts[i], &pk, &r_values[i])).collect();
 
         let mut output_cts = Vec::new();
         for i in 0..input_cts.len() {
@@ -599,21 +597,21 @@ mod tests {
         let mut rng = OsRng;
         let (sk, pk) = gen_keypair::<RistrettoCurve>(&mut rng);
         let pt = RistrettoCurve::base_g() * <RistrettoCurve as Curve>::Scalar::from_u64(42u64);
-        let input = RistrettoElGamalCiphertext { c1: <RistrettoCurve as Curve>::Point::identity(), c2: pt };
+        // 兼容 Move 合约 M7 修复：使用有效密文（c1/c2 非 identity）
+        let r = <RistrettoCurve as Curve>::Scalar::random(&mut rng);
+        let input = RistrettoElGamalCiphertext::encrypt(&pt, &pk, &r);
         let mut output = input.clone();
 
-        output.c2 = output.c2 + output.c1 * sk; //user2 join
+        output.c2 = output.c2 + output.c1 * sk; //user remask
 
         let mut transcript = MerlinTranscript::new(b"test_single_card_one_user");
         let proof = RemaskProof::prove(&[input.clone()], &[output.clone()], &sk, &pk, &mut transcript);
         let mut transcript = MerlinTranscript::new(b"test_single_card_one_user");
         assert!(proof.verify(&[input.clone()], &[output.clone()], &pk, &mut transcript), "single card should pass");
 
+        // 同一用户加密并 remask，需移除两层加密
         let reveal_token1 = output.clone().gen_reveal_token(&sk);
-
-        let decrypted = output.c2 - reveal_token1;
-        println!("{:?},{:?},{:?},{:?}",output.c2.compress(), reveal_token1.compress(),decrypted.compress(),pt.compress());
-
+        let decrypted = output.c2 - reveal_token1 - reveal_token1;
         assert_eq!(decrypted, pt);
     }
 
@@ -675,20 +673,21 @@ mod tests {
         assert_eq!(manual_output.c2, input.c2,
             "c2 unchanged when c1 is identity");
 
+        // 兼容 Move 合约 M7 修复：verify 现在拒绝 identity c1 密文
         let mut transcript = MerlinTranscript::new(b"test_identity_c1");
         let proof = RemaskProof::prove(&[input.clone()], &[manual_output.clone()], &sk, &pk, &mut transcript);
         let mut transcript_v = MerlinTranscript::new(b"test_identity_c1");
-        assert!(proof.verify(&[input.clone()], &[manual_output.clone()], &pk, &mut transcript_v),
-            "Proof passes for identity c1, but per-card check is vacuous");
+        assert!(!proof.verify(&[input.clone()], &[manual_output.clone()], &pk, &mut transcript_v),
+            "M7 fix: verify should reject identity c1 ciphertext");
 
-        // 关键：如果攻击者修改了 manual_output.c2，证明会失败
+        // 篡改的 output 也应被拒绝（identity c1）
         let mut tampered_output = manual_output.clone();
         tampered_output.c2 = tampered_output.c2 + RistrettoCurve::base_g();
         let mut transcript2 = MerlinTranscript::new(b"test_identity_c1_tampered");
         let proof2 = RemaskProof::prove(&[input.clone()], &[tampered_output.clone()], &sk, &pk, &mut transcript2);
         let mut transcript2_v = MerlinTranscript::new(b"test_identity_c1_tampered");
         assert!(!proof2.verify(&[input.clone()], &[tampered_output.clone()], &pk, &mut transcript2_v),
-            "Tampered c2 should fail when c1 is identity");
+            "M7 fix: verify should reject identity c1 ciphertext (tampered)");
     }
 
 }

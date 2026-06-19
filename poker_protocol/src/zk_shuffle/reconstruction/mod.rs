@@ -394,6 +394,11 @@ impl<C: Curve> ReconstructProof<C> {
         // 验证 self.swap_sum_c2_commit = swap_sum_c2 * blind
         // 这已经通过 blind_dleq_proof 验证了
 
+        // 兼容 Move 合约 M-P17 修复：校验承诺点非 identity——identity 承诺削弱证明安全性
+        if self.swap_sum_c1_commit.is_identity() || self.swap_sum_c2_commit.is_identity() {
+            return Err(VerificationError::InvalidDLEQProof);
+        }
+
         // 验证合并 Schnorr 证明（c1/c2 使用相同 secret_vec）
         let mut combined_base_points: Vec<C::Point> = Vec::with_capacity(2 * swap_out_cards.len());
         for oc in swap_out_cards.iter() {

@@ -324,26 +324,30 @@ impl CurveScalar for BlsScalar {
         let len = 32.min(bytes.len());
         arr[..len].copy_from_slice(&bytes[..len]);
 
-        // Try normal deserialization first (works for values < modulus)
-        if let Some(s) = BlsScalar::from_repr_vartime(arr) {
-            return s;
+        // 兼容 Move 合约 bls12381::scalar_from_bytes（大端序解析）：
+        // 使用 from_bytes_be 而非 from_repr_vartime（小端序），
+        // 确保 as_bytes() 的输出能被 from_bytes_mod_order 正确反序列化。
+
+        // Try big-endian deserialization first (works for values < modulus)
+        let ct = BlsScalar::from_bytes_be(&arr);
+        if bool::from(ct.is_some()) {
+            return ct.unwrap();
         }
 
         // Value >= modulus. Since max 32-byte value < 3 * modulus,
         // subtract modulus until the value is in range.
-        // Note: blstrs doesn't expose a native from_bytes_mod_order,
-        // so we implement manual modular reduction.
-        const MODULUS_LE: [u8; 32] = [
-            0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
-            0xfe, 0x5b, 0xfe, 0xff, 0x02, 0xa4, 0xbd, 0x53,
-            0x05, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
-            0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
+        // BLS12-381 scalar modulus in big-endian:
+        const MODULUS_BE: [u8; 32] = [
+            0x73, 0xed, 0xa7, 0x53, 0x29, 0x9d, 0x7d, 0x48,
+            0x33, 0x39, 0xd8, 0x08, 0x09, 0xa1, 0xd8, 0x05,
+            0x53, 0xbd, 0xa4, 0x02, 0xff, 0xfe, 0x5b, 0xfe,
+            0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01,
         ];
 
         for _ in 0..3 {
             let mut borrow = 0i64;
-            for i in 0..32 {
-                let diff = arr[i] as i64 - MODULUS_LE[i] as i64 - borrow;
+            for i in (0..32).rev() {
+                let diff = arr[i] as i64 - MODULUS_BE[i] as i64 - borrow;
                 if diff < 0 {
                     arr[i] = (diff + 256) as u8;
                     borrow = 1;
@@ -352,8 +356,9 @@ impl CurveScalar for BlsScalar {
                     borrow = 0;
                 }
             }
-            if let Some(s) = BlsScalar::from_repr_vartime(arr) {
-                return s;
+            let ct = BlsScalar::from_bytes_be(&arr);
+            if bool::from(ct.is_some()) {
+                return ct.unwrap();
             }
         }
 
@@ -375,7 +380,10 @@ impl CurveScalar for BlsScalar {
     }
 
     fn as_bytes(&self) -> Vec<u8> {
-        <Self as PrimeField>::to_repr(self).as_ref().to_vec()
+        // 兼容 Move 合约 bls12381::scalar_from_bytes（大端序解析）：
+        // 使用 to_bytes_be() 而非 to_repr()（小端序），确保 Rust 端序列化的标量
+        // 字节能被 Move 端正确反序列化。
+        self.to_bytes_be().to_vec()
     }
 
     fn invert(&self) -> Self {
@@ -435,22 +443,23 @@ impl Curve for Bls12381Curve {
         // 兼容 Move 合约 bls_scalar::base_h()：
         // 使用 hash_to_g1（RFC 9380 hash-to-curve）而非 G * hash(label)。
         // 两者产生不同的点，必须与链上实现保持一致。
+        // DST 必须与 Sui `bls12381::hash_to_g1` 一致：`BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_`
+        const BLS_DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
         let label = b"texas_poker_independent_base_H";
-        G1Projective::hash_to_curve(label, b"", b"")
+        G1Projective::hash_to_curve(label, BLS_DST, b"")
     }
 
     fn hash_to_scalar(digest: &[u8]) -> BlsScalar {
         // 兼容 Move 合约 bls_scalar::hash_to_scalar：
         // SHA3-256(data) → 清除 h[0] 最高2位 → scalar_from_bytes
         //
-        // Move 端 bls12381::scalar_from_bytes 对字节做模 r 约简（始终成功），
-        // Rust 端使用 from_bytes_mod_order 做相同的模 r 约简。
-        // 清位（& 0x3F）与 Move 保持一致，虽然模约简本身已能处理任意输入，
-        // 但保留清位确保两端对同一输入产生相同标量。
+        // Move 端 bls12381::scalar_from_bytes 使用 blst_scalar_from_bendian（大端序解析），
+        // Rust 端必须使用 from_bytes_be（大端序解析）以保持一致。
+        // 清位（& 0x3F）确保值 < 2^254 < r，大端序解析必然成功。
         let mut hash = Sha3_256::digest(digest);
         hash[0] &= 0x3F;
         let arr: [u8; 32] = hash.into();
-        BlsScalar::from_bytes_mod_order(&arr)
+        BlsScalar::from_bytes_be(&arr).unwrap()
     }
 
     fn n_cards() -> usize {

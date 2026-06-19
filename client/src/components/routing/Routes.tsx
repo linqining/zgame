@@ -1,9 +1,7 @@
 import React, { useContext } from 'react';
 import { Routes, Route } from 'react-router-dom';
-import HomePage from '../../pages/HomePage';
-import RegistrationPage from '../../pages/RegistrationPage';
-import LoginPage from '../../pages/LoginPage';
 import Dashboard from '../../pages/Dashboard';
+import SecretPokerHomePage from '../../pages/SecretPokerHomePage';
 import Play from '../../pages/Play';
 import ProtectedRoute from './ProtectedRoute';
 import StaticPage from '../../pages/StaticPage';
@@ -18,9 +16,7 @@ const RoutesComponent: React.FC = () => {
 
   return (
     <Routes>
-      <Route path="/" element={<HomePage />} />
-      <Route path="/register" element={<RegistrationPage />} />
-      <Route path="/login" element={<LoginPage />} />
+      <Route path="/" element={<SecretPokerHomePage />} />
       <Route path="/auth/callback" element={<ZkLoginCallback />} />
       <Route
         path="/dashboard"

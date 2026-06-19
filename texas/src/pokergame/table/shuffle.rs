@@ -1,4 +1,5 @@
 use super::*;
+use crate::pokergame::game_state::ShufflePhase;
 use crate::pokergame::player::truncate_name;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 
@@ -15,23 +16,14 @@ impl Table {
         self.shuffle_state.completed_players.len()
     }
 
+    /// 对齐 Move do_start_hand → start_preflop_shuffle：启动 BeforePreflop 洗牌。
+    /// 实际逻辑已移至 `start_preflop_shuffle`（phases.rs），由 `start_hand` 调用。
+    /// 此处保留入口供 game_loop 直接调用（等价于 Move tick → do_start_hand）。
     pub fn start_shuffle(&mut self) -> Result<(), String> {
-        if self.round_state == RoundState::Shuffling {
+        if self.shuffle_state.is_active() {
             return Ok(());
         }
-        self.reset_shuffle();
-        self.transition_to(RoundState::Shuffling);
-        self.shuffle_state.is_active = true;
-
-        let already_completed: std::collections::HashSet<GamePkHex> =
-            self.shuffle_state.completed_players.iter().cloned().collect();
-
-        self.remove_inactive_players();
-        self.register_waiting_players();
-        self.clear_waiting_flags();
-        self.init_pending_players(&already_completed);
-
-        self.shuffle_state.timeout_seconds = 10;
+        self.start_hand();
         Ok(())
     }
 
@@ -53,7 +45,7 @@ impl Table {
     }
 
     pub fn register_waiting_players(&mut self) {
-        let active_pk_hexs: std::collections::HashSet<String> = self.seats.values()
+        let active_pk_hexs: std::collections::HashSet<String> = self.seats().values()
             .filter_map(|seat| seat.player.as_ref())
             .map(|player| player.pk_hex.0.clone())
             .collect();
@@ -75,7 +67,7 @@ impl Table {
     }
 
     pub fn clear_waiting_flags(&mut self) {
-        for seat in self.seats.values_mut() {
+        for seat in self.local_seats.values_mut() {
             if seat.is_waiting {
                 seat.is_waiting = false;
                 if let Some(player) = &seat.player {
@@ -96,8 +88,7 @@ impl Table {
         // 将"所有玩家已完成洗牌则跳过"的逻辑移到 is_empty 分支内。
         if self.shuffle_state.pending_players.is_empty() {
             if self.complete_shuffle_player_count() >= MIN_START_NUM as usize {
-                self.shuffle_state.is_active = false;
-                self.transition_to(RoundState::ShuffleComplete);
+                self.shuffle_state.phase = ShufflePhase::None;
                 tracing::info!("[SHUFFLE] All players already completed shuffle, skipping");
             } else {
                 tracing::warn!("[SHUFFLE] Init pending players is empty");
@@ -125,7 +116,7 @@ impl Table {
     }
 
     pub fn check_shuffle_timeout(&mut self) -> Option<GamePkHex> {
-        if !self.shuffle_state.is_active {
+        if !self.shuffle_state.is_active() {
             return None;
         }
         let timeout_start = match self.shuffle_state.timeout_start {
@@ -156,7 +147,7 @@ impl Table {
 
         let player_for_seat = player.clone();
 
-        if self.seats.values().any(|seat| {
+        if self.seats().values().any(|seat| {
             seat.player.as_ref().map_or(false, |p| p.pk_hex.0 == pk_hex)
         }) {
             tracing::info!("Player {} is already in game", pk_hex);
@@ -166,10 +157,10 @@ impl Table {
         let actual_seat_id = if seat_id == 0 {
             self.find_random_empty_seat().ok_or(JoinError::InvalidSeatId)?
         } else {
-            if seat_id < 1 || seat_id > self.max_players {
+            if seat_id < 1 || seat_id > self.max_players() {
                 return Err(JoinError::InvalidSeatId);
             }
-            if self.seats.contains_key(&seat_id) {
+            if self.seats().contains_key(&seat_id) {
                 return Err(JoinError::SeatAlreadyOccupied);
             }
             seat_id
@@ -177,14 +168,14 @@ impl Table {
 
         // Waiting/Shuffling 阶段玩家可以加入游戏并洗牌
         // ShuffleComplete 及之后阶段，玩家只能等待下一手加入
-        let is_join_before_start = matches!(self.round_state, RoundState::Waiting | RoundState::Shuffling);
+        let is_join_before_start = self.round_state() == RoundState::Waiting || self.shuffle_state.is_active();
 
         let pk_proof = pk_proof_json.to_proof().map_err(|e| JoinError::Crypto(e))?;
         if !pk_proof.verify(&player_pk) {
             return Err(JoinError::InvalidPkProof);
         }
         tracing::info!("[SHUFFLE] Player {} joined and shuffled, sat at seat {}, round state {:?}",
-            pk_hex, actual_seat_id,self.round_state);
+            pk_hex, actual_seat_id,self.round_state());
         let player_for_seat = GamePlayer {
             name: truncate_name(&player.name, 12),
             bankroll: player.bankroll,
@@ -222,7 +213,7 @@ impl Table {
             self.add_player(GamePkHex::new(pk_hex.clone()), player.wallet_address.clone());
             self.sit_player(player_for_seat, actual_seat_id, amount, false);
 
-            if self.shuffle_state.is_active {
+            if self.round_state() == RoundState::Waiting {
                 self.shuffle_state.completed_players.push(pk_hex_game.clone());
                 self.shuffle_state.pending_players.retain(|p| *p != pk_hex_game);
             }
@@ -243,7 +234,7 @@ impl Table {
             });
             self.add_player(GamePkHex::new(pk_hex.clone()), player.wallet_address.clone());
             self.sit_player(player_for_seat, actual_seat_id, amount, true);
-            tracing::info!("[SHUFFLE] Player {} joined as waiting, sat at seat {}, will join next hand roundState{:?}", pk_hex, actual_seat_id,self.round_state);
+            tracing::info!("[SHUFFLE] Player {} joined as waiting, sat at seat {}, will join next hand roundState{:?}", pk_hex, actual_seat_id,self.round_state());
             Ok(JoinResult::JoinedWaiting)
         }
     }
@@ -254,7 +245,7 @@ impl Table {
         output_cards: Vec<ElGamalCiphertextJson>,
         shuffle_proof: ShuffleProofJson,
     ) -> Result<(), String> {
-        if !self.shuffle_state.is_active {
+        if !self.shuffle_state.is_active() {
             return Err("Shuffle not active".to_string());
         }
         if self.shuffle_state.current_player_pk != Some(player_pk_hex.clone()) {
@@ -288,9 +279,10 @@ impl Table {
         Ok(())
     }
 
+    #[deprecated(note = "use advance_shuffle instead")]
     pub fn complete_or_continue_next_shuffler(&mut self) {
         if self.shuffle_state.pending_players.is_empty() && self.complete_shuffle_player_count() >= MIN_START_NUM as usize {
-            self.transition_to(RoundState::ShuffleComplete);
+            self.shuffle_state.phase = ShufflePhase::None;
         } else if let Some(next_pk) = self.shuffle_state.pending_players.first() {
             let next_pk_clone = next_pk.clone();
             self.set_current_shuffler(next_pk_clone);
@@ -298,9 +290,9 @@ impl Table {
     }
 
     pub fn get_shuffle_public_state(&self) -> Option<ShufflePublicState> {
-        if self.shuffle_state.is_active {
+        if self.shuffle_state.is_active() {
             Some(ShufflePublicState {
-                is_active: true,
+                phase: self.shuffle_state.phase,
                 current_player_pk: self.shuffle_state.current_player_pk.clone(),
                 completed_players: self.shuffle_state.completed_players.clone(),
                 pending_players: self.shuffle_state.pending_players.clone(),
@@ -313,5 +305,197 @@ impl Table {
         } else {
             None
         }
+    }
+
+    // ================================================================
+    // 对齐 Move 合约 shuffle 流程
+    // ================================================================
+
+    /// 镜像 Move advance_shuffle（table.move:2275-2325）：驱动洗牌流程推进。
+    /// pending==0 → on_shuffle_complete → 根据 phase 启动 reveal
+    /// pending>0 → 设 current_shuffler + reset shuffle_started_at
+    ///
+    /// 使用 shuffle_state.phase 字段判断阶段（对齐 Move）：
+    /// - phase == BeforePreflop → 开局前洗牌
+    /// - phase == Reconstruct → reconstruct 后洗牌
+    pub fn advance_shuffle(&mut self) {
+        // 对齐 Move：仅 BeforePreflop / Reconstruct 阶段推进
+        if self.shuffle_state.phase != ShufflePhase::BeforePreflop
+            && self.shuffle_state.phase != ShufflePhase::Reconstruct
+        {
+            return;
+        }
+        let curr_phase = self.shuffle_state.phase;
+
+        if self.shuffle_state.pending_players.is_empty() {
+            // 所有玩家完成洗牌
+            self.on_shuffle_complete();
+
+            if curr_phase == ShufflePhase::BeforePreflop {
+                // BeforePreflop 完成 → 发牌 (move_button 已在 start_hand 中完成)
+                // + transition_to(PreFlop) + start_preflop_reveal_phase
+                // 盲注和下注轮在 on_reveal_complete(HandReveal) 中创建
+                self.on_before_preflop_shuffle_complete();
+                self.transition_to(RoundState::PreFlop);
+                self.start_preflop_reveal_phase();
+            } else {
+                // Reconstruct 完成 → 清空 reconstruct_state + reveal_token_state
+                // + 根据 round_state 启动对应 reveal
+                self.reconstruct_state.reset();
+                self.reveal_token_state.reset();
+                match self.round_state() {
+                    RoundState::PreFlop => self.start_preflop_reveal_phase(),
+                    RoundState::Flop => self.start_community_reveal_phase(),
+                    RoundState::Turn => self.start_community_reveal_phase(),
+                    RoundState::River => self.start_community_reveal_phase(),
+                    RoundState::Showdown => self.start_showdown_reveal_phase(),
+                    _ => tracing::warn!(
+                        "[advance_shuffle] unexpected round state after reconstruct: {:?}",
+                        self.round_state()
+                    ),
+                }
+            }
+
+            // 通知前端洗牌完成
+            self.emit_event(crate::pokergame::table::events::TableEvent::TableUpdated {
+                message: Some("Shuffle complete".to_string()),
+            });
+            if self.reveal_token_state.is_active() {
+                self.emit_event(crate::pokergame::table::events::TableEvent::RevealNotice);
+            }
+        } else {
+            // 仍有待洗牌玩家 → 设 current_shuffler（对齐 Move：current_shuffler = pending[0]）
+            if let Some(first_pk) = self.shuffle_state.pending_players.first() {
+                let first_pk_clone = first_pk.clone();
+                self.set_current_shuffler(first_pk_clone);
+            }
+            // 通知前端轮到下一玩家洗牌
+            self.emit_event(crate::pokergame::table::events::TableEvent::ShuffleNotice);
+        }
+    }
+
+    /// 镜像 Move on_shuffle_complete（table.move:1081-1090）：
+    /// 仅重置 shuffle_state（phase → None），不 transition_to。
+    fn on_shuffle_complete(&mut self) {
+        tracing::info!("[SHUFFLE] Shuffle complete (phase={}), resetting shuffle_state", self.shuffle_state.phase);
+        self.shuffle_state.phase = ShufflePhase::None;
+        self.shuffle_state.current_player_pk = None;
+        self.shuffle_state.timeout_start = None;
+        // 保留 completed_players 列表，清空 pending（已为空）
+    }
+
+    /// 镜像 Move on_shuffle_timeout（table.move:1211-1299）：处理洗牌超时。
+    pub fn on_shuffle_timeout(&mut self) {
+        let shuffler_pk = match &self.shuffle_state.current_player_pk {
+            Some(pk) => pk.clone(),
+            None => return,
+        };
+        let is_before_preflop = self.shuffle_state.phase == ShufflePhase::BeforePreflop;
+
+        tracing::warn!(
+            "[SHUFFLE] Player {} timed out during shuffle (phase={})",
+            shuffler_pk, self.shuffle_state.phase
+        );
+
+        // kick 当前洗牌者
+        self.remove_player_by_pk(&shuffler_pk);
+        self.shuffle_state.pending_players.retain(|p| *p != shuffler_pk);
+
+        // remove_player_by_pk → stand_player_by_pk 在 Reconstruct 阶段（is_playing()==true）
+        // 剩 1 人时会自动调用 end_without_showdown。若手牌已结束，直接返回避免重复结算。
+        if !is_before_preflop && self.round_state() == RoundState::Waiting {
+            return;
+        }
+
+        let active_count = self.active_players().len();
+        if active_count == 0 {
+            self.refund_all_bets();
+            self.reset_for_next_hand();
+            return;
+        }
+        if active_count == 1 {
+            self.end_without_showdown();
+            return;
+        }
+
+        if is_before_preflop {
+            // BeforePreflop: 如果 shuffle_state 已不活跃（kick 触发了完成），直接返回
+            if !self.shuffle_state.is_active() {
+                return;
+            }
+            // 重新初始化牌组并重新洗牌
+            self.rebuild_deck_and_shuffle();
+            self.advance_shuffle();
+        } else {
+            // Reconstruct: 如果 round_state 已变 Waiting（kick 触发了 reset），直接返回
+            if self.round_state() == RoundState::Waiting {
+                return;
+            }
+            // 如果 shuffle_state 已不活跃（kick 触发了完成），直接返回
+            if !self.shuffle_state.is_active() {
+                return;
+            }
+            // 从 reconstruct_state.player_deck 移除被踢玩家
+            self.reconstruct_state.player_deck.remove(&shuffler_pk);
+            // 重新构建牌组并重新洗牌
+            self.on_reconstruct_shuffle_failed();
+        }
+    }
+
+    /// 重新初始化牌组为 (identity, plaintext_i)，
+    /// 等价于 Move 的 rebuild_deck_and_shuffle_on_timeout。
+    fn rebuild_deck_and_shuffle(&mut self) {
+        let plaintext = self.mental_poker_game.deck_plaintext.clone();
+        let new_deck: Vec<ElGamalCiphertext> = plaintext
+            .iter()
+            .map(|p| ElGamalCiphertext {
+                c1: EcPoint::identity(),
+                c2: p.clone(),
+            })
+            .collect();
+        self.mental_poker_game.deck_encrypted = new_deck;
+        // 重新初始化 pending_players 为所有活跃玩家
+        self.shuffle_state.pending_players = self
+            .mental_poker_game
+            .players
+            .keys()
+            .map(|k| GamePkHex::new(k.clone()))
+            .collect();
+        self.shuffle_state.completed_players.clear();
+        self.shuffle_state.current_player_pk = None;
+    }
+
+    /// 镜像 Move on_reconstruct_shuffle_failed（table.move:973-982）：
+    /// 从 player_deck 重建牌组并重新洗牌。
+    fn on_reconstruct_shuffle_failed(&mut self) {
+        // 从 player_deck 重建牌组（与 submit_reconstruct_deck 中的逻辑一致）
+        let init_deck = self.mental_poker_game.deck_plaintext.clone();
+        let deck_len = init_deck.len();
+        let mut reconstruct_deck: Vec<ElGamalCiphertext> = init_deck
+            .iter()
+            .map(|c| ElGamalCiphertext {
+                c1: EcPoint::identity(),
+                c2: c.clone(),
+            })
+            .collect();
+        for (_, deck) in self.reconstruct_state.player_deck.iter() {
+            for (i, card) in deck.iter().enumerate() {
+                if i < deck_len {
+                    reconstruct_deck[i].c1 = reconstruct_deck[i].c1 + card.c1;
+                    reconstruct_deck[i].c2 = reconstruct_deck[i].c2 + card.c2 - init_deck[i];
+                }
+            }
+        }
+        self.mental_poker_game.deck_encrypted = reconstruct_deck;
+        // 重新洗牌
+        self.shuffle_state.pending_players = self
+            .mental_poker_game
+            .players
+            .keys()
+            .map(|k| GamePkHex::new(k.clone()))
+            .collect();
+        self.shuffle_state.completed_players.clear();
+        self.shuffle_state.current_player_pk = None;
+        self.advance_shuffle();
     }
 }

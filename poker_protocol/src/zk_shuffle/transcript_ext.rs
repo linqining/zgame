@@ -17,7 +17,7 @@ pub trait CryptoTranscript {
     fn new(protocol_name: &[u8]) -> Self;
 
     /// 追加带标签的消息到 transcript。
-    /// 状态更新：state = SHA3-256(state || label || message)
+    /// 状态更新：state = SHA3-256(state || len_label[4字节LE] || label || len_msg[4字节LE] || message)
     fn append_message(&mut self, label: &[u8], message: &[u8]);
 
     /// 用 challenge 字节填充缓冲区。
@@ -117,8 +117,8 @@ impl CryptoTranscript for MerlinTranscript {
 
 /// Fiat-Shamir Transcript using SHA3-256, matching the Move contract implementation.
 ///
-/// 状态机：state = SHA3-256(current_state || label || message)
-/// 与 Move 合约 bls_transcript.move 完全兼容。
+/// 状态机：state = SHA3-256(current_state || len_label[4字节LE] || label || len_msg[4字节LE] || message)
+/// 与 Move 合约 bls_transcript.move 完全兼容（含 M-P13 长度前缀修复）。
 ///
 /// challenge 标量生成使用 Curve::hash_to_scalar（清位法），
 /// 而非 from_bytes_mod_order（模约简），与 Move 端一致。
@@ -136,10 +136,16 @@ impl CryptoTranscript for FiatShamirTranscript {
     }
 
     fn append_message(&mut self, label: &[u8], message: &[u8]) {
-        // 兼容 Move 合约 bls_transcript::append_message：
-        // state = SHA3-256(state || label || message)
+        // 兼容 Move 合约 bls_transcript::append_message (M-P13)：
+        // state = SHA3-256(state || len_label[4字节LE] || label || len_msg[4字节LE] || message)
+        // Move 端在 label 和 message 前分别添加 4 字节小端长度前缀，
+        // 防止长度扩展攻击和歧义编码。
         let mut data = self.state.clone();
+        let label_len = label.len() as u32;
+        data.extend_from_slice(&label_len.to_le_bytes());
         data.extend_from_slice(label);
+        let msg_len = message.len() as u32;
+        data.extend_from_slice(&msg_len.to_le_bytes());
         data.extend_from_slice(message);
         self.state = sha3::Sha3_256::digest(&data).to_vec();
     }

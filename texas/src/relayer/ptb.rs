@@ -12,11 +12,15 @@ use base64::Engine;
 use sui_sdk_types::Address;
 use sui_sdk_types::Argument;
 use sui_sdk_types::Command;
+use sui_sdk_types::Digest;
 use sui_sdk_types::Identifier;
 use sui_sdk_types::Input;
 use sui_sdk_types::MoveCall;
+use sui_sdk_types::Mutability;
+use sui_sdk_types::ObjectReference;
 use sui_sdk_types::ProgrammableTransaction;
 use sui_sdk_types::SharedInput;
+use sui_sdk_types::SplitCoins;
 use sui_sdk_types::TransactionKind;
 
 // ---------------------------------------------------------------------------
@@ -45,6 +49,18 @@ fn bcs_encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {
 fn shared_input(object_id: &str, mutable: bool) -> Result<Input, String> {
     let id = parse_address(object_id)?;
     Ok(Input::Shared(SharedInput::new(id, 0, mutable)))
+}
+
+/// Build an owned/immutable-object [`Input`] with placeholder version (0) and
+/// zero digest. The real version and digest are resolved by
+/// [`resolve_owned_object_versions`] before the PTB is serialized.
+fn owned_input(object_id: &str) -> Result<Input, String> {
+    let id = parse_address(object_id)?;
+    Ok(Input::ImmutableOrOwned(ObjectReference::new(
+        id,
+        0,
+        Digest::ZERO,
+    )))
 }
 
 /// Build a `Command::MoveCall` targeting `package::table::<function>` with the
@@ -153,16 +169,17 @@ pub fn build_raise_ptb(
     Ok(ProgrammableTransaction { inputs, commands })
 }
 
-/// 构建 `table::join_and_shuffle` PTB。
+/// 构建 `table::join_and_shuffle_verified` PTB。
 ///
 /// Move signature:
 /// ```text
-/// join_and_shuffle(
+/// join_and_shuffle_verified(
 ///     table: &mut Table,
 ///     seat_index: u64,
-///     buy_in: u64,
+///     buy_in_coin: Coin<SUI>,            // 玩家存入的 SUI 代币
 ///     pk: vector<u8>,
-///     _pk_ownership_proof: vector<u8>,
+///     pk_ownership_proof: vector<u8>,
+///     mask_cards: vector<u8>,
 ///     output_cards: vector<u8>,
 ///     remask_proof_bytes: vector<u8>,
 ///     shuffle_proof_bytes: vector<u8>,
@@ -170,22 +187,33 @@ pub fn build_raise_ptb(
 /// )
 /// ```
 ///
-/// Inputs (8 total, `ctx` is implicit):
+/// PTB 先将 Coin 拆分为精确金额，再传给合约，剩余部分自动返还给用户。
+///
+/// Inputs (10 total, `ctx` is implicit):
 /// - `Input(0)`: `&mut Table` (shared, mutable)
 /// - `Input(1)`: `seat_index: u64` (pure)
-/// - `Input(2)`: `buy_in: u64` (pure)
-/// - `Input(3)`: `pk: vector<u8>` (pure, BCS-encoded)
-/// - `Input(4)`: `pk_ownership_proof: vector<u8>` (pure, BCS-encoded)
-/// - `Input(5)`: `output_cards: vector<u8>` (pure, BCS-encoded)
-/// - `Input(6)`: `remask_proof_bytes: vector<u8>` (pure, BCS-encoded)
-/// - `Input(7)`: `shuffle_proof_bytes: vector<u8>` (pure, BCS-encoded)
+/// - `Input(2)`: `buy_in_coin: Coin<SUI>` (owned object — version/digest resolved later)
+/// - `Input(3)`: `split_amount: u64` (pure, BCS-encoded) — 需要拆分出的 MIST 数量
+/// - `Input(4)`: `pk: vector<u8>` (pure, BCS-encoded)
+/// - `Input(5)`: `pk_ownership_proof: vector<u8>` (pure, BCS-encoded)
+/// - `Input(6)`: `mask_cards: vector<u8>` (pure, BCS-encoded)
+/// - `Input(7)`: `output_cards: vector<u8>` (pure, BCS-encoded)
+/// - `Input(8)`: `remask_proof_bytes: vector<u8>` (pure, BCS-encoded)
+/// - `Input(9)`: `shuffle_proof_bytes: vector<u8>` (pure, BCS-encoded)
+///
+/// Commands:
+/// - `Command(0)`: `SplitCoins(Input(2), [Input(3)])` → `Result(0)`: 拆分后的精确金额 Coin
+/// - `Command(1)`: `MoveCall(table::join_and_shuffle_verified(Input(0), Input(1), NestedResult(0,0), Input(4..9)))`
+///   原始 Coin (Input(2)) 剩余余额自动返还给发送者
 pub fn build_join_and_shuffle_ptb(
     package_id: &str,
     table_id: &str,
     seat_index: u64,
-    buy_in: u64,
+    coin_object_id: &str,
+    amount_mist: u64,
     pk: Vec<u8>,
     pk_ownership_proof: Vec<u8>,
+    mask_cards: Vec<u8>,
     output_cards: Vec<u8>,
     remask_proof_bytes: Vec<u8>,
     shuffle_proof_bytes: Vec<u8>,
@@ -193,17 +221,136 @@ pub fn build_join_and_shuffle_ptb(
     let inputs = vec![
         shared_input(table_id, true)?,                   // Input(0): &mut Table
         Input::Pure(bcs_encode(&seat_index)?),           // Input(1): u64
-        Input::Pure(bcs_encode(&buy_in)?),               // Input(2): u64
-        Input::Pure(bcs_encode(&pk)?),                   // Input(3): vector<u8>
-        Input::Pure(bcs_encode(&pk_ownership_proof)?),   // Input(4): vector<u8>
-        Input::Pure(bcs_encode(&output_cards)?),         // Input(5): vector<u8>
-        Input::Pure(bcs_encode(&remask_proof_bytes)?),   // Input(6): vector<u8>
-        Input::Pure(bcs_encode(&shuffle_proof_bytes)?),  // Input(7): vector<u8>
+        owned_input(coin_object_id)?,                    // Input(2): Coin<SUI> (owned)
+        Input::Pure(bcs_encode(&amount_mist)?),          // Input(3): u64 (split amount in MIST)
+        Input::Pure(bcs_encode(&pk)?),                   // Input(4): vector<u8>
+        Input::Pure(bcs_encode(&pk_ownership_proof)?),   // Input(5): vector<u8>
+        Input::Pure(bcs_encode(&mask_cards)?),           // Input(6): vector<u8>
+        Input::Pure(bcs_encode(&output_cards)?),         // Input(7): vector<u8>
+        Input::Pure(bcs_encode(&remask_proof_bytes)?),   // Input(8): vector<u8>
+        Input::Pure(bcs_encode(&shuffle_proof_bytes)?),  // Input(9): vector<u8>
+    ];
+    // Command(0): SplitCoins — 从原始 Coin 中拆分出精确金额
+    let split = Command::SplitCoins(SplitCoins {
+        coin: Argument::Input(2),
+        amounts: vec![Argument::Input(3)],
+    });
+    // Command(1): MoveCall — 使用拆分后的 Coin (NestedResult(0, 0)) 传入合约
+    let mut mc = match move_call_command(
+        package_id,
+        "join_and_shuffle_verified",
+        &[0, 1, 2, 4, 5, 6, 7, 8, 9], // placeholder indices; arg[2] will be replaced
+    )? {
+        Command::MoveCall(mc) => mc,
+        other => return Err(format!("expected MoveCall, got {:?}", other)),
+    };
+    mc.arguments[2] = Argument::NestedResult(0, 0); // buy_in_coin = split result
+    let commands = vec![split, Command::MoveCall(mc)];
+    Ok(ProgrammableTransaction { inputs, commands })
+}
+
+/// 构建 `table::submit_shuffle_verified` PTB。
+///
+/// Move signature:
+/// `submit_shuffle_verified(table: &mut Table, output_cards: vector<u8>, shuffle_proof_bytes: vector<u8>, ctx: &mut TxContext)`
+///
+/// Inputs (3 total, `ctx` is implicit):
+/// - `Input(0)`: `&mut Table` (shared, mutable)
+/// - `Input(1)`: `output_cards: vector<u8>` (pure, BCS-encoded)
+/// - `Input(2)`: `shuffle_proof_bytes: vector<u8>` (pure, BCS-encoded)
+pub fn build_submit_shuffle_ptb(
+    package_id: &str,
+    table_id: &str,
+    output_cards: Vec<u8>,
+    shuffle_proof_bytes: Vec<u8>,
+) -> Result<ProgrammableTransaction, String> {
+    let inputs = vec![
+        shared_input(table_id, true)?,                  // Input(0): &mut Table
+        Input::Pure(bcs_encode(&output_cards)?),        // Input(1): vector<u8>
+        Input::Pure(bcs_encode(&shuffle_proof_bytes)?), // Input(2): vector<u8>
+    ];
+    let commands = vec![move_call_command(package_id, "submit_shuffle_verified", &[0, 1, 2])?];
+    Ok(ProgrammableTransaction { inputs, commands })
+}
+
+/// 构建 `table::submit_player_reveal_tokens_verified` PTB。
+///
+/// Move signature:
+/// ```text
+/// submit_player_reveal_tokens_verified(
+///     table: &mut Table,
+///     assignment_indices: vector<u64>,
+///     reveal_tokens: vector<vector<u8>>,
+///     proof_bytes_list: vector<vector<u8>>,
+///     ctx: &mut TxContext,
+/// )
+/// ```
+///
+/// Inputs (4 total, `ctx` is implicit):
+/// - `Input(0)`: `&mut Table` (shared, mutable)
+/// - `Input(1)`: `assignment_indices: vector<u64>` (pure, BCS-encoded)
+/// - `Input(2)`: `reveal_tokens: vector<vector<u8>>` (pure, BCS-encoded)
+/// - `Input(3)`: `proof_bytes_list: vector<vector<u8>>` (pure, BCS-encoded)
+pub fn build_submit_reveal_tokens_ptb(
+    package_id: &str,
+    table_id: &str,
+    assignment_indices: Vec<u64>,
+    reveal_tokens: Vec<Vec<u8>>,
+    proof_bytes_list: Vec<Vec<u8>>,
+) -> Result<ProgrammableTransaction, String> {
+    let inputs = vec![
+        shared_input(table_id, true)?,                      // Input(0): &mut Table
+        Input::Pure(bcs_encode(&assignment_indices)?),      // Input(1): vector<u64>
+        Input::Pure(bcs_encode(&reveal_tokens)?),           // Input(2): vector<vector<u8>>
+        Input::Pure(bcs_encode(&proof_bytes_list)?),        // Input(3): vector<vector<u8>>
     ];
     let commands = vec![move_call_command(
         package_id,
-        "join_and_shuffle",
-        &[0, 1, 2, 3, 4, 5, 6, 7],
+        "submit_player_reveal_tokens_verified",
+        &[0, 1, 2, 3],
+    )?];
+    Ok(ProgrammableTransaction { inputs, commands })
+}
+
+/// 构建 `table::submit_reconstruct_deck_verified` PTB。
+///
+/// Move signature:
+/// ```text
+/// submit_reconstruct_deck_verified(
+///     table: &mut Table,
+///     output_cards: vector<u8>,
+///     swap_cards: vector<u8>,
+///     user_readable_cards: vector<u8>,
+///     proof_bytes: vector<u8>,
+///     ctx: &mut TxContext,
+/// )
+/// ```
+///
+/// Inputs (5 total, `ctx` is implicit):
+/// - `Input(0)`: `&mut Table` (shared, mutable)
+/// - `Input(1)`: `output_cards: vector<u8>` (pure, BCS-encoded)
+/// - `Input(2)`: `swap_cards: vector<u8>` (pure, BCS-encoded)
+/// - `Input(3)`: `user_readable_cards: vector<u8>` (pure, BCS-encoded)
+/// - `Input(4)`: `proof_bytes: vector<u8>` (pure, BCS-encoded)
+pub fn build_submit_reconstruct_deck_ptb(
+    package_id: &str,
+    table_id: &str,
+    output_cards: Vec<u8>,
+    swap_cards: Vec<u8>,
+    user_readable_cards: Vec<u8>,
+    proof_bytes: Vec<u8>,
+) -> Result<ProgrammableTransaction, String> {
+    let inputs = vec![
+        shared_input(table_id, true)?,                      // Input(0): &mut Table
+        Input::Pure(bcs_encode(&output_cards)?),            // Input(1): vector<u8>
+        Input::Pure(bcs_encode(&swap_cards)?),              // Input(2): vector<u8>
+        Input::Pure(bcs_encode(&user_readable_cards)?),     // Input(3): vector<u8>
+        Input::Pure(bcs_encode(&proof_bytes)?),             // Input(4): vector<u8>
+    ];
+    let commands = vec![move_call_command(
+        package_id,
+        "submit_reconstruct_deck_verified",
+        &[0, 1, 2, 3, 4],
     )?];
     Ok(ProgrammableTransaction { inputs, commands })
 }
@@ -228,9 +375,250 @@ pub fn build_tick_ptb(
     Ok(ProgrammableTransaction { inputs, commands })
 }
 
+/// 构建 `table::leave_with_proof_verified` PTB。
+///
+/// Move signature:
+/// ```text
+/// leave_with_proof_verified(
+///     table: &mut Table,
+///     seat_index: u64,
+///     output_cards: vector<u8>,           // leave 后的牌组 (serialized ciphertexts, flat bytes)
+///     _leave_proof_bytes: vector<u8>,      // LeaveProof (serialized, 链上不验证)
+///     ctx: &mut TxContext,
+/// )
+/// ```
+///
+/// Inputs (4 total, `ctx` is implicit):
+/// - `Input(0)`: `&mut Table` (shared, mutable)
+/// - `Input(1)`: `seat_index: u64` (pure, BCS-encoded)
+/// - `Input(2)`: `output_cards: vector<u8>` (pure, BCS-encoded)
+/// - `Input(3)`: `leave_proof_bytes: vector<u8>` (pure, BCS-encoded)
+pub fn build_leave_with_proof_ptb(
+    package_id: &str,
+    table_id: &str,
+    seat_index: u64,
+    output_cards: Vec<u8>,
+    leave_proof_bytes: Vec<u8>,
+) -> Result<ProgrammableTransaction, String> {
+    let inputs = vec![
+        shared_input(table_id, true)?,                   // Input(0): &mut Table
+        Input::Pure(bcs_encode(&seat_index)?),           // Input(1): u64
+        Input::Pure(bcs_encode(&output_cards)?),         // Input(2): vector<u8>
+        Input::Pure(bcs_encode(&leave_proof_bytes)?),    // Input(3): vector<u8>
+    ];
+    let commands = vec![move_call_command(
+        package_id,
+        "leave_with_proof_verified",
+        &[0, 1, 2, 3],
+    )?];
+    Ok(ProgrammableTransaction { inputs, commands })
+}
+
+/// 构建 `table::leave_table` PTB（简单离开，无需密码学证明）。
+///
+/// Move signature:
+/// ```text
+/// leave_table(
+///     table: &mut Table,
+///     seat_index: u64,
+///     ctx: &mut TxContext,
+/// )
+/// ```
+///
+/// Inputs (2 total, `ctx` is implicit):
+/// - `Input(0)`: `&mut Table` (shared, mutable)
+/// - `Input(1)`: `seat_index: u64` (pure, BCS-encoded)
+pub fn build_leave_table_ptb(
+    package_id: &str,
+    table_id: &str,
+    seat_index: u64,
+) -> Result<ProgrammableTransaction, String> {
+    let inputs = vec![
+        shared_input(table_id, true)?,          // Input(0): &mut Table
+        Input::Pure(bcs_encode(&seat_index)?),  // Input(1): u64
+    ];
+    let commands = vec![move_call_command(package_id, "leave_table", &[0, 1])?];
+    Ok(ProgrammableTransaction { inputs, commands })
+}
+
 // ---------------------------------------------------------------------------
 // Serialization
 // ---------------------------------------------------------------------------
+
+/// Resolve the `initial_shared_version` for all shared objects in a [`ProgrammableTransaction`].
+///
+/// Shinami Gas Station requires the correct `initial_shared_version` to be embedded in the
+/// TransactionKind — unlike Sui RPC nodes which resolve version `0` automatically. This
+/// function queries the Sui RPC for each shared object and replaces the placeholder version
+/// (`0`) with the real `initial_shared_version` from the object's owner metadata.
+///
+/// Only objects with `version == 0` are queried; objects with a non-zero version are left
+/// untouched (e.g. the Clock at `0x6` which is shared at version `1`).
+pub async fn resolve_shared_object_versions(
+    http: &reqwest::Client,
+    rpc_url: &str,
+    mut pt: ProgrammableTransaction,
+) -> Result<ProgrammableTransaction, String> {
+    for input in &mut pt.inputs {
+        match input {
+            Input::Shared(shared) => {
+                if shared.version() == 0 {
+                    let id = shared.object_id();
+                    let mutable = matches!(shared.mutability(), Mutability::Mutable);
+                    let version = fetch_initial_shared_version(http, rpc_url, &id).await?;
+                    *shared = SharedInput::new(id, version, mutable);
+                }
+            }
+            Input::ImmutableOrOwned(obj_ref) => {
+                if obj_ref.version() == 0 {
+                    let id = *obj_ref.object_id();
+                    let (version, digest) = fetch_owned_object_version_and_digest(http, rpc_url, &id).await?;
+                    *obj_ref = ObjectReference::new(id, version, digest);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(pt)
+}
+
+/// Query `sui_getObject` and extract `initial_shared_version` from the shared object's owner.
+///
+/// Some public fullnodes return incomplete object data (missing the `owner` field) for
+/// recently-created or high-version objects. In that case, we fall back to using the
+/// object's current `version` as the `initial_shared_version`. This is correct for
+/// objects that were shared at creation time and haven't been modified since (the common
+/// case for game table objects). A warning is logged when the fallback is used.
+async fn fetch_initial_shared_version(
+    http: &reqwest::Client,
+    rpc_url: &str,
+    object_id: &Address,
+) -> Result<u64, String> {
+    let id_str = object_id.to_string();
+    let resp = crate::sponsor::sui_jsonrpc(
+        http,
+        rpc_url,
+        "sui_getObject",
+        vec![
+            serde_json::Value::String(id_str.clone()),
+            serde_json::json!({
+                "showType": true,
+                "showOwner": true,
+                "showContent": false,
+                "showBcs": false,
+                "showDisplay": false,
+                "showPreviousTransaction": false,
+                "showStorageRebate": false
+            }),
+        ],
+    )
+    .await?;
+
+    let data = resp
+        .get("data")
+        .ok_or_else(|| format!("Missing 'data' in sui_getObject response for {}", object_id))?;
+
+    // Primary path: extract initial_shared_version from owner.Shared
+    if let Some(owner) = data.get("owner") {
+        if let Some(version) = owner
+            .get("Shared")
+            .and_then(|s| s.get("initial_shared_version"))
+        {
+            return version
+                .as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| version.as_u64())
+                .ok_or_else(|| format!("Invalid initial_shared_version: {}", version));
+        }
+        tracing::warn!(
+            "[resolve_shared_object_versions] sui_getObject for {} owner is not Shared: {:?}",
+            id_str,
+            owner
+        );
+    } else {
+        tracing::warn!(
+            "[resolve_shared_object_versions] sui_getObject for {} missing owner field, data keys: {:?}",
+            id_str,
+            data.as_object().map(|o| o.keys().collect::<Vec<_>>())
+        );
+    }
+
+    // Fallback: some fullnodes don't return the `owner` field. Use the object's current
+    // version as the initial_shared_version. This is correct for objects shared at
+    // creation time that haven't been modified since.
+    let version = data
+        .get("version")
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| v.as_u64())
+        })
+        .ok_or_else(|| format!("Missing 'version' in sui_getObject response for {}", object_id))?;
+
+    tracing::warn!(
+        "[resolve_shared_object_versions] sui_getObject for {} did not return owner.Shared; \
+         falling back to current version {} as initial_shared_version",
+        id_str,
+        version
+    );
+    Ok(version)
+}
+
+/// Query `sui_getObject` and extract the `version` and `digest` for an owned or
+/// immutable object (e.g. a `Coin<SUI>` used as buy-in). These are required by
+/// `Input::ImmutableOrOwned(ObjectReference)`.
+async fn fetch_owned_object_version_and_digest(
+    http: &reqwest::Client,
+    rpc_url: &str,
+    object_id: &Address,
+) -> Result<(u64, Digest), String> {
+    let id_str = object_id.to_string();
+    let resp = crate::sponsor::sui_jsonrpc(
+        http,
+        rpc_url,
+        "sui_getObject",
+        vec![
+            serde_json::Value::String(id_str.clone()),
+            serde_json::json!({
+                "showType": false,
+                "showOwner": false,
+                "showContent": false,
+                "showBcs": false,
+                "showDisplay": false,
+                "showPreviousTransaction": false,
+                "showStorageRebate": false
+            }),
+        ],
+    )
+    .await?;
+
+    let data = resp
+        .get("data")
+        .ok_or_else(|| format!("Missing 'data' in sui_getObject response for {}", object_id))?;
+
+    let version = data
+        .get("version")
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| v.as_u64())
+        })
+        .ok_or_else(|| format!("Missing 'version' in sui_getObject response for {}", object_id))?;
+
+    let digest_str = data
+        .get("digest")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("Missing 'digest' in sui_getObject response for {}", object_id))?;
+
+    let digest = Digest::from_base58(digest_str)
+        .map_err(|e| format!("Failed to parse digest '{}' as base58: {:?}", digest_str, e))?;
+
+    tracing::debug!(
+        "[fetch_owned_object_version_and_digest] object_id={}, version={}, digest={}",
+        id_str, version, digest_str
+    );
+    Ok((version, digest))
+}
 
 /// 将 [`ProgrammableTransaction`] 包装为 [`TransactionKind::ProgrammableTransaction`],
 /// BCS 序列化后再 base64 编码，返回可供 Sui RPC (`sui_executeTransactionBlock` 等)
@@ -251,8 +639,8 @@ pub fn serialize_tx_kind(pt: ProgrammableTransaction) -> Result<String, String> 
 mod tests {
     use super::*;
 
-    /// testnet package id for `texas_poker_move`
-    const PACKAGE_ID: &str = "0x1c7f761168f1689bee0ed05aae2abc2d5b57e041c24acf7def8eba34a9dd3a98";
+    /// testnet package id for `texas_poker_move` (upgraded/latest)
+    const PACKAGE_ID: &str = "0xa8e7644c6aba2a5295d442046f7669608e511731621cdafe1ab9d4f8daa8b364";
     /// a 32-byte hex object id used as a stand-in Table id
     const TABLE_ID: &str = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
     /// Sui system Clock object id
@@ -325,26 +713,173 @@ mod tests {
             PACKAGE_ID,
             TABLE_ID,
             0,
-            1_000_000,
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+            100_000_000u64, // 0.1 SUI in MIST
             vec![0u8; 32],
             vec![0u8; 64],
+            vec![9u8, 10, 11, 12],
             vec![1u8, 2, 3, 4],
             vec![0u8; 128],
             vec![0u8; 256],
         ).expect("build_join_and_shuffle_ptb should succeed");
-        // 1 table + 1 seat_index + 1 buy_in + 5 vector<u8> = 8 inputs
-        assert_eq!(ptb.inputs.len(), 8, "join_and_shuffle should have 8 inputs");
-        assert_eq!(ptb.commands.len(), 1, "join_and_shuffle should have 1 command");
+        // 1 table + 1 seat_index + 1 coin + 1 split_amount + 6 vector<u8> = 10 inputs
+        assert_eq!(ptb.inputs.len(), 10, "join_and_shuffle should have 10 inputs");
+        assert_eq!(ptb.commands.len(), 2, "join_and_shuffle should have 2 commands (SplitCoins + MoveCall)");
+        // Command(0): SplitCoins
+        match &ptb.commands[0] {
+            Command::SplitCoins(sc) => {
+                assert_eq!(sc.coin, Argument::Input(2));
+                assert_eq!(sc.amounts.len(), 1);
+                assert_eq!(sc.amounts[0], Argument::Input(3));
+            }
+            other => panic!("expected SplitCoins, got {:?}", other),
+        }
+        // Command(1): MoveCall with NestedResult(0, 0) for buy_in_coin
+        match &ptb.commands[1] {
+            Command::MoveCall(mc) => {
+                assert_eq!(mc.function.as_str(), "join_and_shuffle_verified");
+                assert_eq!(mc.arguments.len(), 9);
+                assert_eq!(mc.arguments[0], Argument::Input(0)); // table
+                assert_eq!(mc.arguments[1], Argument::Input(1)); // seat_index
+                assert_eq!(mc.arguments[2], Argument::NestedResult(0, 0)); // split coin
+                assert_eq!(mc.arguments[3], Argument::Input(4)); // pk
+                assert_eq!(mc.arguments[4], Argument::Input(5)); // pk_proof
+                assert_eq!(mc.arguments[5], Argument::Input(6)); // mask_cards
+                assert_eq!(mc.arguments[6], Argument::Input(7)); // output_cards
+                assert_eq!(mc.arguments[7], Argument::Input(8)); // remask_proof
+                assert_eq!(mc.arguments[8], Argument::Input(9)); // shuffle_proof
+            }
+            other => panic!("expected MoveCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_build_submit_shuffle_ptb() {
+        let ptb = build_submit_shuffle_ptb(
+            PACKAGE_ID,
+            TABLE_ID,
+            vec![1u8, 2, 3, 4],
+            vec![0u8; 64],
+        )
+        .expect("build_submit_shuffle_ptb should succeed");
+        // 1 table + 2 vector<u8> = 3 inputs
+        assert_eq!(ptb.inputs.len(), 3, "submit_shuffle should have 3 inputs");
+        assert_eq!(ptb.commands.len(), 1, "submit_shuffle should have 1 command");
         match &ptb.commands[0] {
             Command::MoveCall(mc) => {
-                assert_eq!(mc.function.as_str(), "join_and_shuffle");
-                assert_eq!(mc.arguments.len(), 8);
-                // Verify all 8 arguments reference the corresponding inputs
-                for i in 0..8u16 {
+                assert_eq!(mc.module.as_str(), "table");
+                assert_eq!(mc.function.as_str(), "submit_shuffle_verified");
+                assert_eq!(mc.arguments.len(), 3);
+                // Verify all 3 arguments reference the corresponding inputs
+                for i in 0..3u16 {
                     assert_eq!(mc.arguments[i as usize], Argument::Input(i));
                 }
             }
             other => panic!("expected MoveCall, got {:?}", other),
+        }
+        // Verify Input(0) is a shared mutable Table
+        match &ptb.inputs[0] {
+            Input::Shared(s) => {
+                assert_eq!(
+                    s.object_id(),
+                    parse_address(TABLE_ID).expect("parse_address should succeed")
+                );
+                assert!(s.mutability().is_mutable(), "Table should be mutable");
+            }
+            other => panic!("expected Shared input for Table, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_build_submit_reveal_tokens_ptb() {
+        let ptb = build_submit_reveal_tokens_ptb(
+            PACKAGE_ID,
+            TABLE_ID,
+            vec![0u64, 1, 2],
+            vec![vec![1u8, 2, 3], vec![4, 5, 6]],
+            vec![vec![0u8; 32], vec![0u8; 32]],
+        )
+        .expect("build_submit_reveal_tokens_ptb should succeed");
+        // 1 table + 3 vectors = 4 inputs
+        assert_eq!(
+            ptb.inputs.len(),
+            4,
+            "submit_player_reveal_tokens should have 4 inputs"
+        );
+        assert_eq!(
+            ptb.commands.len(),
+            1,
+            "submit_player_reveal_tokens should have 1 command"
+        );
+        match &ptb.commands[0] {
+            Command::MoveCall(mc) => {
+                assert_eq!(mc.module.as_str(), "table");
+                assert_eq!(mc.function.as_str(), "submit_player_reveal_tokens_verified");
+                assert_eq!(mc.arguments.len(), 4);
+                // Verify all 4 arguments reference the corresponding inputs
+                for i in 0..4u16 {
+                    assert_eq!(mc.arguments[i as usize], Argument::Input(i));
+                }
+            }
+            other => panic!("expected MoveCall, got {:?}", other),
+        }
+        // Verify Input(0) is a shared mutable Table
+        match &ptb.inputs[0] {
+            Input::Shared(s) => {
+                assert_eq!(
+                    s.object_id(),
+                    parse_address(TABLE_ID).expect("parse_address should succeed")
+                );
+                assert!(s.mutability().is_mutable(), "Table should be mutable");
+            }
+            other => panic!("expected Shared input for Table, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_build_submit_reconstruct_deck_ptb() {
+        let ptb = build_submit_reconstruct_deck_ptb(
+            PACKAGE_ID,
+            TABLE_ID,
+            vec![1u8, 2, 3, 4],
+            vec![5u8, 6, 7, 8],
+            vec![9u8, 10, 11, 12],
+            vec![0u8; 128],
+        )
+        .expect("build_submit_reconstruct_deck_ptb should succeed");
+        // 1 table + 4 vector<u8> = 5 inputs
+        assert_eq!(
+            ptb.inputs.len(),
+            5,
+            "submit_reconstruct_deck should have 5 inputs"
+        );
+        assert_eq!(
+            ptb.commands.len(),
+            1,
+            "submit_reconstruct_deck should have 1 command"
+        );
+        match &ptb.commands[0] {
+            Command::MoveCall(mc) => {
+                assert_eq!(mc.module.as_str(), "table");
+                assert_eq!(mc.function.as_str(), "submit_reconstruct_deck_verified");
+                assert_eq!(mc.arguments.len(), 5);
+                // Verify all 5 arguments reference the corresponding inputs
+                for i in 0..5u16 {
+                    assert_eq!(mc.arguments[i as usize], Argument::Input(i));
+                }
+            }
+            other => panic!("expected MoveCall, got {:?}", other),
+        }
+        // Verify Input(0) is a shared mutable Table
+        match &ptb.inputs[0] {
+            Input::Shared(s) => {
+                assert_eq!(
+                    s.object_id(),
+                    parse_address(TABLE_ID).expect("parse_address should succeed")
+                );
+                assert!(s.mutability().is_mutable(), "Table should be mutable");
+            }
+            other => panic!("expected Shared input for Table, got {:?}", other),
         }
     }
 
@@ -367,6 +902,29 @@ mod tests {
                 assert!(!s.mutability().is_mutable(), "Clock should be immutable");
             }
             other => panic!("expected Shared input for Clock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_build_leave_with_proof_ptb() {
+        let output_cards = vec![0u8; 52 * 96]; // 52 cards * 96 bytes per ciphertext
+        let leave_proof = vec![0u8; 80]; // dummy leave proof bytes
+        let ptb = build_leave_with_proof_ptb(
+            PACKAGE_ID,
+            TABLE_ID,
+            2,
+            output_cards,
+            leave_proof,
+        )
+        .expect("build_leave_with_proof_ptb should succeed");
+        assert_eq!(ptb.inputs.len(), 4, "leave_with_proof should have 4 inputs");
+        assert_eq!(ptb.commands.len(), 1, "leave_with_proof should have 1 command");
+        match &ptb.commands[0] {
+            Command::MoveCall(mc) => {
+                assert_eq!(mc.function.as_str(), "leave_with_proof_verified");
+                assert_eq!(mc.arguments.len(), 4);
+            }
+            other => panic!("expected MoveCall, got {:?}", other),
         }
     }
 
@@ -395,14 +953,35 @@ mod tests {
                 PACKAGE_ID,
                 TABLE_ID,
                 1,
-                1000,
+                "0x0000000000000000000000000000000000000000000000000000000000000002",
+                100_000_000u64, // 0.1 SUI in MIST
                 vec![1, 2, 3],
                 vec![4, 5, 6],
+                vec![16, 17, 18],
                 vec![7, 8, 9],
                 vec![10, 11, 12],
                 vec![13, 14, 15],
             ).expect("build_join_and_shuffle_ptb"),
             build_tick_ptb(PACKAGE_ID, TABLE_ID, CLOCK_ID).expect("build_tick_ptb"),
+            build_submit_shuffle_ptb(PACKAGE_ID, TABLE_ID, vec![1, 2, 3], vec![4, 5, 6])
+                .expect("build_submit_shuffle_ptb"),
+            build_submit_reveal_tokens_ptb(
+                PACKAGE_ID,
+                TABLE_ID,
+                vec![0u64, 1],
+                vec![vec![1u8, 2], vec![3, 4]],
+                vec![vec![5u8, 6], vec![7, 8]],
+            )
+            .expect("build_submit_reveal_tokens_ptb"),
+            build_submit_reconstruct_deck_ptb(
+                PACKAGE_ID,
+                TABLE_ID,
+                vec![1u8, 2, 3],
+                vec![4u8, 5, 6],
+                vec![7u8, 8, 9],
+                vec![10u8, 11, 12],
+            )
+            .expect("build_submit_reconstruct_deck_ptb"),
         ];
         for (i, ptb) in builders.into_iter().enumerate() {
             let result = serialize_tx_kind(ptb).expect("serialize_tx_kind should succeed");

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::pokergame::side_pot::SidePot;
+
 /// G16 修复：安全地将 u64 转换为 u8，超出范围时返回 None，
 /// 避免 `as u8` 静默截断导致数据错误。
 fn u64_to_u8(v: u64) -> Option<u8> {
@@ -10,11 +12,30 @@ fn u64_to_u8(v: u64) -> Option<u8> {
     Some(v as u8)
 }
 
+/// 从 JSON Value 提取 u64，兼容数字和字符串两种表示。
+///
+/// gRPC BCS 解码返回数字，GraphQL MoveValue.json 将 u64/u128/u256 表示为字符串。
+fn json_as_u64(v: &serde_json::Value) -> Option<u64> {
+    v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// 从 JSON Value 提取 bool，兼容数字和字符串两种表示。
+fn json_as_bool(v: &serde_json::Value) -> Option<bool> {
+    v.as_bool().or_else(|| {
+        v.as_str().and_then(|s| match s {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+    })
+}
+
 /// 链上 Table 的元数据快照，对应 Move 合约的 TableSummaryMeta
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TableSummaryMeta {
     // 元数据
-    pub table_id: String,
+    // Move 类型为 ID，BCS 序列化为 32 字节原始 address（无长度前缀）
+    pub table_id: [u8; 32],
     pub name: String,
     pub max_players: u64,
     pub small_blind: u64,
@@ -39,7 +60,8 @@ pub struct TableSummaryMeta {
     pub current_turn: Option<u64>,
     // 座位快照
     pub seats_occupied: Vec<bool>,
-    pub seat_players: Vec<String>,
+    // Move 类型为 vector<address>，BCS 序列化为 Vec<[u8; 32]>
+    pub seat_players: Vec<[u8; 32]>,
     pub seat_stacks: Vec<u64>,
     pub seat_bets: Vec<u64>,
     pub seat_total_bets: Vec<u64>,
@@ -48,8 +70,29 @@ pub struct TableSummaryMeta {
     pub seat_is_waiting: Vec<bool>,
 }
 
+/// 链上 Table 的加密状态快照，对应 Move 合约的 TableSummaryCryptoState
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TableSummaryCryptoState {
+    /// 加密牌组（每个元素为 96 bytes: c1 || c2）
+    pub deck_encrypted: Vec<Vec<u8>>,
+    /// 聚合公钥 (G1 compressed bytes, 48 bytes)
+    pub aggregated_pk: Vec<u8>,
+    /// 每个座位的玩家公钥（空座位为空 vector）
+    pub seat_pks: Vec<Vec<u8>>,
+    /// 待洗牌玩家 seat_index 列表
+    pub shuffle_pending_players: Vec<u64>,
+    /// 已完成洗牌玩家 seat_index 列表
+    pub shuffle_completed_players: Vec<u64>,
+    /// reconstruct 随机系数 (scalar bytes, 32 bytes)
+    pub reconstruct_coefficient: Vec<u8>,
+    /// 待提交 reconstruct deck 的玩家 seat_index 列表
+    pub reconstruct_pending_players: Vec<u64>,
+    /// 已提交 reconstruct deck 的玩家 seat_index 列表
+    pub reconstruct_completed_players: Vec<u64>,
+}
+
 /// 链上 Table 的状态快照，对应 Move 合约的 TableSummaryState
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TableSummaryState {
     // 洗牌状态
     pub shuffle_current_shuffler: Option<u64>,
@@ -86,11 +129,59 @@ pub struct TableSummaryState {
     pub epoch: u64,
 }
 
-/// 链上 Table 的完整快照，对应合约中 get_table_summary 的返回值
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// 链上 Table 的完整快照（V1），对应合约中 get_table_summary 的返回值
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TableSummary {
     pub meta: TableSummaryMeta,
     pub state: TableSummaryState,
+}
+
+/// 链上 Table 的扩展快照（V2），对应合约中 get_table_summary_v2 的返回值。
+/// 由于合约部署原因，crypto 字段移至独立的 V2 结构体（与 Move TableSummaryV2 对齐）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TableSummaryV2 {
+    pub meta: TableSummaryMeta,
+    pub state: TableSummaryState,
+    pub crypto: TableSummaryCryptoState,
+    /// 本地 socket table ID（区别于 meta.table_id 链上地址 [u8;32]）
+    pub id: u32,
+    /// 桌面限额
+    pub limit: u64,
+    /// 当前跟注金额
+    pub call_amount: Option<u64>,
+    /// 最小下注额
+    pub min_bet: u64,
+    /// 当前手牌是否结束
+    pub hand_over: bool,
+    /// 胜利消息列表
+    pub win_messages: Vec<String>,
+    /// 是否进入摊牌
+    pub went_to_showdown: bool,
+    /// 边池列表（meta.side_pots_count 仅存数量，此处存完整结构）
+    pub side_pots: Vec<SidePot>,
+    /// 历史操作记录
+    pub history: Vec<serde_json::Value>,
+}
+
+/// 链上 BCS 反序列化专用结构体，仅包含 Move 合约 `get_table_summary_v2` 返回的字段。
+/// `TableSummaryV2` 中的 `id`/`limit`/`call_amount` 等字段是本地运行时状态，
+/// 不在链上 struct 中，直接用 `TableSummaryV2` 做 BCS 反序列化会失败。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TableSummaryV2Chain {
+    pub meta: TableSummaryMeta,
+    pub state: TableSummaryState,
+    pub crypto: TableSummaryCryptoState,
+}
+
+impl From<TableSummaryV2Chain> for TableSummaryV2 {
+    fn from(chain: TableSummaryV2Chain) -> Self {
+        TableSummaryV2 {
+            meta: chain.meta,
+            state: chain.state,
+            crypto: chain.crypto,
+            ..Default::default()
+        }
+    }
 }
 
 /// Sui 链上事件类型，对应 texas_poker_move 合约中定义的事件
@@ -114,6 +205,14 @@ pub enum SuiChainEvent {
         small_blind: u64,
         big_blind: u64,
         participants: Vec<u64>,
+    },
+    BlindsPosted {
+        table_id: String,
+        sb_seat: u64,
+        bb_seat: u64,
+        sb_amount: u64,
+        bb_amount: u64,
+        first_to_act: u64,
     },
     // ===== 洗牌相关事件 =====
     ShuffleVerified { table_id: String, seat_index: u64, player: String },
@@ -223,6 +322,14 @@ pub enum SuiChainEvent {
         winner_player: String,
         pot: u64,
     },
+    ShowdownHoleCardsRevealed {
+        table_id: String,
+        seat_index: u64,
+        player: String,
+        card_indices: Vec<u64>,
+        card_ranks: Vec<u8>,
+        card_suits: Vec<u8>,
+    },
     HandSettled { table_id: String, pot: u64, winners: Vec<u64> },
     // ===== 重建相关事件 =====
     ReconstructInitiated {
@@ -237,6 +344,11 @@ pub enum SuiChainEvent {
         pending_players: Vec<u64>,
     },
     RedealRequested { table_id: String, seat_index: u64, card_indices: Vec<u64> },
+    DeckRebuilt {
+        table_id: String,
+        reason: u8,
+        deck_size: u64,
+    },
     // ===== 管理 & 生命周期事件 =====
     PlayerKicked {
         table_id: String,
@@ -255,6 +367,14 @@ pub enum SuiChainEvent {
         table_id: String,
         reason: u8,
         round_state: u8,
+    },
+    TimeoutConfigUpdated {
+        table_id: String,
+        betting_timeout_ms: u64,
+        shuffle_timeout_ms: u64,
+        reveal_timeout_ms: u64,
+        reconstruct_timeout_ms: u64,
+        showdown_display_ms: u64,
     },
 }
 
@@ -276,6 +396,19 @@ pub fn parse_chain_event(event_type: &str, data: &serde_json::Value) -> Option<S
     // 提取事件名称（最后一个 :: 后面的部分）
     let event_name = event_type.rsplit("::").next()?;
 
+    let result = parse_chain_event_inner(event_name, data);
+    if result.is_none() {
+        tracing::warn!(
+            "[parse_chain_event] FAILED to parse event '{}', fields: {}",
+            event_name,
+            serde_json::to_string(data).unwrap_or_default()
+        );
+    }
+    tracing::info!("[parse_chain_event] {}: {:?}", event_name, serde_json::to_string(data).unwrap_or_default());
+    result
+}
+
+fn parse_chain_event_inner(event_name: &str, data: &serde_json::Value) -> Option<SuiChainEvent> {
     match event_name {
         // ===== 基础事件 =====
         "TableCreated" => Some(SuiChainEvent::TableCreated {
@@ -284,73 +417,81 @@ pub fn parse_chain_event(event_type: &str, data: &serde_json::Value) -> Option<S
         }),
         "PlayerJoined" => Some(SuiChainEvent::PlayerJoined {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
             player: data.get("player")?.as_str()?.to_string(),
-            buy_in: data.get("buy_in")?.as_u64()?,
-            is_waiting: data.get("is_waiting")?.as_bool()?,
-            active_count_after: data.get("active_count_after")?.as_u64()?,
+            buy_in: data.get("buy_in").and_then(json_as_u64).unwrap_or(0),
+            is_waiting: data.get("is_waiting").and_then(json_as_bool).unwrap_or(false),
+            active_count_after: data.get("active_count_after").and_then(json_as_u64).unwrap_or(0),
         }),
         "PlayerLeft" => Some(SuiChainEvent::PlayerLeft {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
             player: data.get("player")?.as_str()?.to_string(),
         }),
         "HandStarted" => Some(SuiChainEvent::HandStarted {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            button: data.get("button")?.as_u64()?,
-            small_blind: data.get("small_blind")?.as_u64()?,
-            big_blind: data.get("big_blind")?.as_u64()?,
+            button: json_as_u64(data.get("button")?)?,
+            small_blind: json_as_u64(data.get("small_blind")?)?,
+            big_blind: json_as_u64(data.get("big_blind")?)?,
             participants: data.get("participants")?
                 .as_array()?
                 .iter()
                 .filter_map(|v| v.as_u64())
                 .collect(),
         }),
+        "BlindsPosted" => Some(SuiChainEvent::BlindsPosted {
+            table_id: data.get("table_id")?.as_str()?.to_string(),
+            sb_seat: json_as_u64(data.get("sb_seat")?)?,
+            bb_seat: json_as_u64(data.get("bb_seat")?)?,
+            sb_amount: json_as_u64(data.get("sb_amount")?)?,
+            bb_amount: json_as_u64(data.get("bb_amount")?)?,
+            first_to_act: json_as_u64(data.get("first_to_act")?)?,
+        }),
         // ===== 洗牌相关事件 =====
         "ShuffleVerified" => Some(SuiChainEvent::ShuffleVerified {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
             player: data.get("player")?.as_str()?.to_string(),
         }),
         "ShuffleCompleteEvt" => Some(SuiChainEvent::ShuffleComplete {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            phase: u64_to_u8(data.get("phase")?.as_u64()?)?,
-            participant_count: data.get("participant_count")?.as_u64()?,
-            deck_size: data.get("deck_size")?.as_u64()?,
+            phase: u64_to_u8(json_as_u64(data.get("phase")?)?)?,
+            participant_count: json_as_u64(data.get("participant_count")?)?,
+            deck_size: json_as_u64(data.get("deck_size")?)?,
         }),
         "ShuffleTurnEvt" => Some(SuiChainEvent::ShuffleTurn {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
-            pending_count: data.get("pending_count")?.as_u64()?,
-            completed_count: data.get("completed_count")?.as_u64()?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
+            pending_count: json_as_u64(data.get("pending_count")?)?,
+            completed_count: json_as_u64(data.get("completed_count")?)?,
         }),
         "ShuffleTimeout" => Some(SuiChainEvent::ShuffleTimeout {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
-            phase: u64_to_u8(data.get("phase")?.as_u64()?)?,
-            started_at: data.get("started_at")?.as_u64()?,
-            timeout_ms: data.get("timeout_ms")?.as_u64()?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
+            phase: u64_to_u8(json_as_u64(data.get("phase")?)?)?,
+            started_at: json_as_u64(data.get("started_at")?)?,
+            timeout_ms: json_as_u64(data.get("timeout_ms")?)?,
         }),
         // ===== Reveal 相关事件 =====
         "RevealTokenSubmitted" => Some(SuiChainEvent::RevealTokenSubmitted {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
-            card_index: data.get("card_index")?.as_u64()?,
-            phase: u64_to_u8(data.get("phase")?.as_u64()?)?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
+            card_index: json_as_u64(data.get("card_index")?)?,
+            phase: u64_to_u8(json_as_u64(data.get("phase")?)?)?,
         }),
         "RevealPhaseComplete" => Some(SuiChainEvent::RevealPhaseComplete {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            phase: u64_to_u8(data.get("phase")?.as_u64()?)?,
+            phase: u64_to_u8(json_as_u64(data.get("phase")?)?)?,
         }),
         "RevealPhaseEvt" => Some(SuiChainEvent::RevealPhaseEvt {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            phase: u64_to_u8(data.get("phase")?.as_u64()?)?,
+            phase: u64_to_u8(json_as_u64(data.get("phase")?)?)?,
         }),
         "CardIsIdentity" => Some(SuiChainEvent::CardIsIdentity {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            card_index: data.get("card_index")?.as_u64()?,
-            assignment_index: data.get("assignment_index")?.as_u64()?,
-            phase: u64_to_u8(data.get("phase")?.as_u64()?)?,
+            card_index: json_as_u64(data.get("card_index")?)?,
+            assignment_index: json_as_u64(data.get("assignment_index")?)?,
+            phase: u64_to_u8(json_as_u64(data.get("phase")?)?)?,
         }),
         "IdentityRedeal" => Some(SuiChainEvent::IdentityRedeal {
             table_id: data.get("table_id")?.as_str()?.to_string(),
@@ -359,12 +500,12 @@ pub fn parse_chain_event(event_type: &str, data: &serde_json::Value) -> Option<S
                 .iter()
                 .filter_map(|v| v.as_u64())
                 .collect(),
-            redeal_count: data.get("redeal_count")?.as_u64()?,
-            phase: u64_to_u8(data.get("phase")?.as_u64()?)?,
+            redeal_count: json_as_u64(data.get("redeal_count")?)?,
+            phase: u64_to_u8(json_as_u64(data.get("phase")?)?)?,
         }),
         "CommunityCardRevealed" => Some(SuiChainEvent::CommunityCardRevealed {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            phase: u64_to_u8(data.get("phase")?.as_u64()?)?,
+            phase: u64_to_u8(json_as_u64(data.get("phase")?)?)?,
             card_indices: data.get("card_indices")?
                 .as_array()?
                 .iter()
@@ -386,7 +527,7 @@ pub fn parse_chain_event(event_type: &str, data: &serde_json::Value) -> Option<S
         }),
         "RevealTimeout" => Some(SuiChainEvent::RevealTimeout {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            phase: u64_to_u8(data.get("phase")?.as_u64()?)?,
+            phase: u64_to_u8(json_as_u64(data.get("phase")?)?)?,
             pending_players: data.get("pending_players")?
                 .as_array()?
                 .iter()
@@ -396,47 +537,47 @@ pub fn parse_chain_event(event_type: &str, data: &serde_json::Value) -> Option<S
         // ===== 下注动作事件 =====
         "BettingRoundStarted" => Some(SuiChainEvent::BettingRoundStarted {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            round_state: u64_to_u8(data.get("round_state")?.as_u64()?)?,
-            current_bet: data.get("current_bet")?.as_u64()?,
-            min_raise: data.get("min_raise")?.as_u64()?,
-            first_to_act: data.get("first_to_act")?.as_u64()?,
-            pot_before: data.get("pot_before")?.as_u64()?,
+            round_state: u64_to_u8(json_as_u64(data.get("round_state")?)?)?,
+            current_bet: json_as_u64(data.get("current_bet")?)?,
+            min_raise: json_as_u64(data.get("min_raise")?)?,
+            first_to_act: json_as_u64(data.get("first_to_act")?)?,
+            pot_before: json_as_u64(data.get("pot_before")?)?,
         }),
         "PlayerFolded" => Some(SuiChainEvent::PlayerFolded {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
-            reason: u64_to_u8(data.get("reason")?.as_u64()?)?,
-            round_state: u64_to_u8(data.get("round_state")?.as_u64()?)?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
+            reason: u64_to_u8(json_as_u64(data.get("reason")?)?)?,
+            round_state: u64_to_u8(json_as_u64(data.get("round_state")?)?)?,
         }),
         "PlayerChecked" => Some(SuiChainEvent::PlayerChecked {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
-            round_state: u64_to_u8(data.get("round_state")?.as_u64()?)?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
+            round_state: u64_to_u8(json_as_u64(data.get("round_state")?)?)?,
         }),
         "PlayerCalled" => Some(SuiChainEvent::PlayerCalled {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
-            call_delta: data.get("call_delta")?.as_u64()?,
-            round_state: u64_to_u8(data.get("round_state")?.as_u64()?)?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
+            call_delta: json_as_u64(data.get("call_delta")?)?,
+            round_state: u64_to_u8(json_as_u64(data.get("round_state")?)?)?,
         }),
         "PlayerRaised" => Some(SuiChainEvent::PlayerRaised {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
-            raise_delta: data.get("raise_delta")?.as_u64()?,
-            total_bet: data.get("total_bet")?.as_u64()?,
-            round_state: u64_to_u8(data.get("round_state")?.as_u64()?)?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
+            raise_delta: json_as_u64(data.get("raise_delta")?)?,
+            total_bet: json_as_u64(data.get("total_bet")?)?,
+            round_state: u64_to_u8(json_as_u64(data.get("round_state")?)?)?,
         }),
         "PlayerAllIn" => Some(SuiChainEvent::PlayerAllIn {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
-            trigger_action: u64_to_u8(data.get("trigger_action")?.as_u64()?)?,
-            amount: data.get("amount")?.as_u64()?,
-            round_state: u64_to_u8(data.get("round_state")?.as_u64()?)?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
+            trigger_action: u64_to_u8(json_as_u64(data.get("trigger_action")?)?)?,
+            amount: json_as_u64(data.get("amount")?)?,
+            round_state: u64_to_u8(json_as_u64(data.get("round_state")?)?)?,
         }),
         "PotCollected" => Some(SuiChainEvent::PotCollected {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            round_state: u64_to_u8(data.get("round_state")?.as_u64()?)?,
-            pot_after: data.get("pot_after")?.as_u64()?,
+            round_state: u64_to_u8(json_as_u64(data.get("round_state")?)?)?,
+            pot_after: json_as_u64(data.get("pot_after")?)?,
             collected_from_seats: data.get("collected_from_seats")?
                 .as_array()?
                 .iter()
@@ -445,29 +586,52 @@ pub fn parse_chain_event(event_type: &str, data: &serde_json::Value) -> Option<S
         }),
         "RoundAdvanced" => Some(SuiChainEvent::RoundAdvanced {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            from_round: u64_to_u8(data.get("from_round")?.as_u64()?)?,
-            to_round: u64_to_u8(data.get("to_round")?.as_u64()?)?,
-            pot: data.get("pot")?.as_u64()?,
-            community_cards_count: data.get("community_cards_count")?.as_u64()?,
+            from_round: u64_to_u8(json_as_u64(data.get("from_round")?)?)?,
+            to_round: u64_to_u8(json_as_u64(data.get("to_round")?)?)?,
+            pot: json_as_u64(data.get("pot")?)?,
+            community_cards_count: json_as_u64(data.get("community_cards_count")?)?,
         }),
         // ===== 摊牌 & 结算事件 =====
         "WinnerAwarded" => Some(SuiChainEvent::WinnerAwarded {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
             player: data.get("player")?.as_str()?.to_string(),
-            amount: data.get("amount")?.as_u64()?,
-            pot_type: u64_to_u8(data.get("pot_type")?.as_u64()?)?,
-            hand_rank: data.get("hand_rank").and_then(|v| v.as_u64()),
+            amount: json_as_u64(data.get("amount")?)?,
+            pot_type: u64_to_u8(json_as_u64(data.get("pot_type")?)?)?,
+            hand_rank: data.get("hand_rank").and_then(json_as_u64),
         }),
         "HandEndedWithoutShowdown" => Some(SuiChainEvent::HandEndedWithoutShowdown {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            winner_seat: data.get("winner_seat")?.as_u64()?,
+            winner_seat: json_as_u64(data.get("winner_seat")?)?,
             winner_player: data.get("winner_player")?.as_str()?.to_string(),
-            pot: data.get("pot")?.as_u64()?,
+            pot: json_as_u64(data.get("pot")?)?,
+        }),
+        "ShowdownHoleCardsRevealed" => Some(SuiChainEvent::ShowdownHoleCardsRevealed {
+            table_id: data.get("table_id")?.as_str()?.to_string(),
+            seat_index: json_as_u64(data.get("seat_index")?)?,
+            player: data.get("player")?.as_str()?.to_string(),
+            card_indices: data.get("card_indices")?
+                .as_array()?
+                .iter()
+                .filter_map(|v| v.as_u64())
+                .collect(),
+            // G16 修复：card_ranks / card_suits 使用 filter_map + u64_to_u8 安全转换
+            card_ranks: data.get("card_ranks")?
+                .as_array()?
+                .iter()
+                .filter_map(|v| v.as_u64())
+                .filter_map(u64_to_u8)
+                .collect(),
+            card_suits: data.get("card_suits")?
+                .as_array()?
+                .iter()
+                .filter_map(|v| v.as_u64())
+                .filter_map(u64_to_u8)
+                .collect(),
         }),
         "HandSettled" => Some(SuiChainEvent::HandSettled {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            pot: data.get("pot")?.as_u64()?,
+            pot: json_as_u64(data.get("pot")?)?,
             winners: data.get("winners")?
                 .as_array()?
                 .iter()
@@ -482,11 +646,11 @@ pub fn parse_chain_event(event_type: &str, data: &serde_json::Value) -> Option<S
                 .iter()
                 .filter_map(|v| v.as_u64())
                 .collect(),
-            round_state: u64_to_u8(data.get("round_state")?.as_u64()?)?,
+            round_state: u64_to_u8(json_as_u64(data.get("round_state")?)?)?,
         }),
         "ReconstructDeckSubmitted" => Some(SuiChainEvent::ReconstructDeckSubmitted {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
         }),
         "ReconstructCompleteEvt" => Some(SuiChainEvent::ReconstructComplete {
             table_id: data.get("table_id")?.as_str()?.to_string(),
@@ -501,37 +665,167 @@ pub fn parse_chain_event(event_type: &str, data: &serde_json::Value) -> Option<S
         }),
         "RedealRequested" => Some(SuiChainEvent::RedealRequested {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
             card_indices: data.get("card_indices")?
                 .as_array()?
                 .iter()
                 .filter_map(|v| v.as_u64())
                 .collect(),
         }),
+        "DeckRebuilt" => Some(SuiChainEvent::DeckRebuilt {
+            table_id: data.get("table_id")?.as_str()?.to_string(),
+            reason: u64_to_u8(json_as_u64(data.get("reason")?)?)?,
+            deck_size: json_as_u64(data.get("deck_size")?)?,
+        }),
         // ===== 管理 & 生命周期事件 =====
         "PlayerKicked" => Some(SuiChainEvent::PlayerKicked {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
             player: data.get("player")?.as_str()?.to_string(),
-            reason: u64_to_u8(data.get("reason")?.as_u64()?)?,
+            reason: u64_to_u8(json_as_u64(data.get("reason")?)?)?,
         }),
         "PlayerRefund" => Some(SuiChainEvent::PlayerRefund {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            seat_index: data.get("seat_index")?.as_u64()?,
+            seat_index: json_as_u64(data.get("seat_index")?)?,
             player: data.get("player")?.as_str()?.to_string(),
-            amount: data.get("amount")?.as_u64()?,
-            refund_type: u64_to_u8(data.get("refund_type")?.as_u64()?)?,
+            amount: json_as_u64(data.get("amount")?)?,
+            refund_type: u64_to_u8(json_as_u64(data.get("refund_type")?)?)?,
         }),
         "HandReset" => Some(SuiChainEvent::HandReset {
             table_id: data.get("table_id")?.as_str()?.to_string(),
-            reason: u64_to_u8(data.get("reason")?.as_u64()?)?,
-            round_state: u64_to_u8(data.get("round_state")?.as_u64()?)?,
+            reason: u64_to_u8(json_as_u64(data.get("reason")?)?)?,
+            round_state: u64_to_u8(json_as_u64(data.get("round_state")?)?)?,
+        }),
+        "TimeoutConfigUpdated" => Some(SuiChainEvent::TimeoutConfigUpdated {
+            table_id: data.get("table_id")?.as_str()?.to_string(),
+            betting_timeout_ms: json_as_u64(data.get("betting_timeout_ms")?)?,
+            shuffle_timeout_ms: json_as_u64(data.get("shuffle_timeout_ms")?)?,
+            reveal_timeout_ms: json_as_u64(data.get("reveal_timeout_ms")?)?,
+            reconstruct_timeout_ms: json_as_u64(data.get("reconstruct_timeout_ms")?)?,
+            showdown_display_ms: json_as_u64(data.get("showdown_display_ms")?)?,
         }),
         _ => {
             tracing::warn!("[sui_events] unknown event type: {}", event_name);
             None
         }
     }
+}
+
+// ========== BCS 回退解析 ==========
+//
+// gRPC SubscribeCheckpoints 的 Event.json 字段可能不被服务端填充。
+// 当 json 为 None 但 contents (BCS) 存在时，使用此模块解析。
+//
+// BCS 编码规则:
+//   address / ID: 32 字节原始数据
+//   u64: 8 字节小端
+//   u8: 1 字节
+//   bool: 1 字节 (0 或 1)
+//   String: ULEB128 长度 + UTF-8 字节
+//   vector<T>: ULEB128 长度 + N 个元素
+//   Option<T>: 1 字节标签 (0=None, 1=Some) + 值
+
+struct BcsReader<'a> { data: &'a [u8], pos: usize }
+
+impl<'a> BcsReader<'a> {
+    fn new(data: &'a [u8]) -> Self { Self { data, pos: 0 } }
+
+    fn read_bytes(&mut self, n: usize) -> Option<&'a [u8]> {
+        if self.pos + n > self.data.len() { return None; }
+        let r = &self.data[self.pos..self.pos + n];
+        self.pos += n;
+        Some(r)
+    }
+    fn read_uleb128(&mut self) -> Option<u64> {
+        let mut result: u64 = 0; let mut shift = 0;
+        loop {
+            let b = self.read_bytes(1)?[0];
+            result |= ((b & 0x7f) as u64) << shift;
+            if b & 0x80 == 0 { break; }
+            shift += 7; if shift >= 64 { return None; }
+        }
+        Some(result)
+    }
+    fn read_address(&mut self) -> Option<String> {
+        Some(format!("0x{}", hex::encode(self.read_bytes(32)?)))
+    }
+    fn read_u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.read_bytes(8)?.try_into().ok()?))
+    }
+    fn read_u8(&mut self) -> Option<u8> { Some(self.read_bytes(1)?[0]) }
+    fn read_bool(&mut self) -> Option<bool> { Some(self.read_u8()? != 0) }
+    fn read_string(&mut self) -> Option<String> {
+        let len = self.read_uleb128()? as usize;
+        String::from_utf8(self.read_bytes(len)?.to_vec()).ok()
+    }
+    fn read_vec_u64(&mut self) -> Option<Vec<u64>> {
+        let len = self.read_uleb128()? as usize;
+        (0..len).map(|_| self.read_u64()).collect()
+    }
+    fn read_vec_u8(&mut self) -> Option<Vec<u8>> {
+        let len = self.read_uleb128()? as usize;
+        Some(self.read_bytes(len)?.to_vec())
+    }
+    fn read_option_u64(&mut self) -> Option<Option<u64>> {
+        if self.read_u8()? == 0 { Some(None) } else { Some(Some(self.read_u64()?)) }
+    }
+}
+
+/// 从 BCS 字节解析事件，返回 JSON Value 供 parse_chain_event 使用。
+pub fn parse_bcs_event(event_type: &str, bytes: &[u8]) -> Option<serde_json::Value> {
+    let event_name = event_type.rsplit("::").next()?;
+    let mut r = BcsReader::new(bytes);
+    let mut m = serde_json::Map::new();
+    macro_rules! addr { ($n:expr) => { m.insert($n.to_string(), serde_json::json!(r.read_address()?)); } }
+    macro_rules! u64 { ($n:expr) => { m.insert($n.to_string(), serde_json::json!(r.read_u64()?)); } }
+    macro_rules! u8 { ($n:expr) => { m.insert($n.to_string(), serde_json::json!(r.read_u8()?)); } }
+    macro_rules! bool { ($n:expr) => { m.insert($n.to_string(), serde_json::json!(r.read_bool()?)); } }
+    macro_rules! str { ($n:expr) => { m.insert($n.to_string(), serde_json::json!(r.read_string()?)); } }
+    macro_rules! vu64 { ($n:expr) => { m.insert($n.to_string(), serde_json::json!(r.read_vec_u64()?)); } }
+    macro_rules! vu8 { ($n:expr) => { m.insert($n.to_string(), serde_json::json!(r.read_vec_u8()?)); } }
+    macro_rules! ou64 { ($n:expr) => { m.insert($n.to_string(), match r.read_option_u64()? { Some(v) => serde_json::json!(v), None => serde_json::Value::Null }); } }
+
+    match event_name {
+        "TableCreated" => { addr!("table_id"); str!("name"); }
+        "PlayerJoined" => { addr!("table_id"); u64!("seat_index"); addr!("player"); u64!("buy_in"); bool!("is_waiting"); u64!("active_count_after"); }
+        "PlayerLeft" => { addr!("table_id"); u64!("seat_index"); addr!("player"); }
+        "HandStarted" => { addr!("table_id"); u64!("button"); u64!("small_blind"); u64!("big_blind"); vu64!("participants"); }
+        "BlindsPosted" => { addr!("table_id"); u64!("sb_seat"); u64!("bb_seat"); u64!("sb_amount"); u64!("bb_amount"); u64!("first_to_act"); }
+        "BettingRoundStarted" => { addr!("table_id"); u8!("round_state"); u64!("current_bet"); u64!("min_raise"); u64!("first_to_act"); u64!("pot_before"); }
+        "RoundAdvanced" => { addr!("table_id"); u8!("from_round"); u8!("to_round"); u64!("pot"); u64!("community_cards_count"); }
+        "PotCollected" => { addr!("table_id"); u8!("round_state"); u64!("pot_after"); vu64!("collected_from_seats"); }
+        "WinnerAwarded" => { addr!("table_id"); u64!("seat_index"); addr!("player"); u64!("amount"); u8!("pot_type"); ou64!("hand_rank"); }
+        "HandSettled" => { addr!("table_id"); u64!("pot"); vu64!("winners"); }
+        "HandEndedWithoutShowdown" => { addr!("table_id"); u64!("winner_seat"); addr!("winner_player"); u64!("pot"); }
+        "HandReset" => { addr!("table_id"); u8!("reason"); u8!("round_state"); }
+        "PlayerFolded" => { addr!("table_id"); u64!("seat_index"); u8!("reason"); u8!("round_state"); }
+        "PlayerChecked" => { addr!("table_id"); u64!("seat_index"); u8!("round_state"); }
+        "PlayerCalled" => { addr!("table_id"); u64!("seat_index"); u64!("call_delta"); u8!("round_state"); }
+        "PlayerRaised" => { addr!("table_id"); u64!("seat_index"); u64!("raise_delta"); u64!("total_bet"); u8!("round_state"); }
+        "PlayerAllIn" => { addr!("table_id"); u64!("seat_index"); u8!("trigger_action"); u64!("amount"); u8!("round_state"); }
+        "ShuffleVerified" => { addr!("table_id"); u64!("seat_index"); addr!("player"); }
+        "ShuffleTurnEvt" => { addr!("table_id"); u64!("seat_index"); u64!("pending_count"); u64!("completed_count"); }
+        "ShuffleCompleteEvt" => { addr!("table_id"); u8!("phase"); u64!("participant_count"); u64!("deck_size"); }
+        "ShuffleTimeout" => { addr!("table_id"); u64!("seat_index"); u8!("phase"); u64!("started_at"); u64!("timeout_ms"); }
+        "RevealPhaseEvt" => { addr!("table_id"); u8!("phase"); }
+        "RevealTokenSubmitted" => { addr!("table_id"); u64!("seat_index"); u64!("card_index"); u8!("phase"); }
+        "RevealPhaseComplete" => { addr!("table_id"); u8!("phase"); }
+        "RevealTimeout" => { addr!("table_id"); u8!("phase"); vu64!("pending_players"); }
+        "CardIsIdentity" => { addr!("table_id"); u64!("card_index"); u64!("assignment_index"); u8!("phase"); }
+        "IdentityRedeal" => { addr!("table_id"); vu64!("identity_card_indices"); u64!("redeal_count"); u8!("phase"); }
+        "RedealRequested" => { addr!("table_id"); u64!("seat_index"); vu64!("card_indices"); }
+        "CommunityCardRevealed" => { addr!("table_id"); u8!("phase"); vu64!("card_indices"); vu8!("card_ranks"); vu8!("card_suits"); }
+        "ShowdownHoleCardsRevealed" => { addr!("table_id"); u64!("seat_index"); addr!("player"); vu64!("card_indices"); vu8!("card_ranks"); vu8!("card_suits"); }
+        "ReconstructInitiated" => { addr!("table_id"); vu64!("expected_players"); u8!("round_state"); }
+        "ReconstructDeckSubmitted" => { addr!("table_id"); u64!("seat_index"); }
+        "ReconstructCompleteEvt" => { addr!("table_id"); }
+        "ReconstructTimeout" => { addr!("table_id"); vu64!("pending_players"); }
+        "PlayerKicked" => { addr!("table_id"); u64!("seat_index"); addr!("player"); u8!("reason"); }
+        "PlayerRefund" => { addr!("table_id"); u64!("seat_index"); addr!("player"); u64!("amount"); u8!("refund_type"); }
+        "TimeoutConfigUpdated" => { addr!("table_id"); u64!("betting_timeout_ms"); u64!("shuffle_timeout_ms"); u64!("reveal_timeout_ms"); u64!("reconstruct_timeout_ms"); u64!("showdown_display_ms"); }
+        _ => { tracing::warn!("[parse_bcs_event] unknown event: {}", event_name); return None; }
+    }
+    Some(serde_json::Value::Object(m))
 }
 
 #[cfg(test)]

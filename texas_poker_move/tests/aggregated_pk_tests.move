@@ -122,7 +122,7 @@ fun kicked_player_pk_removed() {
     table::set_aggregated_pk_for_test(&mut t, agg_before);
 
     // 3. 踢出 seat 1
-    table::kick_player_for_test(&mut t, 1, table_events::kick_reason_admin());
+    table::kick_player_for_test(&mut t, 1, table_events::kick_reason_admin(), scenario.ctx());
 
     // 4. 验证 aggregated_pk = pk1 + pk3 (移除了 pk2)
     let mut remaining_pks = vector[];
@@ -167,7 +167,7 @@ fun kicked_waiting_player_is_waiting_reset() {
     assert!(table::seat_is_waiting(&t, 2), EWaitingNotSet);
 
     // 4. 踢出 waiting 玩家 seat 2
-    table::kick_player_for_test(&mut t, 2, table_events::kick_reason_admin());
+    table::kick_player_for_test(&mut t, 2, table_events::kick_reason_admin(), scenario.ctx());
 
     // 5. 验证 is_waiting 已重置为 false
     assert!(!table::seat_is_waiting(&t, 2), EWaitingNotReset);
@@ -395,7 +395,7 @@ fun kick_triggers_reset_when_below_min() {
 
     // 3. 踢出 seat 1 → 活跃人数降为 1 < min_players_to_start(2)
     // kick_player_internal 应自动调用 reset_for_next_hand
-    table::kick_player_for_test(&mut t, 1, table_events::kick_reason_admin());
+    table::kick_player_for_test(&mut t, 1, table_events::kick_reason_admin(), scenario.ctx());
 
     // 4. 验证已 reset: round_state = WAITING
     assert!(table::round_state(&t) == table_constants::round_waiting(), ENotReset);
@@ -404,6 +404,234 @@ fun kick_triggers_reset_when_below_min() {
     let expected = pk1;
     let actual = table::aggregated_pk(&t);
     assert!(actual == &expected, EAggregatedPkMismatch);
+
+    table::destroy_table(t);
+    scenario.end();
+}
+
+// ========== 测试 9: 破产玩家 (stack==0) 在 reset 后被清理，pk 从 aggregated_pk 移除 ==========
+
+#[test]
+fun broke_player_cleaned_up_on_reset() {
+    let mut scenario = test_scenario::begin(table_test_helpers::admin());
+    let ctx = scenario.ctx();
+
+    // 1. 创建牌桌，3 人加入并设置真实 pk
+    let mut t = table_test_helpers::create_table_with_players(3, 1000, ctx);
+    let pk1 = make_pk(1);
+    let pk2 = make_pk(2);
+    let pk3 = make_pk(3);
+    table::set_player_pk_for_test(&mut t, 0, pk1);
+    table::set_player_pk_for_test(&mut t, 1, pk2);
+    table::set_player_pk_for_test(&mut t, 2, pk3);
+
+    // 2. 模拟已洗牌状态: aggregated_pk = pk1 + pk2 + pk3
+    let mut active_pks = vector[];
+    active_pks.push_back(pk1);
+    active_pks.push_back(pk2);
+    active_pks.push_back(pk3);
+    table::set_aggregated_pk_for_test(&mut t, aggregate_pks(&active_pks));
+
+    // 3. seat 1 输光所有筹码 (stack = 0)
+    table::set_stack_for_test(&mut t, 1, 0);
+    assert!(table::seat_stack(&t, 1) == 0, EStackNotZero);
+
+    // 4. reset_for_next_hand 应清理破产玩家
+    table::reset_for_next_hand_for_test(&mut t);
+
+    // 5. 验证 seat 1 已被清空
+    assert!(!table::seat_occupied(&t, 1), ESeatNotEmpty);
+
+    // 6. 验证 aggregated_pk = pk1 + pk3 (移除了 pk2)
+    let mut remaining_pks = vector[];
+    remaining_pks.push_back(pk1);
+    remaining_pks.push_back(pk3);
+    let expected = aggregate_pks(&remaining_pks);
+    let actual = table::aggregated_pk(&t);
+    assert!(actual == &expected, EAggregatedPkMismatch);
+
+    // 7. 验证 seat 0 和 seat 2 仍然 occupied 且筹码不变
+    assert!(table::seat_occupied(&t, 0), ESeatShouldRemain);
+    assert!(table::seat_occupied(&t, 2), ESeatShouldRemain);
+    assert!(table::seat_stack(&t, 0) == 1000, EAggregatedPkMismatch);
+    assert!(table::seat_stack(&t, 2) == 1000, EAggregatedPkMismatch);
+
+    table::destroy_table(t);
+    scenario.end();
+}
+
+// ========== 测试 10: 多个破产玩家同时被清理 ==========
+
+#[test]
+fun multiple_broke_players_cleaned_up() {
+    let mut scenario = test_scenario::begin(table_test_helpers::admin());
+    let ctx = scenario.ctx();
+
+    // 1. 创建牌桌，3 人加入
+    let mut t = table_test_helpers::create_table_with_players(3, 1000, ctx);
+    let pk1 = make_pk(1);
+    let pk2 = make_pk(2);
+    let pk3 = make_pk(3);
+    table::set_player_pk_for_test(&mut t, 0, pk1);
+    table::set_player_pk_for_test(&mut t, 1, pk2);
+    table::set_player_pk_for_test(&mut t, 2, pk3);
+
+    // 2. aggregated_pk = pk1 + pk2 + pk3
+    let mut all_pks = vector[];
+    all_pks.push_back(pk1);
+    all_pks.push_back(pk2);
+    all_pks.push_back(pk3);
+    table::set_aggregated_pk_for_test(&mut t, aggregate_pks(&all_pks));
+
+    // 3. seat 0 和 seat 2 都输光筹码
+    table::set_stack_for_test(&mut t, 0, 0);
+    table::set_stack_for_test(&mut t, 2, 0);
+
+    // 4. reset_for_next_hand
+    table::reset_for_next_hand_for_test(&mut t);
+
+    // 5. 验证 seat 0 和 seat 2 已被清空
+    assert!(!table::seat_occupied(&t, 0), ESeatNotEmpty);
+    assert!(!table::seat_occupied(&t, 2), ESeatNotEmpty);
+
+    // 6. 验证 seat 1 仍然存在
+    assert!(table::seat_occupied(&t, 1), ESeatShouldRemain);
+
+    // 7. 验证 aggregated_pk = pk2 (移除了 pk1 和 pk3)
+    let expected = pk2;
+    let actual = table::aggregated_pk(&t);
+    assert!(actual == &expected, EAggregatedPkMismatch);
+
+    table::destroy_table(t);
+    scenario.end();
+}
+
+// ========== 测试 11: 所有玩家都破产时全部清理，aggregated_pk 回到初始 ==========
+
+#[test]
+fun all_broke_players_cleaned_up() {
+    let mut scenario = test_scenario::begin(table_test_helpers::admin());
+    let ctx = scenario.ctx();
+
+    // 1. 创建牌桌，2 人加入
+    let mut t = table_test_helpers::create_table_with_players(2, 1000, ctx);
+    let pk1 = make_pk(1);
+    let pk2 = make_pk(2);
+    table::set_player_pk_for_test(&mut t, 0, pk1);
+    table::set_player_pk_for_test(&mut t, 1, pk2);
+
+    // 2. aggregated_pk = pk1 + pk2
+    let mut pks = vector[];
+    pks.push_back(pk1);
+    pks.push_back(pk2);
+    let agg_before = aggregate_pks(&pks);
+    table::set_aggregated_pk_for_test(&mut t, agg_before);
+
+    // 3. 所有玩家都输光筹码
+    table::set_stack_for_test(&mut t, 0, 0);
+    table::set_stack_for_test(&mut t, 1, 0);
+
+    // 4. reset_for_next_hand
+    table::reset_for_next_hand_for_test(&mut t);
+
+    // 5. 验证所有 seat 已被清空
+    assert!(!table::seat_occupied(&t, 0), ESeatNotEmpty);
+    assert!(!table::seat_occupied(&t, 1), ESeatNotEmpty);
+
+    // 6. 验证 aggregated_pk 已被重置为空（所有玩家被清理后，reset_for_next_hand 将 aggregated_pk 置空）
+    //    这确保后续 add_pk_to_aggregated 走 g1_identity() 分支而非 g1_from_bytes(identity_bytes) 分支
+    let actual = table::aggregated_pk(&t);
+    assert!(actual.length() == 0, EAggregatedPkMismatch);
+
+    table::destroy_table(t);
+    scenario.end();
+}
+
+// ========== 测试 12: 破产玩家 + waiting 玩家同时存在，waiting 玩家 pk 先加入再清理 ==========
+
+#[test]
+fun broke_player_and_waiting_player_on_reset() {
+    let mut scenario = test_scenario::begin(table_test_helpers::admin());
+    let ctx = scenario.ctx();
+
+    // 1. 创建牌桌，3 人加入
+    let mut t = table_test_helpers::create_table_with_players(3, 1000, ctx);
+    let pk1 = make_pk(1);
+    let pk2 = make_pk(2);
+    let pk3 = make_pk(3);
+    table::set_player_pk_for_test(&mut t, 0, pk1);
+    table::set_player_pk_for_test(&mut t, 1, pk2);
+    table::set_player_pk_for_test(&mut t, 2, pk3);
+
+    // 2. aggregated_pk = pk1 + pk2 + pk3
+    let mut active_pks = vector[];
+    active_pks.push_back(pk1);
+    active_pks.push_back(pk2);
+    active_pks.push_back(pk3);
+    table::set_aggregated_pk_for_test(&mut t, aggregate_pks(&active_pks));
+
+    // 3. 第 4 个玩家中途加入 (is_waiting = true)
+    table::join_table_for_test(&mut t, 3, table_test_helpers::player4(), 1000);
+    table::set_is_waiting_for_test(&mut t, 3, true);
+    let pk4 = make_pk(4);
+    table::set_player_pk_for_test(&mut t, 3, pk4);
+
+    // 4. seat 1 破产 (stack = 0)
+    table::set_stack_for_test(&mut t, 1, 0);
+
+    // 5. reset_for_next_hand:
+    //    a) waiting 玩家 pk4 加入 aggregated_pk → pk1+pk2+pk3+pk4
+    //    b) 破产玩家 seat 1 被清理 → aggregated_pk - pk2 = pk1+pk3+pk4
+    table::reset_for_next_hand_for_test(&mut t);
+
+    // 6. 验证 seat 1 已被清空
+    assert!(!table::seat_occupied(&t, 1), ESeatNotEmpty);
+
+    // 7. 验证 seat 3 (原 waiting) 仍然存在且 is_waiting = false
+    assert!(table::seat_occupied(&t, 3), ESeatShouldRemain);
+    assert!(!table::seat_is_waiting(&t, 3), EWaitingNotReset);
+
+    // 8. 验证 aggregated_pk = pk1 + pk3 + pk4
+    let mut remaining_pks = vector[];
+    remaining_pks.push_back(pk1);
+    remaining_pks.push_back(pk3);
+    remaining_pks.push_back(pk4);
+    let expected = aggregate_pks(&remaining_pks);
+    let actual = table::aggregated_pk(&t);
+    assert!(actual == &expected, EAggregatedPkMismatch);
+
+    table::destroy_table(t);
+    scenario.end();
+}
+
+// ========== 测试 13: 破产玩家 pk 为空时不崩溃 ==========
+
+#[test]
+fun broke_player_with_empty_pk_no_crash() {
+    let mut scenario = test_scenario::begin(table_test_helpers::admin());
+    let ctx = scenario.ctx();
+
+    // 1. 创建牌桌，2 人加入，但不设置 pk (pk 为空)
+    let mut t = table_test_helpers::create_table_with_players(2, 1000, ctx);
+
+    // 2. 设置 aggregated_pk 为 G1 generator (非空)
+    let g = bls12381::g1_generator();
+    let agg = texas_poker::bls_scalar::g1_to_bytes(&g);
+    table::set_aggregated_pk_for_test(&mut t, agg);
+
+    // 3. seat 0 破产 (stack = 0)，pk 为空
+    table::set_stack_for_test(&mut t, 0, 0);
+    assert!(table::seat_pk(&t, 0).length() == 0, EAggregatedPkMismatch);
+
+    // 4. reset_for_next_hand 不应崩溃 (pk.length() == 0 时跳过 remove)
+    table::reset_for_next_hand_for_test(&mut t);
+
+    // 5. 验证 seat 0 已被清空
+    assert!(!table::seat_occupied(&t, 0), ESeatNotEmpty);
+
+    // 6. 验证 aggregated_pk 不变 (G1 generator)
+    let actual = table::aggregated_pk(&t);
+    assert!(actual == &agg, EAggregatedPkMismatch);
 
     table::destroy_table(t);
     scenario.end();
@@ -422,3 +650,9 @@ const ESeatNotCleared: vector<u8> = b"seat should be empty after kick";
 const ENotReset: vector<u8> = b"table should be reset to WAITING";
 #[error]
 const EAggregatedPkEmpty: vector<u8> = b"aggregated_pk should not be empty";
+#[error]
+const ESeatNotEmpty: vector<u8> = b"seat should be empty after cleanup";
+#[error]
+const ESeatShouldRemain: vector<u8> = b"seat should still be occupied";
+#[error]
+const EStackNotZero: vector<u8> = b"stack should not be zero";

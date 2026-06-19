@@ -77,13 +77,20 @@ public fun verify(
         return false
     };
 
+    // M6 修复：拒绝恒等元 player_pk——sk=0 时 d2=0，证明平凡成立但 leave 操作为 no-op
+    if (bls_scalar::g1_is_identity(player_pk)) {
+        return false
+    };
+
     // 2. 检查 c1 不变性：leave 只修改 c2，c1 保持不变
     // 3. 计算 d2_i = input_cts[i].c2 - output_cts[i].c2（注意方向与 remask 相反）
+    // M7 修复：校验输入密文有效性（c1/c2 非 identity）
     let mut d2s = vector[];
     let mut i = 0;
     while (i < n) {
         let input_ct = vector::borrow(input_cts, i);
         let output_ct = vector::borrow(output_cts, i);
+        if (!bls_elgamal::is_valid(input_ct)) { return false };
         if (!bls_scalar::g1_equal(bls_elgamal::c1(input_ct), bls_elgamal::c1(output_ct))) {
             return false
         };

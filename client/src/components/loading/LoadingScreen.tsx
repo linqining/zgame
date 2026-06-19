@@ -15,7 +15,7 @@ const StyledLoadingScreen = styled.div`
   justify-content: center;
   align-items: center;
   overflow: hidden;
-  background: #f8fafc;
+  background: ${({ theme }) => theme.colors.fontColorLight};
   animation: ${fadeIn} 0.3s ease-out;
 
   &::before {

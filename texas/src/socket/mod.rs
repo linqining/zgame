@@ -1,8 +1,10 @@
 pub use handlers::register_handlers;
+pub use broadcast::{broadcast_player_update, PlayerUpdatePayload};
 
 pub mod broadcast;
 pub mod game_loop;
 pub mod handlers;
+pub mod table_events;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,13 +19,13 @@ use crate::models::Database;
 use crate::pokergame::actions;
 use crate::pokergame::deck::Card;
 use crate::pokergame::game_state::{ElGamalCiphertextJson, ReconstructPhase, MaskAndShuffleRoundJson, ShuffleProofJson, PlayerReadableCardJson,
-    PkProofJson, ReconstructProofJson, RevealPhase, ShufflePublicState, LeaveGameRoundJson};
+    PkProofJson, ReconstructProofJson, RevealPhase, ShufflePublicState, LeaveGameRoundJson, SubmitRevealTokenJson};
 use crate::pokergame::player::{Player, WalletAddress, GamePkHex, GamePlayer};
 use crate::pokergame::table::{ActionRequest, ClientTable, JoinError, JoinResult, RoundState, Table};
 use poker_protocol::crypto::EcPoint;
 use poker_protocol::z_poker::convert::{ecpoint_to_hex, hex_to_ecpoint, scalar_to_hex};
 
-pub(crate) const MIN_START_NUM: u32 = 3;
+pub(crate) const MIN_START_NUM: u32 = 2;
 
 pub(crate) fn table_room_name(table_id: u32) -> String {
     format!("table_{}", table_id)
@@ -75,6 +77,7 @@ pub(crate) struct PlayerInfo {
 pub(crate) struct TableLeftPayload {
     pub tables: Vec<TableSummary>,
     pub table_id: u32,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,6 +121,9 @@ pub(crate) struct SitDownV2Payload {
     pub pk_hex: GamePkHex,
     pub pk_proof: PkProofJson,
     pub mask_and_shuffle_round: MaskAndShuffleRoundJson,
+    /// on-chain 模式下买入用的 SUI Coin 对象 ID (hex)。
+    /// 合约已改为接收 Coin<SUI> 而非 u64 buy_in。
+    pub coin_object_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,7 +131,11 @@ pub(crate) struct SitDownV2Payload {
 pub(crate) struct StandUpPayload {
     pub table_id: u32,
     pub pk_hex: GamePkHex,
-    pub leave_round: LeaveGameRoundJson,
+    /// 链上模式下，若客户端已通过 HTTP API (`/api/sui/action/build`) 直接提交
+    /// leave_with_proof_verified 交易，则 leave_round 为 None。
+    /// 此时后端跳过本地 proof 验证和 PTB 构建，仅清理 socket 状态，
+    /// 实际玩家移除由 relayer 从 PlayerLeft 事件同步。
+    pub leave_round: Option<LeaveGameRoundJson>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,6 +165,11 @@ pub(crate) struct ShuffleSubmitPayload {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RevealSubmitPayload {
     pub table_id: u32,
+    /// Task 5: 可选 pk_hex（向后兼容旧客户端不传该字段）
+    pub pk_hex: Option<GamePkHex>,
+    /// Task 5: 可选 reveal_tokens（向后兼容旧客户端不传该字段）
+    /// 若提供则在 on-chain 模式下构建 PTB，本地模式下走 submit_reveal_tokens_for_pk
+    pub reveal_tokens: Option<Vec<SubmitRevealTokenJson>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -171,6 +186,8 @@ pub(crate) struct ReconstructSubmitPayload {
     pub pk_hex: GamePkHex,
     pub output_cards: Vec<ElGamalCiphertextJson>,
     pub swap_cards: Vec<ElGamalCiphertextJson>,
+    /// Task 4: 用户可读牌（每个 swap_out 对应一张），on-chain 模式下需要传给 Move 合约
+    pub user_readable_cards: Vec<ElGamalCiphertextJson>,
     pub proof: ReconstructProofJson,
 }
 
@@ -293,7 +310,7 @@ impl GameState {
     /// Returns the player's socket_id if found.
     pub fn remove_player_by_pk(&mut self, table_id: u32, pk_hex: &GamePkHex) -> Option<String> {
         let wallet_address = self.tables.get(&table_id)
-            .and_then(|table| table.players.get(pk_hex).cloned());
+            .and_then(|table| table.players().get(pk_hex).cloned());
 
         if let Some(wallet_addr) = wallet_address {
             let socket_id = self.players.iter()
@@ -338,18 +355,50 @@ impl SocketState {
         }
     }
 
+    /// 已弃用：原从 relayer 缓存同步 deck 的逻辑。
+    /// 移除 RelayerState 后，`sync_table_state`（relayer/mod.rs）已直接将
+    /// `summary.crypto` 同步到 `table.summary.crypto`，本函数无需再做事。
+    pub async fn sync_deck_from_relayer_cache(&self, _table_id: u32) {
+        // no-op: table.summary.crypto 已由 sync_table_state 同步
+    }
+
+    /// 为所有已注册的 table 创建事件 channel 并 spawn consumer 任务。
+    ///
+    /// 在 `main.rs` 中 `SocketIo` 实例创建后调用。对每个 table：
+    /// 1. 创建 `mpsc::channel::<TableEvent>(256)`
+    /// 2. 调用 `table.set_event_sender(tx)` 注入 sender
+    /// 3. spawn `table_event_consumer` 任务消费事件并执行 socket 广播
+    pub async fn init_table_event_channels(self: &Arc<Self>, io: SocketIo) {
+        let mut gs = self.state.write().await;
+        let table_ids: Vec<u32> = gs.tables.keys().copied().collect();
+        for table_id in table_ids {
+            if let Some(table) = gs.tables.get_mut(&table_id) {
+                let (tx, rx) = tokio::sync::mpsc::channel::<crate::pokergame::table::events::TableEvent>(256);
+                table.set_event_sender(tx);
+                tracing::info!("[TABLE-EVENTS] Initialized event channel for table {}", table_id);
+                // spawn 不会立即执行 consumer，它在当前任务释放锁后才调度
+                tokio::spawn(crate::socket::table_events::table_event_consumer(
+                    io.clone(),
+                    self.clone(),
+                    table_id,
+                    rx,
+                ));
+            }
+        }
+    }
+
     pub(crate) async fn get_current_tables(&self) -> Vec<TableSummary> {
         let gs = self.state.read().await;
         gs.tables
             .values()
             .map(|t| TableSummary {
-                id: t.id,
-                name: t.name.clone(),
-                limit: t.limit,
-                max_players: t.max_players,
-                current_number_players: t.players.len(),
-                small_blind: t.min_bet,
-                big_blind: t.min_bet * 2,
+                id: t.summary.id,
+                name: t.name().to_string(),
+                limit: t.summary.limit,
+                max_players: t.max_players(),
+                current_number_players: t.players().len(),
+                small_blind: t.summary.min_bet,
+                big_blind: t.summary.min_bet * 2,
             })
             .collect()
     }
@@ -372,6 +421,9 @@ impl SocketState {
     }
 
     pub async fn start_game_loop(&self, io: SocketIo, state: Arc<SocketState>, table_id: u32) {
+        if state.config.sui_on_chain_enabled {
+            return;
+        }
         let mut registry = self.game_loop_registry.write().await;
         if registry.contains(table_id) {
             return;
@@ -395,7 +447,7 @@ impl SocketState {
     }
 
     pub async fn stop_game_loop(&self, table_id: u32) {
-        tracing::info!("stop_game_loop: {}", table_id);
+        // tracing::info!("stop_game_loop: {}", table_id);
         let mut registry = self.game_loop_registry.write().await;
         registry.remove(table_id);
     }
@@ -404,7 +456,7 @@ impl SocketState {
     pub async fn resolve_socket_id_by_pk(&self, table_id: u32, pk_hex: &GamePkHex) -> Option<String> {
         let gs = self.state.read().await;
         let wallet_addr = gs.tables.get(&table_id)
-            .and_then(|table| table.players.get(pk_hex).cloned());
+            .and_then(|table| table.players().get(pk_hex).cloned());
         if let Some(wallet_addr) = wallet_addr {
             gs.players.values()
                 .find(|p| p.wallet_address == wallet_addr)
@@ -424,13 +476,19 @@ impl SocketState {
             None => return,
         };
 
+        // 非阻塞地从 relayer 已同步好的 TableSummaryV2 缓存中同步 deck_encrypted。
+        // 客户端会用此 deck 生成 remask proof，如果 deck 过期会导致上链验证失败。
+        // 这里只读 relayer 内存缓存（已被链上事件同步），不做阻塞式 RPC 调用，
+        // 避免阻塞 SHUFFLE_NOTICE 推送。
+        self.sync_deck_from_relayer_cache(table_id).await;
+
         let shuffle_notice_data = {
             let gs = self.state.read().await;
             if let Some(table) = gs.tables.get(&table_id) {
                 let shuffle_state = table.get_shuffle_public_state();
                 let current_pk = table.shuffle_state.current_player_pk.clone();
                 let socket_id = if let Some(pk) = &current_pk {
-                    if let Some(wallet_address) = table.players.get(pk) {
+                    if let Some(wallet_address) = table.players().get(pk) {
                         gs.players.values()
                             .find(|p| &p.wallet_address == wallet_address)
                             .map(|p| p.socket_id.clone())
@@ -459,7 +517,7 @@ impl SocketState {
     pub async fn mark_player_sitting_out(&self, table_id: u32, wallet_address: &WalletAddress) {
         let mut gs = self.state.write().await;
         if let Some(table) = gs.tables.get_mut(&table_id) {
-            for seat in table.seats.values_mut() {
+            for seat in table.local_seats.values_mut() {
                 if seat.player.as_ref().map_or(false, |p| &p.wallet_address == wallet_address) {
                     seat.sitting_out = true;
                 }
@@ -470,7 +528,7 @@ impl SocketState {
     pub async fn is_player_in_seat(&self, pk_hex: &GamePkHex) -> bool {
         let gs = self.state.read().await;
         gs.tables.values().any(|table| {
-            table.seats.values().any(|seat| {
+            table.seats().values().any(|seat| {
                 seat.player.as_ref().map_or(false, |p| &p.pk_hex == pk_hex)
             })
         })
@@ -478,9 +536,9 @@ impl SocketState {
 
     pub async fn find_player_by_pk(&self, table_id: u32, pk_hex: &GamePkHex) -> Option<Player> {
         let gs = self.state.read().await;
-        let wallet_address = gs.tables.get(&table_id).and_then(|table| table.players.get(pk_hex));
+        let wallet_address = gs.tables.get(&table_id).and_then(|table| table.players().get(pk_hex).cloned());
         if let Some(wallet_addr) = wallet_address {
-            gs.players.iter().find(|(_, p)| &p.wallet_address == wallet_addr).map(|(_, p)| p.clone())
+            gs.players.iter().find(|(_, p)| &p.wallet_address == &wallet_addr).map(|(_, p)| p.clone())
         } else {
             None
         }
@@ -544,8 +602,7 @@ impl SocketState {
 
                 if let Some(table) = gs.tables.get_mut(&table_id) {
                     if table.is_pending_shuffle_player_empty() && table.complete_shuffle_player_count() >= MIN_START_NUM as usize  {
-                        table.shuffle_state.is_active = false;
-                        table.transition_to(RoundState::ShuffleComplete);
+                        table.shuffle_state.phase = crate::pokergame::game_state::ShufflePhase::None;
                         tracing::info!("[SHUFFLE] Player {} joined and shuffled, all players shuffled {:?}", pk_hex,table.shuffle_state.completed_players);
                         return Ok((true, JoinResult::JoinedAndShuffled));
                     } else {
@@ -573,6 +630,7 @@ impl SocketState {
         }
     }
 
+    /// 返回 Ok(true) 表示洗牌完成且 reveal phase 已启动（需外部 broadcast reveal）。
     pub async fn submit_verified_shuffle_for_pk(
         &self,
         table_id: u32,
@@ -580,22 +638,28 @@ impl SocketState {
         _player: Player,
         output_cards: Vec<ElGamalCiphertextJson>,
         shuffle_proof: ShuffleProofJson,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let mut gs = self.state.write().await;
         if let Some(table) = gs.tables.get_mut(&table_id) {
-            match table.submit_verified_shuffle(pk_hex, output_cards, shuffle_proof) {
-                Ok(()) => {
-                    if table.is_all_players_shuffled() && table.complete_shuffle_player_count() >= MIN_START_NUM as usize  {
-                        table.shuffle_state.is_active = false;
-                        table.transition_to(RoundState::ShuffleComplete);
-                    } else {
-                        table.complete_or_continue_next_shuffler();
+                    match table.submit_verified_shuffle(pk_hex, output_cards, shuffle_proof) {
+                        Ok(()) => {
+                            if table.is_all_players_shuffled()
+                                && table.complete_shuffle_player_count() >= MIN_START_NUM as usize
+                            {
+                                // 所有玩家完成洗牌 → advance_shuffle 推进流程
+                                // (on_shuffle_complete + on_before_preflop_shuffle_complete + transition_to(PreFlop) + start_preflop_reveal_phase)
+                                table.advance_shuffle();
+                                // advance_shuffle 内部可能启动 reveal phase，
+                                // 外部调用方需据此 broadcast reveal notice
+                                Ok(table.reveal_token_state.is_active())
+                            } else {
+                                table.complete_or_continue_next_shuffler();
+                                Ok(false)
+                            }
+                        }
+                        Err(e) => Err(e),
                     }
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
-        } else {
+                } else {
             Err("Table not found".to_string())
         }
     }
@@ -636,14 +700,19 @@ pub(crate) fn hide_opponent_cards(base: &ClientTable, wallet_address: &WalletAdd
 
     let cards_dealt = !matches!(
         copy.round_state,
-        RoundState::Waiting | RoundState::Shuffling | RoundState::ShuffleComplete | RoundState::HandComplete
+        RoundState::Waiting
     );
 
     for seat in copy.seats.values_mut() {
         let is_opponent = seat.player.as_ref().map_or(true, |p| &p.wallet_address != wallet_address);
-        let is_winner_showdown = seat.last_action.as_deref() == Some(actions::WINNER) && copy.went_to_showdown;
+        // 摊牌时所有未弃牌玩家都应亮牌；非摊牌时仅赢家亮牌
+        let should_show = if copy.went_to_showdown {
+            !seat.folded
+        } else {
+            seat.last_action.as_deref() == Some(actions::WINNER)
+        };
 
-        if is_opponent && !is_winner_showdown {
+        if is_opponent && !should_show {
             if seat.hand.len() > 0 {
                 seat.hand = hidden_hand.clone();
             } else if cards_dealt && !seat.folded && !seat.sitting_out && seat.player.is_some() {

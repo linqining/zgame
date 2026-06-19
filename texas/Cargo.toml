@@ -14,14 +14,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12" }
 uuid = { version = "1", features = ["v4"] }
-bcrypt = "0.15"
 jsonwebtoken = "9"
 rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenv = "0.15"
-mongodb = "3.6.0"
 itertools = "0.14"
 hex = "0.4"
 blake2b_simd = "1"
@@ -32,11 +30,16 @@ sui_sdk = { git = "https://github.com/mystenlabs/sui", package = "sui-sdk", rev 
 sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
 sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09", features = ["pem", "ed25519", "secp256k1", "secp256r1", "zklogin"] }
 sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
+tonic = { version = "0.14", default-features = false, features = ["channel"] }
 sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
 prost-types = "0.14"
 thiserror = "2"
 ed25519-dalek = "2"
+bech32 = "0.9"
 bcs = "0.1"
 hmac = "0.12"
 sha2 = "0.10"
 zeroize = { version = "1", features = ["alloc"] }
+tokio-tungstenite = { version = "0.27", features = ["native-tls"] }
+futures-util = "0.3"
+

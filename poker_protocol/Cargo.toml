@@ -20,3 +20,13 @@ merlin = "3"
 blstrs = "0.7"
 group = "0.13"
 ff = "0.13"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+bcs = "0.1"
+base64 = "0.22"
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09", features = ["serde"] }
+ff = "0.13"
+rand = "0.8.5"
+serde = "1"

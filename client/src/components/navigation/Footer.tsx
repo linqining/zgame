@@ -22,10 +22,11 @@ const StyledFooter = styled.footer`
 
 const FooterText = styled(Text)`
   a {
+    /* TODO: #475569 提取到 theme */
     color: #475569;
     transition: all 0.2s ease;
     &:hover {
-      color: #667eea;
+      color: ${({ theme }) => theme.colors.secondaryCta};
     }
   }
 `;

@@ -1,5 +1,4 @@
 use super::*;
-use crate::pokergame::actions;
 
 impl Table {
     pub fn handle_fold(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
@@ -11,12 +10,16 @@ impl Table {
                 return None;
             }
         }
-        if let Some(seat) = self.seats.get_mut(&seat_id) {
+        if let Some(seat) = self.local_seats.get_mut(&seat_id) {
             seat.fold();
+            // seat.fold() 已设置 has_acted = true，对齐 Move: acted_this_round = true
         }
         if let Some(ref mut betting) = self.betting_round {
             betting.update_after_fold();
         }
+        // 对齐 Move do_fold: 重置 betting_started_at = 0，为下一玩家准备
+        // （Move 中设为 0，由 tick 重新设置；Rust 直接设为 now_ms 等效）
+        self.set_betting_started_at(now_ms());
         Some(ActionResult { seat_id, message: format!("{} folds", player_name) })
     }
 
@@ -24,20 +27,22 @@ impl Table {
         let seat = self.find_player_by_pk(pk)?;
         let seat_id = seat.id;
         let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
-        let call_amount = self.call_amount?;
+        let call_amount = self.summary.call_amount?;
         let added_to_pot = if call_amount > seat.stack + seat.bet { seat.stack } else { call_amount - seat.bet };
         if let Some(ref betting) = self.betting_round {
             if betting.validate_call(&seat).is_err() {
                 return None;
             }
         }
-        if let Some(seat) = self.seats.get_mut(&seat_id) {
+        if let Some(seat) = self.local_seats.get_mut(&seat_id) {
             seat.call_raise(call_amount);
         }
         if let Some(ref mut betting) = self.betting_round {
             betting.update_after_call();
         }
         self.add_to_pot(added_to_pot);
+        // 对齐 handle_fold：重置下注计时，为下一玩家准备
+        self.set_betting_started_at(now_ms());
         Some(ActionResult { seat_id, message: format!("{} calls ${:.2}", player_name, added_to_pot) })
     }
 
@@ -50,12 +55,14 @@ impl Table {
                 return None;
             }
         }
-        if let Some(seat) = self.seats.get_mut(&seat_id) {
+        if let Some(seat) = self.local_seats.get_mut(&seat_id) {
             seat.check();
         }
         if let Some(ref mut betting) = self.betting_round {
             betting.update_after_check();
         }
+        // 对齐 handle_fold：重置下注计时，为下一玩家准备
+        self.set_betting_started_at(now_ms());
         Some(ActionResult { seat_id, message: format!("{} checks", player_name) })
     }
 
@@ -63,102 +70,86 @@ impl Table {
         let seat = self.find_player_by_pk(pk)?;
         let seat_id = seat.id;
         let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
-        if let Some(ref betting) = self.betting_round {
+        let seat_bet = seat.bet;
+        let seat_stack = seat.stack;
+
+        // 对齐 Move process_raise：校验筹码充足，all-in 允许低于 min_raise
+        let (raise_amount, is_all_in, qualifies_full_raise) = if let Some(ref betting) = self.betting_round {
             let raise_amount = amount.saturating_sub(betting.current_bet());
             if betting.validate_raise(&seat, raise_amount).is_err() {
                 return None;
             }
-        }
-        let added_to_pot = amount - seat.bet;
-        if let Some(seat) = self.seats.get_mut(&seat_id) {
+            let needed = amount.saturating_sub(seat_bet);
+            let is_all_in = needed == seat_stack && seat_stack > 0;
+            // all-in 时仅当 raise_amount >= min_raise 才算完整加注（重新打开行动权）
+            let qualifies = !is_all_in || raise_amount >= betting.min_raise();
+            (raise_amount, is_all_in, qualifies)
+        } else {
+            (0, false, true)
+        };
+
+        let added_to_pot = amount.saturating_sub(seat_bet);
+        if let Some(seat) = self.local_seats.get_mut(&seat_id) {
             seat.raise(amount);
         }
         if let Some(ref mut betting) = self.betting_round {
-            betting.update_after_raise(amount, seat_id);
+            betting.update_after_raise(amount, seat_id, is_all_in);
         }
         self.add_to_pot(added_to_pot);
-        self.min_raise = {
-            // min_raise stores the minimum total bet for the next raise.
-            // Standard rule: next minimum raise = current bet + last raise increment.
-            let raise_increment = amount.saturating_sub(self.call_amount.unwrap_or(0));
-            amount + raise_increment
-        };
-        self.call_amount = Some(amount);
-        // Reset has_acted for all other active players — they must respond to the raise.
-        for seat in self.seats.values_mut() {
-            if seat.id != seat_id && !seat.folded && !seat.sitting_out && seat.stack > 0 {
-                seat.has_acted = false;
+        self.summary.call_amount = Some(amount);
+        // 对齐 Move process_raise：仅完整加注才更新 min_raise（短 all-in 不更新）
+        // Move 中 min_raise = raise_amount（纯增量），不是 amount + raise_amount
+        if qualifies_full_raise {
+            self.set_min_raise(raise_amount);
+        }
+        // 修复：仅完整加注（重新打开行动权）才重置其他玩家的 has_acted。
+        // 短 all-in（raise_amount < min_raise）不重新打开行动权，不应重置，
+        // 否则已行动玩家会被迫再次行动（表现为"连续行动两次"）。
+        if qualifies_full_raise {
+            for seat in self.local_seats.values_mut() {
+                if seat.id != seat_id && !seat.folded && !seat.sitting_out && seat.stack > 0 {
+                    seat.has_acted = false;
+                }
             }
         }
+        // 对齐 handle_fold：重置下注计时，为下一玩家准备
+        self.set_betting_started_at(now_ms());
         Some(ActionResult { seat_id, message: format!("{} raises to ${:.2}", player_name, amount) })
     }
 
-    /// D2 fix: handle all-in action. An all-in is a call or raise with all
-    /// remaining chips. If the player's total (bet + stack) exceeds the
-    /// current call amount, it acts as a raise; otherwise it's a call.
+    /// 对齐 Move：Move 中没有独立的 all_in 入口函数，all-in 在 call/raise 内部自然处理。
+    /// 此处根据玩家 total_bet (bet+stack) 与 call_amount 的比较，路由到 handle_raise 或 handle_call。
     pub fn handle_allin(&mut self, pk: &GamePkHex) -> Option<ActionResult> {
         let seat = self.find_player_by_pk(pk)?;
-        let seat_id = seat.id;
-        let player_name = seat.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
         let stack = seat.stack;
-        let current_bet_total = seat.bet + seat.stack; // total bet after going all-in
-        let added_to_pot = stack;
+        let bet = seat.bet;
+        let call_amount = self.summary.call_amount.unwrap_or(0);
 
         if stack == 0 {
             return None; // nothing to all-in
         }
 
-        // Determine if this all-in is a raise or just a call
-        let call_amount = self.call_amount.unwrap_or(0);
-        let is_raise = current_bet_total > call_amount;
-
-        // Move all chips into bet
-        if let Some(seat) = self.seats.get_mut(&seat_id) {
-            seat.bet += seat.stack;
-            seat.stack = 0;
-            seat.turn = false;
-            seat.has_acted = true;
-            seat.last_action = Some(actions::RAISE.to_string());
-        }
-
-        if is_raise {
-            // All-in raise: update call_amount and min_raise
-            if let Some(ref mut betting) = self.betting_round {
-                betting.update_after_raise(current_bet_total, seat_id);
-            }
-            let raise_increment = current_bet_total.saturating_sub(call_amount);
-            // min_raise only increases if the raise meets the minimum;
-            // incomplete all-in raises don't increase min_raise.
-            if raise_increment >= self.min_raise.saturating_sub(call_amount) {
-                self.min_raise = current_bet_total + raise_increment;
-            }
-            self.call_amount = Some(current_bet_total);
-            // Reset has_acted for other active players
-            for seat in self.seats.values_mut() {
-                if seat.id != seat_id && !seat.folded && !seat.sitting_out && seat.stack > 0 {
-                    seat.has_acted = false;
-                }
-            }
+        let total_bet = bet + stack;
+        if total_bet > call_amount {
+            // All-in raise：对齐 Move raise，process_raise 会处理 all-in 逻辑
+            self.handle_raise(pk, total_bet)
         } else {
-            // All-in call
-            if let Some(ref mut betting) = self.betting_round {
-                betting.update_after_call();
-            }
+            // All-in call：对齐 Move call，process_call 会 cap at stack
+            self.handle_call(pk)
         }
-
-        self.add_to_pot(added_to_pot);
-        Some(ActionResult { seat_id, message: format!("{} goes all-in for ${:.2}", player_name, added_to_pot) })
     }
 
     pub fn add_to_pot(&mut self, amount: u64) {
         // New bets always go to self.pot, never to existing side_pots (B4 fix).
         // side_pots are only populated by calculate_side_pots() at end of round.
-        self.pot += amount;
+        self.set_pot(self.pot() + amount);
     }
 
     pub fn is_betting_round_complete(&self) -> bool {
-        let active: Vec<&Seat> = self.seats.values()
-            .filter(|s| !s.folded && !s.sitting_out && s.stack > 0)
+        // 对齐 Move is_betting_complete：过滤 occupied && !folded && !all_in && !is_waiting
+        // Rust 中 stack == 0 等价于 Move 的 all_in
+        let active: Vec<&Seat> = self.local_seats.values()
+            .filter(|s| !s.folded && !s.sitting_out && !s.is_waiting && s.stack > 0)
             .collect();
         if active.is_empty() {
             return true;
@@ -182,46 +173,47 @@ impl Table {
     }
 
     pub fn players_all_in_this_turn(&self) -> Vec<&Seat> {
-        self.seats.values()
+        self.local_seats.values()
             .filter(|s| !s.folded && s.bet > 0 && s.stack == 0)
             .collect()
     }
 
     pub fn check_betting_timeout(&mut self, timeout_secs: u64) -> Option<ActionResult> {
-        let timeout_start = self.betting_timeout_start?;
-        if timeout_start.elapsed().as_secs() < timeout_secs {
+        // 对齐 Move：使用 summary.state.betting_started_at (u64 ms) 替代 Option<Instant>
+        let timeout_start = self.betting_started_at();
+        if timeout_start == 0 {
             return None;
         }
-        let turn_seat_id = self.turn?;
+        let elapsed_ms = now_ms().saturating_sub(timeout_start);
+        if elapsed_ms / 1000 < timeout_secs {
+            return None;
+        }
+        let turn_seat_id = self.turn()?;
         // Extract only the needed info to avoid cloning the entire Seat
-        let (folded, sitting_out, stack, bet, pk_hex) = {
-            let seat = self.seats.get(&turn_seat_id)?;
+        let (folded, sitting_out, stack, pk_hex) = {
+            let seat = self.local_seats.get(&turn_seat_id)?;
             (
                 seat.folded,
                 seat.sitting_out,
                 seat.stack,
-                seat.bet,
                 seat.player.as_ref().map(|p| p.pk_hex.clone()),
             )
         };
         if folded || sitting_out || stack == 0 {
             // Turn is on a player who can't act — skip them and advance turn.
             // Return a special marker so the caller knows to re-advance.
-            self.turn = self.next_unfolded_player(turn_seat_id, 1);
-            self.betting_timeout_start = Some(std::time::Instant::now());
-            for i in 1..=self.max_players {
-                if let Some(seat) = self.seats.get_mut(&i) {
-                    seat.turn = self.turn == Some(i);
+            self.set_turn(self.next_unfolded_player(turn_seat_id, 1));
+            self.set_betting_started_at(now_ms());
+            let current_turn = self.turn();
+            for i in 1..=self.max_players() {
+                if let Some(seat) = self.local_seats.get_mut(&i) {
+                    seat.turn = current_turn == Some(i);
                 }
             }
             return None;
         }
-        let needs_to_call = self.call_amount.map_or(false, |ca| ca > bet);
+        // 对齐 Move on_betting_timeout：超时一律 fold（Move 中不区分 needs_to_call）
         let pk = pk_hex?;
-        if needs_to_call {
-            self.handle_fold(&pk)
-        } else {
-            self.handle_check(&pk)
-        }
+        self.handle_fold(&pk)
     }
 }

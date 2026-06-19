@@ -57,7 +57,7 @@ fun ciphertext_from_bytes_roundtrip() {
     };
 
     // Deserialize
-    let deser = reconstruct_proof::ciphertext_from_bytes(&data);
+    let deser = bls_elgamal::ciphertext_from_bytes(&data);
 
     // Verify roundtrip
     assert!(bls_scalar::g1_equal(bls_elgamal::c1(&deser), bls_elgamal::c1(&ct)));
@@ -79,7 +79,7 @@ fun ciphertext_from_bytes_with_generator() {
         i = i + 1;
     };
 
-    let deser = reconstruct_proof::ciphertext_from_bytes(&data);
+    let deser = bls_elgamal::ciphertext_from_bytes(&data);
     assert!(bls_scalar::g1_equal(bls_elgamal::c1(&deser), &c1));
     assert!(bls_scalar::g1_equal(bls_elgamal::c2(&deser), &c2));
 }

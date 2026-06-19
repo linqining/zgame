@@ -107,11 +107,12 @@ fn json_to_ct_vec(json_str: &str) -> Result<Vec<ElGamalCiphertext>, String> {
 
 fn reveal_token_proof_to_json(proof: &RevealTokenProof<DefaultCurve>) -> String {
     format!(
-        r#"{{"user_public_key_hex":"{}","commitment_t1_hex":"{}","commitment_t2_hex":"{}","response_s_hex":"{}"}}"#,
+        r#"{{"user_public_key_hex":"{}","commitment_t1_hex":"{}","commitment_t2_hex":"{}","response_s_hex":"{}","nonce_hex":"{}"}}"#,
         ecpoint_to_hex(&proof.user_public_key),
         ecpoint_to_hex(&proof.commitment_t1),
         ecpoint_to_hex(&proof.commitment_t2),
-        scalar_to_hex(&proof.response_s)
+        scalar_to_hex(&proof.response_s),
+        scalar_to_hex(&proof.nonce)
     )
 }
 
@@ -123,6 +124,7 @@ fn json_to_reveal_token_proof(json_str: &str) -> Result<RevealTokenProof<Default
         commitment_t1: hex_to_ecpoint(val["commitment_t1"].as_str().unwrap_or(""))?,
         commitment_t2: hex_to_ecpoint(val["commitment_t2"].as_str().unwrap_or(""))?,
         response_s: hex_to_scalar(val["response_s"].as_str().unwrap_or(""))?,
+        nonce: hex_to_scalar(val["nonce"].as_str().unwrap_or(""))?,
     })
 }
 
@@ -145,10 +147,18 @@ fn json_val_to_jsvalue(s: String) -> JsValue {
 #[wasm_bindgen]
 impl WasmClientPlayer {
     #[wasm_bindgen(constructor)]
-    pub fn new() -> WasmClientPlayer {
+    pub fn new(wallet_address: &str) -> WasmClientPlayer {
         console_log("Creating client player");
         WasmClientPlayer {
-            inner: ClientPlayer::new(),
+            inner: ClientPlayer::new_with_wallet_address(wallet_address),
+        }
+    }
+
+    /// 根据钱包地址确定性生成密钥对（与 new 行为相同，显式命名）
+    pub fn new_with_wallet_address(wallet_address: &str) -> WasmClientPlayer {
+        console_log("Creating client player with wallet address");
+        WasmClientPlayer {
+            inner: ClientPlayer::new_with_wallet_address(wallet_address),
         }
     }
 

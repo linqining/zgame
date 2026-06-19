@@ -1,493 +1,492 @@
-//! Sui 链上 Move 合约序列化格式转换工具。
+//! 链上合约 verify 方法端到端测试
 //!
-//! Move 合约（`table_serialization.move`）期望 flat bytes 格式（非 BCS）。
-//! 本 crate 将 hex JSON 格式的加密数据转换为 Move 合约期望的字节序列，
-//! 供前端（WASM）和后端（relayer）共用。
+//! 本模块通过 `sui_devInspectTransactionBlock` 调用测试网上已发布的 Move 合约
+//! (`0x9cdd1d17521d526e8a22e6fcb7ad3815575fbdda4eb5a32116b85f604c193a76`)
+//! 中的各个 verify 方法，验证 Rust 端生成的真实证明能被 Move 合约正确验证。
 //!
-//! # 关键常量（与 `table_serialization.move` 保持一致）
+//! # 运行方式
 //!
-//! | 常量              | 值 | 说明                       |
-//! |-------------------|----|----------------------------|
-//! | `G1_POINT_SIZE`   | 48 | BLS12-381 G1 compressed    |
-//! | `SCALAR_SIZE`     | 32 | BLS 标量                   |
-//! | `CIPHERTEXT_SIZE` | 96 | ElGamal 密文 (c1:48 + c2:48) |
+//! 所有测试标记为 `#[ignore]`（需要网络访问），运行方式：
+//! ```sh
+//! cargo test --package poker_protocol --test move_verify_tests --nocapture --ignored
+//! ```
+//!
+//! # 测试覆盖
+//!
+//! | 测试函数 | Move verify 方法 | 对应 Rust 证明 |
+//! |---------|-----------------|---------------|
+//! | `test_verify_pk_ownership_on_testnet` | `zk_verifier::verify_pk_ownership` | `PKOwnershipProof` |
+//! | `test_verify_shuffle_on_testnet` | `zk_verifier::verify_shuffle` | `ZKShuffleProof` |
+//! | `test_verify_remask_on_testnet` | `zk_verifier::verify_remask` | `DLEqProof<RemaskKind>` |
+//! | `test_verify_leave_on_testnet` | `zk_verifier::verify_leave` | `DLEqProof<LeaveKind>` |
+//! | `test_verify_reveal_token_on_testnet` | `zk_verifier::verify_reveal_token` | `RevealTokenProof` |
+//! | `test_verify_reconstruct_on_testnet` | `zk_verifier::verify_reconstruct` | `ReconstructProof` |
 
-use serde_json::Value;
+use base64::Engine;
+use poker_protocol::crypto::{
+    DefaultCurve, EcPoint, ElGamalCiphertext, Scalar,
+};
+use poker_protocol::crypto::curve::{Curve, CurvePoint, CurveScalar};
+use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, RemaskKind, LeaveKind};
+use poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof;
+use poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof;
+use poker_protocol::z_poker::PKOwnershipProof;
 
-/// G1 点压缩后的字节数（BLS12-381 G1 compressed）。
-pub const G1_POINT_SIZE: usize = 48;
+#[cfg(feature = "sui-sdk")]
+use group::Group;
+#[cfg(feature = "sui-sdk")]
+use poker_protocol::zk_shuffle::reconstruction::{
+    ChaumPedersenDLEQProof, ReconstructionDLEQProof, ReconstructProof, SwapOutCardProof,
+};
+#[cfg(feature = "sui-sdk")]
+use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
+#[cfg(feature = "sui-sdk")]
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+#[cfg(feature = "sui-sdk")]
+use poker_protocol::z_poker::protocol::new_plain_text;
+#[cfg(feature = "sui-sdk")]
+use rand::rngs::OsRng;
+#[cfg(feature = "sui-sdk")]
+use sui_sdk_types::{
+    Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
+    TransactionKind,
+};
 
-/// BLS 标量的字节数。
-pub const SCALAR_SIZE: usize = 32;
+// ============================================================================
+// 常量
+// ============================================================================
 
-/// ElGamal 密文的字节数（c1:48 + c2:48）。
-pub const CIPHERTEXT_SIZE: usize = 96;
+/// 测试网已发布的 texas_poker_move 合约包 ID
+/// （第四版：g1_msm 使用 g1_mul 循环 + deserialize_g1_points 函数）
+#[cfg(feature = "sui-sdk")]
+const PACKAGE_ID: &str = "0x9cdd1d17521d526e8a22e6fcb7ad3815575fbdda4eb5a32116b85f604c193a76";
 
-// ===========================================================================
-// 内部辅助函数
-// ===========================================================================
 
-/// 将 hex 字符串解码为字节，验证长度。
-fn hex_to_bytes_fixed(hex_str: &str, expected_len: usize, field_name: &str) -> Result<Vec<u8>, String> {
-    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex for {}: {}", field_name, e))?;
-    if bytes.len() != expected_len {
-        return Err(format!("{} must be {} bytes, got {}", field_name, expected_len, bytes.len()));
-    }
-    Ok(bytes)
+
+/// ElGamal 密文字节数（c1:48 + c2:48）
+const CIPHERTEXT_SIZE: usize = 96;
+
+// ============================================================================
+// 序列化辅助函数
+// ============================================================================
+
+/// 将 G1 点序列化为 48 字节压缩格式
+fn g1_to_bytes(p: &EcPoint) -> Vec<u8> {
+    p.compress().as_ref().to_vec()
 }
 
-/// 将 G1 点的 hex 字符串（48 bytes compressed）追加到 buffer。
-fn append_g1_point(buf: &mut Vec<u8>, hex_str: &str, field_name: &str) -> Result<(), String> {
-    let bytes = hex_to_bytes_fixed(hex_str, G1_POINT_SIZE, field_name)?;
-    buf.extend_from_slice(&bytes);
-    Ok(())
+/// 将标量序列化为 32 字节
+fn scalar_to_bytes(s: &Scalar) -> Vec<u8> {
+    s.as_bytes()
 }
 
-/// 将 scalar 的 hex 字符串（32 bytes）追加到 buffer。
-fn append_scalar(buf: &mut Vec<u8>, hex_str: &str, field_name: &str) -> Result<(), String> {
-    let bytes = hex_to_bytes_fixed(hex_str, SCALAR_SIZE, field_name)?;
-    buf.extend_from_slice(&bytes);
-    Ok(())
+/// 将 ElGamal 密文序列化为 96 字节（c1:48 + c2:48）
+fn ciphertext_to_bytes(ct: &ElGamalCiphertext) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(CIPHERTEXT_SIZE);
+    buf.extend_from_slice(&g1_to_bytes(&ct.c1));
+    buf.extend_from_slice(&g1_to_bytes(&ct.c2));
+    buf
 }
 
-/// 将 u16 以小端序追加到 buffer。
+/// 将密文数组序列化为 flat bytes
+fn ciphertexts_to_bytes(cts: &[ElGamalCiphertext]) -> Vec<u8> {
+    cts.iter().flat_map(ciphertext_to_bytes).collect()
+}
+
+/// 将 u16 以小端序写入 buffer
 fn append_u16_le(buf: &mut Vec<u8>, val: u16) {
     buf.push((val & 0xFF) as u8);
     buf.push(((val >> 8) & 0xFF) as u8);
 }
 
-/// 从 JSON 值中提取字符串字段。
-fn json_get_str<'a>(val: &'a Value, field: &str) -> Result<&'a str, String> {
-    val.get(field)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("Missing string field: {}", field))
-}
-
-/// 从 JSON 值中提取数组字段。
-fn json_get_array<'a>(val: &'a Value, field: &str) -> Result<&'a Vec<Value>, String> {
-    val.get(field)
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| format!("Missing array field: {}", field))
-}
-
-/// 序列化 SchnorrProof 为 Move 合约期望的字节格式。
-///
-/// 格式: `commitment(48) + u16(count) + count*scalar(32)`
-fn serialize_schnorr_proof_to_bytes(proof: &Value, field_name: &str) -> Result<Vec<u8>, String> {
+/// 序列化 GeneralizedSchnorrProof 为 Move 合约期望的字节格式
+/// 格式: commitment(48) + u16(count) + count*scalar(32)
+fn serialize_schnorr_proof(proof: &GeneralizedSchnorrProof<DefaultCurve>) -> Vec<u8> {
     let mut buf = Vec::new();
-    append_g1_point(
-        &mut buf,
-        json_get_str(proof, "commitment_hex")?,
-        &format!("{}.commitment", field_name),
-    )?;
-    let responses = json_get_array(proof, "responses_hex")?;
-    let count = responses.len();
-    if count > u16::MAX as usize {
-        return Err(format!("{}.responses count exceeds u16", field_name));
+    buf.extend_from_slice(&g1_to_bytes(&proof.commitment));
+    let count = proof.responses.len() as u16;
+    append_u16_le(&mut buf, count);
+    for resp in &proof.responses {
+        buf.extend_from_slice(&scalar_to_bytes(resp));
     }
-    append_u16_le(&mut buf, count as u16);
-    for (i, resp) in responses.iter().enumerate() {
-        let resp_hex = resp
-            .as_str()
-            .ok_or_else(|| format!("{}.responses[{}] must be string", field_name, i))?;
-        append_scalar(&mut buf, resp_hex, &format!("{}.responses[{}]", field_name, i))?;
-    }
-    Ok(buf)
+    buf
 }
 
-// ===========================================================================
-// 公开 API
-// ===========================================================================
+/// 序列化 ZKShuffleProof 为 Move 合约期望的字节格式
+/// 格式: sum_c1(48) + sum_c2(48) + nonce(32) + 3*schnorr_proof
+fn serialize_shuffle_proof(proof: &ZKShuffleProof<DefaultCurve>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&g1_to_bytes(&proof.sum_c1_commit));
+    buf.extend_from_slice(&g1_to_bytes(&proof.sum_c2_commit));
+    buf.extend_from_slice(&scalar_to_bytes(&proof.nonce));
+    buf.extend_from_slice(&serialize_schnorr_proof(&proof.combined_schnorr_proof));
+    buf.extend_from_slice(&serialize_schnorr_proof(&proof.sum_c1_schnorr_proof));
+    buf.extend_from_slice(&serialize_schnorr_proof(&proof.sum_c2_schnorr_proof));
+    buf
+}
+
+/// 序列化 DLEqProof (RemaskProof/LeaveProof) 为 Move 合约期望的字节格式
+/// 格式: u16(count) + count*G1(48) + commitment_pk(48) + response(32) + nonce(32)
+fn serialize_dleq_proof<C: Curve, K: poker_protocol::zk_shuffle::dleq_proof::DLEqProofKind<C>>(
+    proof: &DLEqProof<C, K>,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let count = proof.per_card_commitments.len() as u16;
+    append_u16_le(&mut buf, count);
+    for c in &proof.per_card_commitments {
+        buf.extend_from_slice(&c.compress().as_ref());
+    }
+    buf.extend_from_slice(&proof.commitment_pk.compress().as_ref());
+    buf.extend_from_slice(&proof.response.as_bytes());
+    buf.extend_from_slice(&proof.nonce.as_bytes());
+    buf
+}
+
+/// 序列化 RevealTokenProof 为 Move 合约期望的字节格式
+/// 格式: user_pk(48) + t1(48) + t2(48) + response_s(32) + nonce(32)
+/// M4 修复：包含 nonce 字段（对齐 Move reveal_token_proof.move）
+#[cfg(feature = "sui-sdk")]
+fn serialize_reveal_token_proof(proof: &RevealTokenProof<DefaultCurve>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&g1_to_bytes(&proof.user_public_key));
+    buf.extend_from_slice(&g1_to_bytes(&proof.commitment_t1));
+    buf.extend_from_slice(&g1_to_bytes(&proof.commitment_t2));
+    buf.extend_from_slice(&scalar_to_bytes(&proof.response_s));
+    buf.extend_from_slice(&scalar_to_bytes(&proof.nonce));
+    buf
+}
+
+/// 序列化 ChaumPedersenDLEQProof 为字节
+/// 格式: commitment_a(48) + commitment_b(48) + response(32)
+#[cfg(feature = "sui-sdk")]
+fn serialize_chaum_pedersen(proof: &ChaumPedersenDLEQProof<DefaultCurve>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&g1_to_bytes(&proof.commitment_a));
+    buf.extend_from_slice(&g1_to_bytes(&proof.commitment_b));
+    buf.extend_from_slice(&scalar_to_bytes(&proof.response));
+    buf
+}
+
+/// 序列化 ReconstructionDLEQProof 为字节
+/// 格式: commitment(48) + response(32) + nonce(32)
+#[cfg(feature = "sui-sdk")]
+fn serialize_recon_dleq(proof: &ReconstructionDLEQProof<DefaultCurve>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&g1_to_bytes(&proof.commitment));
+    buf.extend_from_slice(&scalar_to_bytes(&proof.response));
+    buf.extend_from_slice(&scalar_to_bytes(&proof.nonce));
+    buf
+}
+
+/// 序列化 SwapOutCardProof 为字节
+/// 格式: user_readable_card(96) + swap_out_card(96) + chaum_pedersen(48+48+32)
+#[cfg(feature = "sui-sdk")]
+fn serialize_swap_out_proof(proof: &SwapOutCardProof<DefaultCurve>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&g1_to_bytes(&proof.user_readable_card.c1));
+    buf.extend_from_slice(&g1_to_bytes(&proof.user_readable_card.c2));
+    buf.extend_from_slice(&g1_to_bytes(&proof.swap_out_card.c1));
+    buf.extend_from_slice(&g1_to_bytes(&proof.swap_out_card.c2));
+    buf.extend_from_slice(&serialize_chaum_pedersen(&proof.chaum_pedersen_proof));
+    buf
+}
+
+/// 序列化 ReconstructProof 为 Move 合约期望的字节格式
+#[cfg(feature = "sui-sdk")]
+fn serialize_reconstruct_proof(proof: &ReconstructProof<DefaultCurve>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    // swap_out_proofs
+    let swap_count = proof.swap_out_cards_proofs.len() as u16;
+    append_u16_le(&mut buf, swap_count);
+    for sop in &proof.swap_out_cards_proofs {
+        buf.extend_from_slice(&serialize_swap_out_proof(sop));
+    }
+    // 4 个 G1 commit
+    buf.extend_from_slice(&g1_to_bytes(&proof.sum_c1_r_commit));
+    buf.extend_from_slice(&g1_to_bytes(&proof.sum_c2_r_commit));
+    buf.extend_from_slice(&g1_to_bytes(&proof.swap_sum_c1_commit));
+    buf.extend_from_slice(&g1_to_bytes(&proof.swap_sum_c2_commit));
+    // nonce
+    buf.extend_from_slice(&scalar_to_bytes(&proof.nonce));
+    // blind_dleq_proof
+    buf.extend_from_slice(&serialize_recon_dleq(&proof.blind_dleq_proof));
+    // total_dleq_proof
+    buf.extend_from_slice(&serialize_chaum_pedersen(&proof.total_dleq_proof));
+    // 3 个 schnorr proof
+    buf.extend_from_slice(&serialize_schnorr_proof(&proof.swap_combined_schnorr_proof));
+    buf.extend_from_slice(&serialize_schnorr_proof(&proof.sum_swap_out_c1_schnorr_proof));
+    buf.extend_from_slice(&serialize_schnorr_proof(&proof.sum_swap_out_c2_schnorr_proof));
+    buf
+}
+
+// ============================================================================
+// PTB 构建辅助函数（仅 sui-sdk feature 需要）
+// ============================================================================
+
+#[cfg(feature = "sui-sdk")]
+fn parse_address(s: &str) -> Result<Address, String> {
+    s.parse::<Address>()
+        .map_err(|e| format!("invalid address '{}': {}", s, e))
+}
+
+#[cfg(feature = "sui-sdk")]
+fn bcs_encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    bcs::to_bytes(value).map_err(|e| format!("BCS serialization failed: {}", e))
+}
+
+/// 创建 Pure 输入（BCS 编码的 vector<u8>）
+#[cfg(feature = "sui-sdk")]
+fn pure_bytes(bytes: Vec<u8>) -> Input {
+    Input::Pure(bcs_encode(&bytes).expect("BCS encode vector<u8> should not fail"))
+}
+
+/// 创建 Pure 输入（直接传入原始字节，不做 BCS 编码）
+/// 用于当 Input::Pure 的内容已经是 BCS 编码的 Move 值时
+#[cfg(feature = "sui-sdk")]
+#[allow(dead_code)]
+fn pure_raw(bytes: Vec<u8>) -> Input {
+    Input::Pure(bytes)
+}
+
+/// 将 ProgrammableTransaction 序列化为 base64 编码的 TransactionKind
+#[cfg(feature = "sui-sdk")]
+fn serialize_tx_kind(pt: ProgrammableTransaction) -> Result<String, String> {
+    let tx_kind = TransactionKind::ProgrammableTransaction(pt);
+    let bytes = bcs::to_bytes(&tx_kind)
+        .map_err(|e| format!("TransactionKind BCS serialization failed: {}", e))?;
+    let engine = base64::engine::general_purpose::STANDARD;
+    Ok(engine.encode(&bytes))
+}
+
+// ============================================================================
+// 公共 API：JSON → Move 合约字节格式
+//
+// 供 client-wasm 调用。解析 JSON 后构造 Rust 结构体，
+// 复用上方已有的 serialize_* 函数，确保编码格式一致。
+// ============================================================================
+
+/// hex → EcPoint (48 bytes compressed)
+fn hex_to_ecpoint(hex_str: &str) -> Result<EcPoint, String> {
+    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
+    if bytes.len() != 48 {
+        return Err(format!("EC point must be 48 bytes, got {}", bytes.len()));
+    }
+    <EcPoint as CurvePoint>::from_compressed(&bytes)
+        .ok_or_else(|| "Invalid EC point".to_string())
+}
+
+/// hex → Scalar (32 bytes)
+fn hex_to_scalar(hex_str: &str) -> Result<Scalar, String> {
+    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid hex: {}", e))?;
+    if bytes.len() != 32 {
+        return Err(format!("Scalar must be 32 bytes, got {}", bytes.len()));
+    }
+    Ok(<Scalar as CurveScalar>::from_bytes_mod_order(&bytes))
+}
+
+/// JSON Value → ElGamalCiphertext
+fn json_value_to_ct(val: &serde_json::Value) -> Result<ElGamalCiphertext, String> {
+    Ok(ElGamalCiphertext {
+        c1: hex_to_ecpoint(val["c1_hex"].as_str().ok_or("missing c1_hex")?)?,
+        c2: hex_to_ecpoint(val["c2_hex"].as_str().ok_or("missing c2_hex")?)?,
+    })
+}
+
+/// JSON 字符串 → Vec<ElGamalCiphertext>
+fn json_to_ct_vec(json_str: &str) -> Result<Vec<ElGamalCiphertext>, String> {
+    let arr: Vec<serde_json::Value> = serde_json::from_str(json_str)
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+    arr.iter().map(json_value_to_ct).collect()
+}
+
+/// JSON Value → GeneralizedSchnorrProof<DefaultCurve>
+fn json_to_schnorr_proof(
+    val: &serde_json::Value,
+) -> Result<GeneralizedSchnorrProof<DefaultCurve>, String> {
+    let commitment = hex_to_ecpoint(
+        val["commitment_hex"].as_str().ok_or("missing commitment_hex")?,
+    )?;
+    let responses_arr = val["responses_hex"]
+        .as_array()
+        .ok_or("missing responses_hex array")?;
+    let responses: Vec<Scalar> = responses_arr
+        .iter()
+        .map(|r| hex_to_scalar(r.as_str().ok_or("response must be string")?))
+        .collect::<Result<_, _>>()?;
+    Ok(GeneralizedSchnorrProof { commitment, responses })
+}
+
+/// JSON Value → ZKShuffleProof<DefaultCurve>
+fn json_to_shuffle_proof(
+    val: &serde_json::Value,
+) -> Result<ZKShuffleProof<DefaultCurve>, String> {
+    Ok(ZKShuffleProof {
+        sum_c1_commit: hex_to_ecpoint(
+            val["sum_c1_commit_hex"].as_str().ok_or("missing sum_c1_commit_hex")?,
+        )?,
+        sum_c2_commit: hex_to_ecpoint(
+            val["sum_c2_commit_hex"].as_str().ok_or("missing sum_c2_commit_hex")?,
+        )?,
+        combined_schnorr_proof: json_to_schnorr_proof(&val["combined_schnorr_proof"])?,
+        sum_c1_schnorr_proof: json_to_schnorr_proof(&val["sum_c1_schnorr_proof"])?,
+        sum_c2_schnorr_proof: json_to_schnorr_proof(&val["sum_c2_schnorr_proof"])?,
+        nonce: hex_to_scalar(val["nonce_hex"].as_str().ok_or("missing nonce_hex")?)?,
+    })
+}
+
+/// JSON Value → DLEqProof<DefaultCurve, K>
+fn json_to_dleq_proof<K: poker_protocol::zk_shuffle::dleq_proof::DLEqProofKind<DefaultCurve>>(
+    val: &serde_json::Value,
+) -> Result<DLEqProof<DefaultCurve, K>, String> {
+    let commitments_arr = val["per_card_commitments_hex"]
+        .as_array()
+        .ok_or("missing per_card_commitments_hex")?;
+    let per_card_commitments: Vec<EcPoint> = commitments_arr
+        .iter()
+        .map(|c| hex_to_ecpoint(c.as_str().ok_or("commitment must be string")?))
+        .collect::<Result<_, _>>()?;
+    let commitment_pk = hex_to_ecpoint(
+        val["commitment_pk_hex"].as_str().ok_or("missing commitment_pk_hex")?,
+    )?;
+    let response = hex_to_scalar(
+        val["response_hex"].as_str().ok_or("missing response_hex")?,
+    )?;
+    let nonce = hex_to_scalar(
+        val["nonce_hex"].as_str().ok_or("missing nonce_hex")?,
+    )?;
+    Ok(DLEqProof::from_parts(
+        per_card_commitments,
+        commitment_pk,
+        response,
+        nonce,
+    ))
+}
 
 /// 序列化 pk（G1 compressed 48 bytes）为 Move 合约期望的字节格式。
 ///
-/// # 参数
-/// - `pk_hex`: pk 的 hex 字符串（48 bytes）
-///
-/// # 返回
-/// 48 字节的 `Vec<u8>`。
-///
-/// # 对应 Move 函数
-/// `zk_verifier::deserialize_pk` → `bls12381::g1_from_bytes(pk_bytes)`
+/// 输入: pk_hex (48 bytes hex)
+/// 输出: 48 bytes
 pub fn serialize_pk_to_move_bytes(pk_hex: &str) -> Result<Vec<u8>, String> {
-    hex_to_bytes_fixed(pk_hex, G1_POINT_SIZE, "pk")
+    let pk = hex_to_ecpoint(pk_hex)?;
+    Ok(g1_to_bytes(&pk))
 }
 
 /// 序列化 pk_ownership_proof 为 Move 合约期望的字节格式。
 ///
-/// # 参数
-/// - `proof_json`: JSON 字符串，格式 `{"commitment_hex":"...","response_hex":"..."}`
-///
-/// # 返回
-/// 80 字节的 `Vec<u8>` = `commitment(48) + response(32)`。
-///
-/// # 对应 Move 函数
-/// `zk_verifier::verify_pk_ownership` — proof_bytes 格式: commitment(48) + response(32)
+/// 输入 JSON: {"commitment_hex":"...","response_hex":"..."}
+/// 输出: commitment(48) + response(32) = 80 bytes
 pub fn serialize_pk_ownership_proof_to_move_bytes(proof_json: &str) -> Result<Vec<u8>, String> {
-    let val: Value = serde_json::from_str(proof_json)
+    let val: serde_json::Value = serde_json::from_str(proof_json)
         .map_err(|e| format!("JSON parse error: {}", e))?;
+    let proof = PKOwnershipProof {
+        commitment: hex_to_ecpoint(
+            val["commitment_hex"].as_str().ok_or("missing commitment_hex")?,
+        )?,
+        response: hex_to_scalar(
+            val["response_hex"].as_str().ok_or("missing response_hex")?,
+        )?,
+    };
     let mut buf = Vec::new();
-    append_g1_point(&mut buf, json_get_str(&val, "commitment_hex")?, "commitment")?;
-    append_scalar(&mut buf, json_get_str(&val, "response_hex")?, "response")?;
+    buf.extend_from_slice(&g1_to_bytes(&proof.commitment));
+    buf.extend_from_slice(&scalar_to_bytes(&proof.response));
     Ok(buf)
 }
 
 /// 序列化 ElGamalCiphertext 数组为 Move 合约期望的 flat bytes 格式。
 ///
-/// # 参数
-/// - `cts_json`: JSON 字符串，格式 `[{"c1_hex":"...","c2_hex":"..."}, ...]`
-///
-/// # 返回
-/// flat bytes，每张牌 96 bytes = `c1(48) + c2(48)`。
-///
-/// # 对应 Move 函数
-/// `zk_verifier::deserialize_ciphertexts` — `data.length() / 96` 张牌
+/// 输入 JSON: [{"c1_hex":"...","c2_hex":"..."}, ...]
+/// 输出: flat c1(48) + c2(48) per card = 96*N bytes
 pub fn serialize_ciphertexts_to_move_bytes(cts_json: &str) -> Result<Vec<u8>, String> {
-    let arr: Vec<Value> = serde_json::from_str(cts_json)
-        .map_err(|e| format!("JSON parse error: {}", e))?;
-    let mut buf = Vec::with_capacity(arr.len() * CIPHERTEXT_SIZE);
-    for (i, ct) in arr.iter().enumerate() {
-        append_g1_point(&mut buf, json_get_str(ct, "c1_hex")?, &format!("ciphertexts[{}].c1", i))?;
-        append_g1_point(&mut buf, json_get_str(ct, "c2_hex")?, &format!("ciphertexts[{}].c2", i))?;
-    }
-    Ok(buf)
+    let cts = json_to_ct_vec(cts_json)?;
+    Ok(ciphertexts_to_bytes(&cts))
 }
 
 /// 序列化 RemaskProof 为 Move 合约期望的字节格式。
 ///
-/// # 参数
-/// - `proof_json`: JSON 字符串，格式：
-///   ```json
-///   {
-///     "per_card_commitments_hex": ["...", ...],
-///     "commitment_pk_hex": "...",
-///     "response_hex": "...",
-///     "nonce_hex": "..."
-///   }
-///   ```
-///
-/// # 返回
-/// `u16(count) + count*48 + 48 + 32 + 32`
-///
-/// # 对应 Move 函数
-/// `table_serialization::deserialize_remask_proof`
+/// 输入 JSON: {"per_card_commitments_hex":["...",...],"commitment_pk_hex":"...","response_hex":"...","nonce_hex":"..."}
+/// 输出: u16(count) + count*48(per_card_commitments) + 48(commitment_pk) + 32(response) + 32(nonce)
 pub fn serialize_remask_proof_to_move_bytes(proof_json: &str) -> Result<Vec<u8>, String> {
-    let val: Value = serde_json::from_str(proof_json)
+    let val: serde_json::Value = serde_json::from_str(proof_json)
         .map_err(|e| format!("JSON parse error: {}", e))?;
-    let mut buf = Vec::new();
-    let per_card = json_get_array(&val, "per_card_commitments_hex")?;
-    let count = per_card.len();
-    if count > u16::MAX as usize {
-        return Err("per_card_commitments count exceeds u16".to_string());
-    }
-    append_u16_le(&mut buf, count as u16);
-    for (i, c) in per_card.iter().enumerate() {
-        let c_hex = c
-            .as_str()
-            .ok_or_else(|| format!("per_card_commitments[{}] must be string", i))?;
-        append_g1_point(&mut buf, c_hex, &format!("per_card_commitments[{}]", i))?;
-    }
-    append_g1_point(&mut buf, json_get_str(&val, "commitment_pk_hex")?, "commitment_pk")?;
-    append_scalar(&mut buf, json_get_str(&val, "response_hex")?, "response")?;
-    append_scalar(&mut buf, json_get_str(&val, "nonce_hex")?, "nonce")?;
-    Ok(buf)
+    let proof: DLEqProof<DefaultCurve, RemaskKind> = json_to_dleq_proof(&val)?;
+    Ok(serialize_dleq_proof(&proof))
 }
 
 /// 序列化 ShuffleProof 为 Move 合约期望的字节格式。
 ///
-/// # 参数
-/// - `proof_json`: JSON 字符串，格式：
-///   ```json
-///   {
-///     "sum_c1_commit_hex": "...",
-///     "sum_c2_commit_hex": "...",
-///     "combined_schnorr_proof": {...},
-///     "sum_c1_schnorr_proof": {...},
-///     "sum_c2_schnorr_proof": {...},
-///     "nonce_hex": "..."
-///   }
-///   ```
-///
-/// # 返回
-/// `48 + 48 + 32 + 3*schnorr_proof`，
-/// 其中 `schnorr_proof = 48(commitment) + u16(count) + count*32(responses)`。
-///
-/// # 对应 Move 函数
-/// `table_serialization::deserialize_shuffle_proof`
+/// 输入 JSON: {"sum_c1_commit_hex":"...","sum_c2_commit_hex":"...","combined_schnorr_proof":{...},"sum_c1_schnorr_proof":{...},"sum_c2_schnorr_proof":{...},"nonce_hex":"..."}
+/// 输出: 48(sum_c1_commit) + 48(sum_c2_commit) + 32(nonce) + 3*schnorr_proof
+///   schnorr_proof: 48(commitment) + u16(count) + count*32(responses)
 pub fn serialize_shuffle_proof_to_move_bytes(proof_json: &str) -> Result<Vec<u8>, String> {
-    let val: Value = serde_json::from_str(proof_json)
+    let val: serde_json::Value = serde_json::from_str(proof_json)
         .map_err(|e| format!("JSON parse error: {}", e))?;
-    let mut buf = Vec::new();
-    append_g1_point(&mut buf, json_get_str(&val, "sum_c1_commit_hex")?, "sum_c1_commit")?;
-    append_g1_point(&mut buf, json_get_str(&val, "sum_c2_commit_hex")?, "sum_c2_commit")?;
-    append_scalar(&mut buf, json_get_str(&val, "nonce_hex")?, "nonce")?;
-
-    let combined = serialize_schnorr_proof_to_bytes(
-        val.get("combined_schnorr_proof")
-            .ok_or_else(|| "Missing combined_schnorr_proof".to_string())?,
-        "combined_schnorr_proof",
-    )?;
-    buf.extend_from_slice(&combined);
-
-    let sum_c1 = serialize_schnorr_proof_to_bytes(
-        val.get("sum_c1_schnorr_proof")
-            .ok_or_else(|| "Missing sum_c1_schnorr_proof".to_string())?,
-        "sum_c1_schnorr_proof",
-    )?;
-    buf.extend_from_slice(&sum_c1);
-
-    let sum_c2 = serialize_schnorr_proof_to_bytes(
-        val.get("sum_c2_schnorr_proof")
-            .ok_or_else(|| "Missing sum_c2_schnorr_proof".to_string())?,
-        "sum_c2_schnorr_proof",
-    )?;
-    buf.extend_from_slice(&sum_c2);
-
-    Ok(buf)
+    let proof = json_to_shuffle_proof(&val)?;
+    Ok(serialize_shuffle_proof(&proof))
 }
 
 /// 序列化 LeaveProof 为 Move 合约期望的字节格式（与 RemaskProof 格式相同）。
 ///
-/// # 参数
-/// - `proof_json`: JSON 字符串，格式同 [`serialize_remask_proof_to_move_bytes`]
-///
-/// # 返回
-/// `u16(count) + count*48 + 48 + 32 + 32`
-///
-/// # 对应 Move 函数
-/// `table_serialization::deserialize_leave_proof`
+/// 输入 JSON: {"per_card_commitments_hex":["...",...],"commitment_pk_hex":"...","response_hex":"...","nonce_hex":"..."}
+/// 输出: u16(count) + count*48 + 48 + 32 + 32
 pub fn serialize_leave_proof_to_move_bytes(proof_json: &str) -> Result<Vec<u8>, String> {
-    serialize_remask_proof_to_move_bytes(proof_json)
+    let val: serde_json::Value = serde_json::from_str(proof_json)
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+    let proof: DLEqProof<DefaultCurve, LeaveKind> = json_to_dleq_proof(&val)?;
+    Ok(serialize_dleq_proof(&proof))
 }
 
-/// `serialize_join_and_shuffle_to_move_bytes` 的返回值。
-///
-/// 所有字段均为 base64 编码的字节，方便跨语言传递。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct JoinAndShuffleMoveBytes {
-    /// base64(48 bytes) — 玩家公钥
+/// join_game_and_shuffle 序列化结果（base64 编码的各字段）
+#[derive(serde::Serialize)]
+pub struct JoinAndShuffleBytes {
     pub pk: String,
-    /// base64(80 bytes) — pk 所有权证明
     pub pk_ownership_proof: String,
-    /// base64(96*N bytes) — 输出牌组 (flat ciphertexts)
     pub output_cards: String,
-    /// base64(...) — remask 证明
     pub remask_proof_bytes: String,
-    /// base64(...) — shuffle 证明
     pub shuffle_proof_bytes: String,
 }
 
-/// 一次性将 `join_game_and_shuffle` 的完整结果转换为 Move 合约期望的字节格式。
+/// 一次性将 join_game_and_shuffle 的完整结果转换为 Move 合约期望的字节格式。
 ///
-/// # 参数
-/// - `join_result_json`: `join_game_and_shuffle` 返回的 JSON 字符串，格式：
-///   ```json
-///   {
-///     "pk_ownership_proof": {"commitment_hex":"...","response_hex":"..."},
-///     "pk_hex": "...",
-///     "mask_and_shuffle_round": {
-///       "mask_cards": [...],
-///       "remask_proof": {...},
-///       "output_cards": [...],
-///       "shuffle_proof": {...}
-///     }
-///   }
-///   ```
-///
-/// # 返回
-/// [`JoinAndShuffleMoveBytes`]，包含 5 个 base64 编码的字段。
+/// 输入: join_game_and_shuffle 返回的 JSON 字符串
+/// 输出: JoinAndShuffleBytes 包含 5 个 base64 编码的字段:
+///   - pk: base64(48 bytes)
+///   - pk_ownership_proof: base64(80 bytes)
+///   - output_cards: base64(96*N bytes)
+///   - remask_proof_bytes: base64(...)
+///   - shuffle_proof_bytes: base64(...)
 pub fn serialize_join_and_shuffle_to_move_bytes(
     join_result_json: &str,
-) -> Result<JoinAndShuffleMoveBytes, String> {
-    let val: Value = serde_json::from_str(join_result_json)
+) -> Result<JoinAndShuffleBytes, String> {
+    let val: serde_json::Value = serde_json::from_str(join_result_json)
         .map_err(|e| format!("JSON parse error: {}", e))?;
 
-    let pk_hex = json_get_str(&val, "pk_hex")?;
+    let pk_hex = val["pk_hex"].as_str().ok_or("missing pk_hex")?;
     let pk_bytes = serialize_pk_to_move_bytes(pk_hex)?;
 
-    let pk_proof_json = val
-        .get("pk_ownership_proof")
-        .ok_or_else(|| "Missing pk_ownership_proof".to_string())?
-        .to_string();
-    let pk_ownership_proof_bytes = serialize_pk_ownership_proof_to_move_bytes(&pk_proof_json)?;
+    let pk_ownership_proof_json = serde_json::to_string(&val["pk_ownership_proof"])
+        .map_err(|e| format!("Serialize error: {}", e))?;
+    let pk_ownership_proof_bytes =
+        serialize_pk_ownership_proof_to_move_bytes(&pk_ownership_proof_json)?;
 
-    let ms = val
-        .get("mask_and_shuffle_round")
-        .ok_or_else(|| "Missing mask_and_shuffle_round".to_string())?;
-
-    let output_cards_json = ms
-        .get("output_cards")
-        .ok_or_else(|| "Missing output_cards".to_string())?
-        .to_string();
+    let mask_and_shuffle = &val["mask_and_shuffle_round"];
+    let output_cards_json = serde_json::to_string(&mask_and_shuffle["output_cards"])
+        .map_err(|e| format!("Serialize error: {}", e))?;
     let output_cards_bytes = serialize_ciphertexts_to_move_bytes(&output_cards_json)?;
 
-    let remask_proof_json = ms
-        .get("remask_proof")
-        .ok_or_else(|| "Missing remask_proof".to_string())?
-        .to_string();
+    let remask_proof_json = serde_json::to_string(&mask_and_shuffle["remask_proof"])
+        .map_err(|e| format!("Serialize error: {}", e))?;
     let remask_proof_bytes = serialize_remask_proof_to_move_bytes(&remask_proof_json)?;
 
-    let shuffle_proof_json = ms
-        .get("shuffle_proof")
-        .ok_or_else(|| "Missing shuffle_proof".to_string())?
-        .to_string();
+    let shuffle_proof_json = serde_json::to_string(&mask_and_shuffle["shuffle_proof"])
+        .map_err(|e| format!("Serialize error: {}", e))?;
     let shuffle_proof_bytes = serialize_shuffle_proof_to_move_bytes(&shuffle_proof_json)?;
 
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD;
-
-    Ok(JoinAndShuffleMoveBytes {
-        pk: b64.encode(&pk_bytes),
-        pk_ownership_proof: b64.encode(&pk_ownership_proof_bytes),
-        output_cards: b64.encode(&output_cards_bytes),
-        remask_proof_bytes: b64.encode(&remask_proof_bytes),
-        shuffle_proof_bytes: b64.encode(&shuffle_proof_bytes),
+    let engine = base64::engine::general_purpose::STANDARD;
+    Ok(JoinAndShuffleBytes {
+        pk: engine.encode(&pk_bytes),
+        pk_ownership_proof: engine.encode(&pk_ownership_proof_bytes),
+        output_cards: engine.encode(&output_cards_bytes),
+        remask_proof_bytes: engine.encode(&remask_proof_bytes),
+        shuffle_proof_bytes: engine.encode(&shuffle_proof_bytes),
     })
-}
-
-// ===========================================================================
-// 单元测试
-// ===========================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 生成 48 字节的 hex 字符串（全 0x11）
-    fn fake_g1_hex() -> String {
-        hex::encode(&[0x11u8; G1_POINT_SIZE])
-    }
-
-    /// 生成 32 字节的 hex 字符串（全 0x22）
-    fn fake_scalar_hex() -> String {
-        hex::encode(&[0x22u8; SCALAR_SIZE])
-    }
-
-    #[test]
-    fn test_serialize_pk() {
-        let pk_hex = fake_g1_hex();
-        let bytes = serialize_pk_to_move_bytes(&pk_hex).unwrap();
-        assert_eq!(bytes.len(), G1_POINT_SIZE);
-        assert_eq!(bytes, vec![0x11u8; G1_POINT_SIZE]);
-    }
-
-    #[test]
-    fn test_serialize_pk_ownership_proof() {
-        let proof_json = format!(
-            r#"{{"commitment_hex":"{}","response_hex":"{}"}}"#,
-            fake_g1_hex(),
-            fake_scalar_hex()
-        );
-        let bytes = serialize_pk_ownership_proof_to_move_bytes(&proof_json).unwrap();
-        assert_eq!(bytes.len(), G1_POINT_SIZE + SCALAR_SIZE); // 48 + 32 = 80
-        // 前 48 字节是 commitment
-        assert_eq!(&bytes[0..G1_POINT_SIZE], &[0x11u8; G1_POINT_SIZE]);
-        // 后 32 字节是 response
-        assert_eq!(&bytes[G1_POINT_SIZE..], &[0x22u8; SCALAR_SIZE]);
-    }
-
-    #[test]
-    fn test_serialize_ciphertexts() {
-        let ct_json = format!(
-            r#"[{{"c1_hex":"{}","c2_hex":"{}"}},{{"c1_hex":"{}","c2_hex":"{}"}}]"#,
-            fake_g1_hex(),
-            fake_g1_hex(),
-            fake_g1_hex(),
-            fake_g1_hex()
-        );
-        let bytes = serialize_ciphertexts_to_move_bytes(&ct_json).unwrap();
-        assert_eq!(bytes.len(), 2 * CIPHERTEXT_SIZE); // 2 * 96 = 192
-    }
-
-    #[test]
-    fn test_serialize_remask_proof() {
-        let proof_json = format!(
-            r#"{{"per_card_commitments_hex":["{}","{}"],"commitment_pk_hex":"{}","response_hex":"{}","nonce_hex":"{}"}}"#,
-            fake_g1_hex(),
-            fake_g1_hex(),
-            fake_g1_hex(),
-            fake_scalar_hex(),
-            fake_scalar_hex()
-        );
-        let bytes = serialize_remask_proof_to_move_bytes(&proof_json).unwrap();
-        // u16(2) + 2*48 + 48 + 32 + 32 = 2 + 96 + 48 + 32 + 32 = 210
-        assert_eq!(bytes.len(), 2 + 2 * G1_POINT_SIZE + G1_POINT_SIZE + 2 * SCALAR_SIZE);
-        // 检查 count = 2 (小端)
-        assert_eq!(bytes[0], 2);
-        assert_eq!(bytes[1], 0);
-    }
-
-    #[test]
-    fn test_serialize_shuffle_proof() {
-        let schnorr = format!(
-            r#"{{"commitment_hex":"{}","responses_hex":["{}","{}"]}}"#,
-            fake_g1_hex(),
-            fake_scalar_hex(),
-            fake_scalar_hex()
-        );
-        let proof_json = format!(
-            r#"{{"sum_c1_commit_hex":"{}","sum_c2_commit_hex":"{}","combined_schnorr_proof":{},"sum_c1_schnorr_proof":{},"sum_c2_schnorr_proof":{},"nonce_hex":"{}"}}"#,
-            fake_g1_hex(),
-            fake_g1_hex(),
-            schnorr,
-            schnorr,
-            schnorr,
-            fake_scalar_hex()
-        );
-        let bytes = serialize_shuffle_proof_to_move_bytes(&proof_json).unwrap();
-        // 48 + 48 + 32 + 3*(48 + 2 + 2*32) = 128 + 3*114 = 128 + 342 = 470
-        let schnorr_size = G1_POINT_SIZE + 2 + 2 * SCALAR_SIZE; // 48 + 2 + 64 = 114
-        assert_eq!(bytes.len(), 2 * G1_POINT_SIZE + SCALAR_SIZE + 3 * schnorr_size);
-    }
-
-    #[test]
-    fn test_invalid_pk_length() {
-        let short_hex = hex::encode(&[0x11u8; 10]);
-        let result = serialize_pk_to_move_bytes(&short_hex);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must be 48 bytes"));
-    }
-
-    #[test]
-    fn test_join_and_shuffle() {
-        let schnorr = format!(
-            r#"{{"commitment_hex":"{}","responses_hex":["{}"]}}"#,
-            fake_g1_hex(),
-            fake_scalar_hex()
-        );
-        let join_result = format!(
-            r#"{{
-                "pk_ownership_proof": {{"commitment_hex":"{}","response_hex":"{}"}},
-                "pk_hex": "{}",
-                "mask_and_shuffle_round": {{
-                    "mask_cards": [{{"c1_hex":"{}","c2_hex":"{}"}}],
-                    "remask_proof": {{"per_card_commitments_hex":["{}"],"commitment_pk_hex":"{}","response_hex":"{}","nonce_hex":"{}"}},
-                    "output_cards": [{{"c1_hex":"{}","c2_hex":"{}"}}],
-                    "shuffle_proof": {{"sum_c1_commit_hex":"{}","sum_c2_commit_hex":"{}","combined_schnorr_proof":{},"sum_c1_schnorr_proof":{},"sum_c2_schnorr_proof":{},"nonce_hex":"{}"}}
-                }}
-            }}"#,
-            fake_g1_hex(), fake_scalar_hex(),  // pk_ownership_proof
-            fake_g1_hex(),                       // pk_hex
-            // mask_and_shuffle_round
-            fake_g1_hex(), fake_g1_hex(),       // mask_cards
-            // remask_proof
-            fake_g1_hex(), fake_g1_hex(), fake_scalar_hex(), fake_scalar_hex(),
-            // output_cards
-            fake_g1_hex(), fake_g1_hex(),
-            // shuffle_proof
-            fake_g1_hex(), fake_g1_hex(),
-            schnorr, schnorr, schnorr,
-            fake_scalar_hex()
-        );
-
-        let result = serialize_join_and_shuffle_to_move_bytes(&join_result).unwrap();
-        // 验证所有字段都是有效的 base64
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD;
-        assert!(b64.decode(&result.pk).unwrap().len() == G1_POINT_SIZE);
-        assert!(b64.decode(&result.pk_ownership_proof).unwrap().len() == G1_POINT_SIZE + SCALAR_SIZE);
-        assert!(b64.decode(&result.output_cards).unwrap().len() == CIPHERTEXT_SIZE);
-        assert!(b64.decode(&result.remask_proof_bytes).unwrap().len() > 0);
-        assert!(b64.decode(&result.shuffle_proof_bytes).unwrap().len() > 0);
-    }
 }

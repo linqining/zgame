@@ -38,7 +38,7 @@ const FormTitle = styled.h2`
   font-size: 1.5rem;
   font-weight: 700;
   text-align: center;
-  color: #0f172a;
+  color: ${({ theme }) => theme.colors.fontColorDark};
   margin-bottom: 2rem;
   letter-spacing: -0.02em;
 `;
@@ -64,27 +64,29 @@ const FormGroup = styled.div`
 
 const StyledLabel = styled.label`
   font-size: 0.85rem;
+  /* TODO: #475569 提取到 theme */
   color: #475569;
   font-weight: 500;
 `;
 
 const StyledInput = styled(Input)`
-  background: #ffffff !important;
+  background: ${({ theme }) => theme.colors.lightestBg} !important;
   border: 1px solid rgba(203, 213, 225, 0.8) !important;
   border-radius: 10px !important;
-  color: #0f172a !important;
+  color: ${({ theme }) => theme.colors.fontColorDark} !important;
   height: 44px;
   font-size: 1rem;
 
   &:focus {
-    border-color: #667eea !important;
+    border-color: ${({ theme }) => theme.colors.secondaryCta} !important;
     box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
   }
 `;
 
 const ActionButton = styled(Button)`
-  background: linear-gradient(135deg, #667eea, #764ba2) !important;
-  color: white !important;
+  /* TODO: #764ba2 提取到 theme */
+  background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2) !important;
+  color: ${({ theme }) => theme.colors.lightestBg} !important;
   border: none !important;
   border-radius: 10px !important;
   font-weight: 600 !important;
@@ -125,7 +127,7 @@ const BackButton = styled(Button)`
 
   &:hover {
     border-color: rgba(102, 126, 234, 0.4) !important;
-    color: #667eea !important;
+    color: ${({ theme }) => theme.colors.secondaryCta} !important;
   }
 `;
 

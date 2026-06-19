@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::pokergame::table::now_ms;
 
 pub(crate) async fn game_loop_task(io: SocketIo, state: Arc<SocketState>, table_id: u32, mut action_rx: tokio::sync::mpsc::Receiver<ActionRequest>, mut stop_rx: tokio::sync::watch::Receiver<bool>) {
     tracing::info!("[GAME-LOOP] Started for table {}", table_id);
@@ -39,449 +40,445 @@ pub(crate) async fn game_loop_task(io: SocketIo, state: Arc<SocketState>, table_
     tracing::info!("[GAME-LOOP] Stopped for table {}", table_id);
 }
 
-pub(crate) async fn handle_interrupts(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, reconstruct_active: bool, shuffle_active: bool, reveal_active: bool) -> Option<bool> {
-    if reconstruct_active {
-        let reconstruct_result = {
-            let mut gs = state.state.write().await;
-            if let Some(table) = gs.tables.get_mut(&table_id) {
-                if table.execute_reconstruct_if_completed() {
-                    Some((true, Vec::new()))
-                } else if let Some(timed_out_pks) = table.check_reconstruct_timeout() {
-                    Some((false, timed_out_pks))
-                } else {
-                    None
-                }
-            } else { None }
-        };
-        if let Some((completed, timed_out_pks)) = reconstruct_result {
-            if completed {
-                broadcast::broadcast_to_table(io, state, table_id, Some("Reconstruct completed")).await;
+// ---------------------------------------------------------------------------
+// 广播辅助函数
+// ---------------------------------------------------------------------------
 
-                // Start shuffle phase after reconstruct completes
-                {
-                    let mut gs = state.state.write().await;
-                    if let Some(table) = gs.tables.get_mut(&table_id) {
-                        let _ = table.start_shuffle();
-                    }
-                }
+/// 当 reveal_token_state 处于活跃状态时，广播 RevealNoticePayload 给桌上所有客户端。
+/// 用于 advance_shuffle / advance_to_next_phase 启动 reveal 阶段后通知前端。
+pub async fn broadcast_reveal_notice_if_active(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) {
+    let reveal_notice = {
+        let gs = state.state.read().await;
+        gs.tables.get(&table_id)
+            .filter(|t| t.reveal_token_state.is_active())
+            .map(|t| {
+                let phase = t.reveal_token_state.phase;
+                let pending = t.reveal_token_state.pending_players.clone();
+                let completed = t.reveal_token_state.completed_players.clone();
+                let player_assignments = t.reveal_token_state.player_assignments.clone();
+                RevealNoticePayload { table_id, phase, pending_players: pending, completed_players: completed, player_assignments }
+            })
+    };
+    if let Some(notice) = reveal_notice {
+        let _ = io.to(table_room_name(table_id)).emit(actions::REVEAL_NOTICE, &notice).await;
+    }
+}
 
-                let reconstruct_payload = ReconstructResultPayload {
-                    table_id,
-                    completed_players: vec![],
-                    reconstructed: true,
-                };
-                let _ = io.to(table_room_name(table_id)).emit(actions::RECONSTRUCT_RESULT, &reconstruct_payload).await;
+/// 当 reconstruct_state 处于活跃状态时，广播 ReconstructNoticePayload 给桌上所有客户端。
+/// 用于 on_reveal_timeout 触发 reconstruct 后通知前端。
+pub(crate) async fn broadcast_reconstruct_notice_if_active(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) {
+    let reconstruct_notice = {
+        let gs = state.state.read().await;
+        gs.tables.get(&table_id)
+            .filter(|t| t.reconstruct_state.is_active)
+            .map(|t| {
+                let completed_players = t.reconstruct_state.completed_players.clone();
+                let pending_players = t.reconstruct_state.pending_players.clone();
+                let cards = t.reconstruct_state.cards.iter().map(|c| ecpoint_to_hex(c)).collect();
+                let coefficient_hex = scalar_to_hex(&t.reconstruct_state.coefficient);
+                let player_readable_cards = t.reconstruct_state.player_readable_cards.iter()
+                    .map(|(k, v)| {
+                        (k.clone(), PlayerReadableCardJson {
+                            readable_cards: v.readable_cards.iter().map(ElGamalCiphertextJson::from_ciphertext).collect(),
+                        })
+                    })
+                    .collect();
+                ReconstructNoticePayload { table_id, completed_players, pending_players, cards, coefficient_hex, player_readable_cards }
+            })
+    };
+    if let Some(notice) = reconstruct_notice {
+        let _ = io.to(table_room_name(table_id)).emit(actions::RECONSTRUCT_NOTICE, &notice).await;
+    }
+}
 
-                state.send_shuffle_notice(table_id).await;
-            } else {
-                // Reconstruct timeout: players in timed_out_pks have already been removed by check_reconstruct_timeout
-                let msg = if timed_out_pks.is_empty() {
-                    "Reconstruct timed out".to_string()
-                } else {
-                    format!("Reconstruct timed out, {} player(s) removed", timed_out_pks.len())
-                };
-                broadcast::broadcast_to_table(io, state, table_id, Some(&msg)).await;
+// ---------------------------------------------------------------------------
+// 超时玩家 socket 清理辅助函数
+// ---------------------------------------------------------------------------
 
-                // Check if we should reset the hand (not enough players)
-                let should_reset = {
-                    let gs = state.state.read().await;
-                    gs.tables.get(&table_id).map(|t| t.active_players().len() < MIN_START_NUM as usize).unwrap_or(true)
-                };
-                if should_reset {
-                    let mut gs = state.state.write().await;
-                    if let Some(table) = gs.tables.get_mut(&table_id) {
-                        table.transition_to(RoundState::Waiting);
-                    }
-                }
-            }
-            return Some(true);
+/// 在调用 on_*_timeout 之前，记录待踢玩家的 pk_hex → socket_id 映射。
+/// on_*_timeout 内部会调用 table.remove_player_by_pk，从 table.players 中移除玩家，
+/// 之后便无法通过 table.players 查找 wallet_address → socket_id，所以必须提前记录。
+async fn record_pk_to_socket_ids(state: &Arc<SocketState>, table_id: u32, pks: &[GamePkHex]) -> Vec<(GamePkHex, String)> {
+    let gs = state.state.read().await;
+    let Some(table) = gs.tables.get(&table_id) else { return Vec::new() };
+    pks.iter()
+        .filter_map(|pk| {
+            let players = table.players();
+            let wallet_addr = players.get(pk)?;
+            let socket_id = gs.players.values()
+                .find(|p| &p.wallet_address == wallet_addr)
+                .map(|p| p.socket_id.clone())?;
+            Some((pk.clone(), socket_id))
+        })
+        .collect()
+}
+
+/// on_*_timeout 调用后，对被踢玩家执行 socket 层清理：
+/// 从 gs.players 移除、离开 table room、emit TABLE_LEFT。
+async fn cleanup_player_sockets(
+    io: &SocketIo,
+    state: &Arc<SocketState>,
+    table_id: u32,
+    pk_socket_pairs: Vec<(GamePkHex, String)>,
+    reason: Option<&str>,
+) {
+    if pk_socket_pairs.is_empty() {
+        return;
+    }
+    let current_tables = state.get_current_tables().await;
+    {
+        let mut gs = state.state.write().await;
+        for (_, socket_id) in &pk_socket_pairs {
+            gs.players.remove(socket_id);
         }
     }
+    for (_, socket_id) in &pk_socket_pairs {
+        if let Ok(sid) = socket_id.parse::<socketioxide::socket::Sid>() {
+            if let Some(socket) = io.get_socket(sid) {
+                socket.leave(table_room_name(table_id));
+                let _ = socket.emit(actions::TABLE_LEFT, &TableLeftPayload {
+                    tables: current_tables.clone(),
+                    table_id,
+                    reason: reason.map(|s| s.to_string()),
+                });
+            }
+        }
+    }
+    // Broadcast global table/player updates so lobby UI syncs
+    let players_info = state.get_current_players().await;
+    let _ = io.emit(actions::TABLES_UPDATED, &current_tables).await;
+    let _ = io.emit(actions::PLAYERS_UPDATED, &players_info).await;
+}
 
-    if shuffle_active {
-        let shuffle_complete = {
-            let gs = state.state.read().await;
-            gs.tables.get(&table_id).map(|t| t.is_all_players_shuffled()).unwrap_or(false)
+// ---------------------------------------------------------------------------
+// process_tick — 严格对齐 Move 合约 tick 优先级
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) -> bool {
+    // 读取状态快照
+    // 对齐 Move：时间戳使用 u64 ms（summary.state.*_at），0 表示未设置
+    let (round_state, active_count, hand_complete_at, ready_at, showdown_at,
+         shuffle_active, reveal_active, reconstruct_active) = {
+        let gs = state.state.read().await;
+        if let Some(table) = gs.tables.get(&table_id) {
+            (table.round_state(), table.active_players().len(), table.hand_complete_at(), table.ready_at(), table.showdown_at(),
+             table.shuffle_state.is_active(), table.reveal_token_state.is_active(), table.reconstruct_state.is_active)
+        } else { return false }
+    };
+
+    if active_count == 0 {
+        return false;
+    }
+
+    // ===== Priority 1: reconstruct =====
+    if reconstruct_active {
+        // 1a. 检查 reconstruct 是否完成
+        let completed = {
+            let mut gs = state.state.write().await;
+            if let Some(table) = gs.tables.get_mut(&table_id) {
+                table.execute_reconstruct_if_completed()
+            } else { false }
         };
-        if shuffle_complete {
+        if completed {
+            broadcast::broadcast_to_table(io, state, table_id, Some("Reconstruct completed")).await;
+            // on_complete_reconstruct 已在 execute_reconstruct_if_completed 内部调用，
+            // 它会启动 shuffle(RECONSTRUCT) + advance_shuffle。
+            // 广播 ReconstructResultPayload
+            let reconstruct_payload = ReconstructResultPayload {
+                table_id,
+                completed_players: vec![],
+                reconstructed: true,
+            };
+            let _ = io.to(table_room_name(table_id)).emit(actions::RECONSTRUCT_RESULT, &reconstruct_payload).await;
+            // 广播 shuffle notice（advance_shuffle 可能已设置 current_shuffler）
+            state.send_shuffle_notice(table_id).await;
+            // 广播 reveal notice（如果 advance_shuffle 已启动 reveal）
+            broadcast_reveal_notice_if_active(io, state, table_id).await;
+            // crypto_event: reconstruct complete
+            state.broadcast_crypto_event(
+                table_id,
+                broadcast::CryptoEventType::Reconstruct,
+                "".to_string(),
+                None, true,
+                Some("reconstruct complete".to_string()),
+                None,
+            ).await;
+            // crypto_event: reveal phase started (if active)
+            state.broadcast_crypto_event(
+                table_id,
+                broadcast::CryptoEventType::RevealToken,
+                "".to_string(),
+                None, true,
+                Some("reveal phase started".to_string()),
+                None,
+            ).await;
+            return true;
+        }
+
+        // 1b. 检查 reconstruct 超时
+        let (is_timed_out, timed_out_pks) = {
+            let gs = state.state.read().await;
+            if let Some(table) = gs.tables.get(&table_id) {
+                if !table.reconstruct_state.is_active {
+                    (false, Vec::new())
+                } else if let Some(timeout_start) = table.reconstruct_state.timeout_start {
+                    if timeout_start.elapsed().as_secs() >= table.reconstruct_state.timeout_seconds
+                        && !table.reconstruct_state.pending_players.is_empty() {
+                        (true, table.reconstruct_state.pending_players.clone())
+                    } else {
+                        (false, Vec::new())
+                    }
+                } else {
+                    (false, Vec::new())
+                }
+            } else {
+                (false, Vec::new())
+            }
+        };
+        if is_timed_out {
+            // 提前记录 socket_id，因为 on_reconstruct_timeout 会从 table.players 移除玩家
+            let pk_socket_pairs = record_pk_to_socket_ids(state, table_id, &timed_out_pks).await;
             {
                 let mut gs = state.state.write().await;
                 if let Some(table) = gs.tables.get_mut(&table_id) {
-                    table.shuffle_state.reset();
-                    table.transition_to(RoundState::ShuffleComplete);
-                    tracing::info!("[ShuffleComplete] Table {} shuffle complete", table_id);
+                    table.on_reconstruct_timeout();
                 }
             }
-            return Some(true);
+            // 在 cleanup_player_sockets 移除 gs.players 之前查找玩家名称
+            let player_names: Vec<String> = {
+                let gs = state.state.read().await;
+                pk_socket_pairs.iter()
+                    .filter_map(|(_, socket_id)| gs.players.get(socket_id))
+                    .map(|p| p.name.clone())
+                    .collect()
+            };
+            cleanup_player_sockets(io, state, table_id, pk_socket_pairs, Some("reconstruct timeout")).await;
+            let msg = if player_names.is_empty() {
+                "Reconstruct timed out".to_string()
+            } else {
+                format!("{} timed out (reconstruct)", player_names.join(", "))
+            };
+            broadcast::broadcast_to_table(io, state, table_id, Some(&msg)).await;
+            // 与 reconstruct 完成分支保持一致：广播 shuffle notice 和 reveal notice
+            state.send_shuffle_notice(table_id).await;
+            broadcast_reveal_notice_if_active(io, state, table_id).await;
+            // crypto_event: reconstruct timeout
+            state.broadcast_crypto_event(
+                table_id,
+                broadcast::CryptoEventType::Reconstruct,
+                "".to_string(),
+                None, true,
+                Some("reconstruct timeout".to_string()),
+                None,
+            ).await;
+            // crypto_event: reveal phase started (if active)
+            state.broadcast_crypto_event(
+                table_id,
+                broadcast::CryptoEventType::RevealToken,
+                "".to_string(),
+                None, true,
+                Some("reveal phase started".to_string()),
+                None,
+            ).await;
         }
-        let timeout_result = {
+        // reconstruct 进行中或刚超时，不处理其他状态
+        return true;
+    }
+
+    // ===== Priority 2: shuffle =====
+    if shuffle_active {
+        // 2a. 活跃玩家不足 → 回到 Waiting
+        if active_count < MIN_START_NUM as usize {
+            let mut gs = state.state.write().await;
+            if let Some(table) = gs.tables.get_mut(&table_id) {
+                table.shuffle_state.phase = crate::pokergame::game_state::ShufflePhase::None;
+                if round_state != RoundState::Waiting {
+                    table.transition_to(RoundState::Waiting);
+                }
+            }
+            return true;
+        }
+
+        // 2b. 所有玩家完成洗牌 → advance_shuffle
+        let pending_empty = {
+            let gs = state.state.read().await;
+            gs.tables.get(&table_id)
+                .map(|t| t.shuffle_state.pending_players.is_empty())
+                .unwrap_or(false)
+        };
+        if pending_empty {
+            let reveal_started = {
+                let mut gs = state.state.write().await;
+                if let Some(table) = gs.tables.get_mut(&table_id) {
+                    table.advance_shuffle();
+                    table.reveal_token_state.is_active()
+                } else { false }
+            };
+            broadcast::broadcast_to_table(io, state, table_id, Some("Shuffle complete")).await;
+            // crypto_event: shuffle round complete
+            state.broadcast_crypto_event(
+                table_id,
+                broadcast::CryptoEventType::Shuffle,
+                "".to_string(),
+                None, true,
+                Some("shuffle round complete".to_string()),
+                None,
+            ).await;
+            if reveal_started {
+                broadcast_reveal_notice_if_active(io, state, table_id).await;
+                // crypto_event: reveal phase started
+                state.broadcast_crypto_event(
+                    table_id,
+                    broadcast::CryptoEventType::RevealToken,
+                    "".to_string(),
+                    None, true,
+                    Some("reveal phase started".to_string()),
+                    None,
+                ).await;
+            }
+            return true;
+        }
+
+        // 2c. 检查 shuffle 超时（check_shuffle_timeout 只检查不修改状态）
+        let timed_out_pk = {
             let mut gs = state.state.write().await;
             if let Some(table) = gs.tables.get_mut(&table_id) {
                 table.check_shuffle_timeout()
             } else { None }
         };
-        if let Some(timed_out_pk) = timeout_result {
-            tracing::info!("[TICK] Table {} shuffle timeout for player {}", table_id, timed_out_pk);
-            let should_stop_early = {
-                let mut gs = state.state.write().await;
-                let should_stop = if let Some(table) = gs.tables.get_mut(&table_id) {
-                    table.remove_player_by_pk(&timed_out_pk);
-                    table.shuffle_state.pending_players.retain(|pk| *pk != timed_out_pk);
-
-                    if table.active_players().len() < MIN_START_NUM as usize {
-                        table.transition_to(RoundState::Waiting);
-                        table.shuffle_state.is_active = false;
-                        true
-                    } else {
-                        false
-                    }
-                } else { false };
-
-                if !should_stop {
-                    if let Some(table) = gs.tables.get_mut(&table_id) {
-                        table.complete_or_continue_next_shuffler();
-                    }
-                }
-                should_stop
-            };
-            if should_stop_early {
-                return Some(true);
-            }
-            state.send_shuffle_notice(table_id).await;
-            broadcast::broadcast_to_table(io, state, table_id, None).await;
-            return Some(true);
-        }
-    }
-
-    if reveal_active {
-        // 检查是否是 redeal reveal 阶段
-        let is_redeal_reveal = {
-            let gs = state.state.read().await;
-            gs.tables.get(&table_id).map(|t| t.reveal_token_state.phase == RevealPhase::RedealReveal).unwrap_or(false)
-        };
-
-        let timeout_result = {
-            let mut gs = state.state.write().await;
-            if let Some(table) = gs.tables.get_mut(&table_id) {
-                table.check_reveal_timeout()
-            } else { None }
-        };
-        if let Some(timed_out_pks) = timeout_result {
-            tracing::info!("[TICK] Table {} reveal token timeout for player {:?}", table_id, timed_out_pks);
-
-            if is_redeal_reveal {
-                // redeal reveal 超时：踢掉超时玩家，重置 reveal state，游戏继续
-                let mut gs = state.state.write().await;
-                if let Some(table) = gs.tables.get_mut(&table_id) {
-                    for timed_out_pk in &timed_out_pks {
-                        table.remove_player_by_pk(timed_out_pk);
-                    }
-                    table.reveal_token_state.reset();
-                    if table.active_players().len() < MIN_START_NUM as usize {
-                        table.transition_to(RoundState::Waiting);
-                    }
-                }
-                broadcast::broadcast_to_table(io, state, table_id, Some("Redeal reveal timed out")).await;
-                return Some(true);
-            }
-
-            let current_tables = state.get_current_tables().await;
-            let should_reset_hand = {
-                let mut gs = state.state.write().await;
-                if !gs.tables.contains_key(&table_id) {
-                    return None;
-                }
-
-                for timed_out_pk in &timed_out_pks {
-                    if let Some(socket_id) = gs.remove_player_by_pk(table_id, timed_out_pk) {
-                        if let Ok(sid) = socket_id.parse::<socketioxide::socket::Sid>() {
-                            if let Some(socket) = io.get_socket(sid) {
-                                socket.leave(table_room_name(table_id));
-                                let _ = socket.emit(actions::TABLE_LEFT, &TableLeftPayload { tables: current_tables.clone(), table_id });
-                            }
-                        }
-                    }
-                }
-                let mut should_reset = false;
-                if let Some(table) = gs.tables.get_mut(&table_id) {
-                    if table.active_players().len() < MIN_START_NUM as usize {
-                        table.transition_to(RoundState::Waiting);
-                        table.reveal_token_state.reset();
-                        tracing::info!("[TICK] Table {} reset for next hand", table_id);
-                        return Some(true);
-                    }
-
-                    if table.round_state == RoundState::PreFlopReveal {
-                        // 没有用户开到过牌，直接重开牌
-                        table.reset_for_next_hand();
-                        should_reset = true;
-                        tracing::info!("[TICK] Table {} reset for next hand", table_id);
-                    } else {
-                        tracing::info!("[TICK] Table {} start reconstruct", table_id);
-                        let _ = table.start_reconstruct();
-                    }
-                }
-                should_reset
-            };
-
-            // 在锁外广播，避免死锁
-            if should_reset_hand {
-                broadcast::broadcast_to_table(io, state, table_id, Some("Player timed out reset hand")).await;
-                return Some(true);
-            }
-
-            let reconstruct_notice = {
-                let gs = state.state.read().await;
-                gs.tables.get(&table_id).map(|t| {
-                    let completed_players = t.reconstruct_state.completed_players.clone();
-                    let pending_players = t.reconstruct_state.pending_players.clone();
-                    let cards = t.reconstruct_state.cards.iter().map(|c| ecpoint_to_hex(c)).collect();
-                    let coefficient_hex = scalar_to_hex(&t.reconstruct_state.coefficient);
-                    let player_readable_cards = t.reconstruct_state.player_readable_cards.iter().map(|(k, v)| {
-                        (k.clone(), PlayerReadableCardJson {
-                            readable_cards: v.readable_cards.iter().map(ElGamalCiphertextJson::from_ciphertext).collect(),
-                        })
-                    }).collect();
-                    ReconstructNoticePayload { table_id,  completed_players, pending_players, cards, coefficient_hex, player_readable_cards }
-                })
-            };
-            tracing::info!("[TICK] Table {} reconstruct notice {:?}", table_id, reconstruct_notice);
-            if let Some(notice) = reconstruct_notice {
-                let result = io.to(table_room_name(table_id)).emit(actions::RECONSTRUCT_NOTICE, &notice).await;
-                tracing::info!("[TICK] Table {} reconstruct notice result {:?}", table_id, result);
-            }
-
-            broadcast::broadcast_to_table(io, state, table_id, Some(&format!("Player  timed out on reveal", ))).await;
-            return Some(true);
-        }
-    }
-
-    if reconstruct_active || shuffle_active || reveal_active {
-        Some(true)
-    } else {
-        None
-    }
-}
-
-pub(crate) async fn handle_reveal_phase(io: &SocketIo, state: &Arc<SocketState>, table_id: u32, next_state: RoundState, is_preflop: bool) {
-    {
-        let mut gs = state.state.write().await;
-        if let Some(table) = gs.tables.get_mut(&table_id) {
-            if table.reveal_token_state.is_active {
-                return;
-            }
-            if next_state == RoundState::Showdown{
-                table.start_showdown_reveal_phase();
-            }else{
-                if is_preflop {
-                    table.start_preflop_reveal_phase();
-                } else {
-                    table.start_community_reveal_phase();
-                }
-            }
-        }else{
-            return;
-        }
-    }
-    let reveal_notice = {
-        let gs = state.state.read().await;
-        gs.tables.get(&table_id).map(|t| {
-            let phase = t.reveal_token_state.phase.clone();
-            let pending = t.reveal_token_state.pending_players.clone();
-            let completed = t.reveal_token_state.completed_players.clone();
-            let player_assignments = t.reveal_token_state.player_assignments.clone();
-            RevealNoticePayload { table_id, phase, pending_players: pending, completed_players: completed, player_assignments }
-        })
-    };
-    if let Some(notice) = reveal_notice {
-        let _ = io.to(table_room_name(table_id)).emit(actions::REVEAL_NOTICE, &notice).await;
-    }
-    broadcast::broadcast_to_table(io, state, table_id, None).await;
-}
-
-pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) -> bool {
-    let (round_state, active_count, _betting_timeout, hand_complete_at, ready_at, showdown_at,
-         shuffle_active, reveal_active, reconstruct_active) = {
-        let gs = state.state.read().await;
-        if let Some(table) = gs.tables.get(&table_id) {
-            (table.round_state, table.active_players().len(), table.betting_timeout_start, table.hand_complete_at, table.ready_at, table.showdown_at,
-             table.shuffle_state.is_active, table.reveal_token_state.is_active, table.reconstruct_state.is_active)
-        } else { return false }
-    };
-
-    if active_count == 0 {
-        tracing::info!("[TICK] Table {} has no active players, stopping game loop", table_id);
-        return false;
-    }
-
-    if let Some(result) = handle_interrupts(io, state, table_id, reconstruct_active, shuffle_active, reveal_active).await {
-        return result;
-    }
-
-    match round_state {
-        RoundState::Waiting => {
-            if active_count >= MIN_START_NUM as usize {
-                let io_c = io.clone();
-                let state_c = state.clone();
-                if let Some(ready_at) = ready_at {
-                    let elapsed = ready_at.elapsed().as_secs();
-                    if elapsed <= state.config.ready_countdown_secs {
-                        tracing::debug!("[TICK] Table {} Waiting: {} active, ready countdown {}/5s", table_id, active_count, elapsed);
-                        return true;
-                    }
-                    tracing::info!("[TICK] Table {} Waiting → starting hand ({} active)", table_id, active_count);
-
-                    {
-                        let mut gs = state_c.state.write().await;
-                        if let Some(table) = gs.tables.get_mut(&table_id) {
-                            if table.active_players().len() >= MIN_START_NUM as usize {
-                                let _ = table.start_shuffle();
-                            }
-                        }
-                    }
-                    state_c.send_shuffle_notice(table_id).await;
-                    broadcast::broadcast_to_table(&io_c, &state_c, table_id, Some("--- New hand started ---")).await;
-                } else {
-                    tracing::info!("[TICK] Table {} Waiting: setting ready_at, starting 5s countdown", table_id);
-                    {
-                        let mut gs = state_c.state.write().await;
-                        if let Some(table) = gs.tables.get_mut(&table_id) {
-                            table.ready_at = Some(std::time::Instant::now());
-                        }
-                    }
-                    broadcast::broadcast_to_table(io, state, table_id, Some("---New hand starting in 5 seconds---")).await;
-                }
-            } else {
-                tracing::info!("[TICK] Table {} Waiting: only {} active, stopping game loop", table_id, active_count);
-                return false;
-            }
-        }
-        RoundState::Shuffling => {
-            if active_count < MIN_START_NUM as usize {
-                let mut gs = state.state.write().await;
-                if let Some(table) = gs.tables.get_mut(&table_id) {
-                    table.shuffle_state.is_active = false;
-                    table.transition_to(RoundState::Waiting);
-                }
-            }
-            let all_shuffled = {
-                let gs = state.state.read().await;
-                gs.tables.get(&table_id).map(|t| t.is_all_players_shuffled()).unwrap_or(false)
-            };
-            if all_shuffled {
-                let mut gs = state.state.write().await;
-                if let Some(table) = gs.tables.get_mut(&table_id) {
-                    table.shuffle_state.is_active = false;
-                    table.transition_to(RoundState::ShuffleComplete);
-                }
-            }
-        }
-        RoundState::ShuffleComplete => {
-            if active_count < MIN_START_NUM as usize {
-                let mut gs = state.state.write().await;
-                if let Some(table) = gs.tables.get_mut(&table_id) {
-                    table.shuffle_state.is_active = false;
-                    table.transition_to(RoundState::Waiting);
-                }
-            }
-            tracing::info!("[TICK] Table {} ShuffleComplete, resetting shuffle and starting hand", table_id);
+        if let Some(timed_out_pk) = timed_out_pk {
+            // 提前记录 socket_id
+            let pk_socket_pairs = record_pk_to_socket_ids(state, table_id, &[timed_out_pk.clone()]).await;
             {
                 let mut gs = state.state.write().await;
                 if let Some(table) = gs.tables.get_mut(&table_id) {
-                    table.reset_shuffle();
-                    table.start_hand();
-                    //todo 这里使得start_hand会触发PreFlopReveal状态有点混乱
-                    table.transition_to(RoundState::PreFlopReveal);
+                    table.on_shuffle_timeout();
                 }
             }
+            // 在 cleanup_player_sockets 移除 gs.players 之前查找玩家名称
+            let player_name = {
+                let gs = state.state.read().await;
+                pk_socket_pairs.iter()
+                    .filter_map(|(_, socket_id)| gs.players.get(socket_id))
+                    .next()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "Unknown".to_string())
+            };
+            cleanup_player_sockets(io, state, table_id, pk_socket_pairs, Some("shuffle timeout")).await;
+            let msg = format!("{} timed out (shuffle)", player_name);
+            broadcast::broadcast_to_table(io, state, table_id, Some(&msg)).await;
+            state.send_shuffle_notice(table_id).await;
+            broadcast_reveal_notice_if_active(io, state, table_id).await;
+            // crypto_event: reveal phase started (if active)
+            state.broadcast_crypto_event(
+                table_id,
+                broadcast::CryptoEventType::RevealToken,
+                "".to_string(),
+                None, true,
+                Some("reveal phase started".to_string()),
+                None,
+            ).await;
+            return true;
+        }
+        // shuffle 进行中
+        return true;
+    }
 
-            broadcast::broadcast_to_table(io, state, table_id, Some("Shuffle complete, dealing cards")).await;
-        }
-        RoundState::PreFlopReveal => {
-            tracing::info!("[TICK] Table {} PreFlopReveal, starting preflop reveal phase", table_id);
-            handle_reveal_phase(io, state, table_id, RoundState::PreFlop, true).await;
-        }
-        RoundState::FlopReveal => {
-            tracing::info!("[TICK] Table {} FlopReveal, starting community reveal phase", table_id);
-            handle_reveal_phase(io, state, table_id, RoundState::Flop, false).await;
-        }
-        RoundState::TurnReveal => {
-            tracing::info!("[TICK] Table {} TurnReveal, starting community reveal phase", table_id);
-            handle_reveal_phase(io, state, table_id, RoundState::Turn, false).await;
-        }
-        RoundState::RiverReveal => {
-            tracing::info!("[TICK] Table {} RiverReveal, starting community reveal phase", table_id);
-            handle_reveal_phase(io, state, table_id, RoundState::River, false).await;
-        }
-        RoundState::ShowdownReveal => {
-            tracing::info!("[TICK] Table {} ShowdownReveal, starting showdown reveal phase", table_id);
-            handle_reveal_phase(io, state, table_id, RoundState::Showdown, false).await;
-        }
-        RoundState::PreFlop | RoundState::Flop | RoundState::Turn | RoundState::River => {
-            let timeout_result = {
+    // ===== Priority 3: reveal =====
+    if reveal_active {
+        // 3a. 所有玩家完成 reveal → on_reveal_complete
+        let all_pending_empty = {
+            let gs = state.state.read().await;
+            gs.tables.get(&table_id)
+                .map(|t| t.reveal_token_state.pending_players.is_empty())
+                .unwrap_or(false)
+        };
+        if all_pending_empty {
+            {
                 let mut gs = state.state.write().await;
                 if let Some(table) = gs.tables.get_mut(&table_id) {
-                    table.check_betting_timeout(state.config.betting_timeout_secs)
-                } else { None }
-            };
-            if let Some(res) = timeout_result {
-                tracing::info!("[TICK] Table {} {:?}: betting timeout → {}", table_id, round_state, res.message);
-                broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
-                handle_turn_advance(io, state, table_id).await;
-                return true;
+                    table.on_reveal_complete();
+                }
             }
-
-            handle_auto_fold(io, state, table_id).await;
-
-            let is_complete = {
-                let gs = state.state.read().await;
-                if let Some(table) = gs.tables.get(&table_id) {
-                    table.is_betting_round_complete()
-                } else { false }
-            };
-
-            if is_complete {
-                tracing::info!("[TICK] Table {} {:?}: betting round complete, advancing", table_id, round_state);
-                handle_turn_advance(io, state, table_id).await;
-            }
+            broadcast::broadcast_to_table(io, state, table_id, None).await;
+            // crypto_event: reveal phase complete
+            state.broadcast_crypto_event(
+                table_id,
+                broadcast::CryptoEventType::RevealToken,
+                "".to_string(),
+                None, true,
+                Some("reveal phase complete".to_string()),
+                None,
+            ).await;
+            return true;
         }
-        RoundState::Showdown => {
-            if let Some(sa) = showdown_at {
-                let elapsed = sa.elapsed().as_secs();
-                if elapsed >= state.config.showdown_display_secs {
-                    tracing::info!("[TICK] Table {} Showdown: 3s elapsed, finishing showdown", table_id);
-                    {
-                        let mut gs = state.state.write().await;
-                        if let Some(table) = gs.tables.get_mut(&table_id) {
-                            table.finish_showdown();
-                        }
+
+        // 3b. 检查 reveal 超时（手动检查，不调用 check_reveal_timeout 以免它 reset 状态）
+        let (is_timed_out, timed_out_pks) = {
+            let gs = state.state.read().await;
+            if let Some(table) = gs.tables.get(&table_id) {
+                if !table.reveal_token_state.is_active() {
+                    (false, Vec::new())
+                } else if let Some(timeout_start) = table.reveal_token_state.timeout_start {
+                    if timeout_start.elapsed().as_secs() >= table.reveal_token_state.timeout_seconds
+                        && !table.reveal_token_state.pending_players.is_empty() {
+                        (true, table.reveal_token_state.pending_players.clone())
+                    } else {
+                        (false, Vec::new())
                     }
-                    broadcast::broadcast_to_table(io, state, table_id, None).await;
                 } else {
-                    tracing::debug!("[TICK] Table {} Showdown: displaying results {}/3s", table_id, elapsed);
+                    (false, Vec::new())
                 }
             } else {
-                tracing::warn!("[TICK] Table {} Showdown: showdown_at is None, finishing immediately", table_id);
-                {
-                    let mut gs = state.state.write().await;
-                    if let Some(table) = gs.tables.get_mut(&table_id) {
-                        table.finish_showdown();
-                    }
-                }
-                broadcast::broadcast_to_table(io, state, table_id, None).await;
+                (false, Vec::new())
             }
+        };
+        if is_timed_out {
+            // 提前记录 socket_id
+            let pk_socket_pairs = record_pk_to_socket_ids(state, table_id, &timed_out_pks).await;
+            {
+                let mut gs = state.state.write().await;
+                if let Some(table) = gs.tables.get_mut(&table_id) {
+                    table.on_reveal_timeout();
+                }
+            }
+            // 在 cleanup_player_sockets 移除 gs.players 之前查找玩家名称
+            let player_names: Vec<String> = {
+                let gs = state.state.read().await;
+                pk_socket_pairs.iter()
+                    .filter_map(|(_, socket_id)| gs.players.get(socket_id))
+                    .map(|p| p.name.clone())
+                    .collect()
+            };
+            cleanup_player_sockets(io, state, table_id, pk_socket_pairs, Some("reveal timeout")).await;
+            let msg = if player_names.is_empty() {
+                "Reveal timeout".to_string()
+            } else {
+                format!("{} timed out (reveal)", player_names.join(", "))
+            };
+            broadcast::broadcast_to_table(io, state, table_id, Some(&msg)).await;
+            // on_reveal_timeout 可能触发了 reconstruct，广播 reconstruct notice
+            broadcast_reconstruct_notice_if_active(io, state, table_id).await;
+            return true;
         }
-        RoundState::HandComplete => {
-            if let Some(complete_at) = hand_complete_at {
-                let elapsed = complete_at.elapsed().as_secs();
-                if elapsed >= state.config.hand_complete_wait_secs {
+        // reveal 进行中
+        return true;
+    }
+
+    // ===== Priority 4+: match round_state =====
+    match round_state {
+        RoundState::Waiting => {
+            // 保留 hand_complete_at 清理逻辑：reset_for_next_hand 后的玩家移除
+            if hand_complete_at != 0 {
+                let elapsed = now_ms().saturating_sub(hand_complete_at) / 1000;
+                if elapsed >= state.config.hand_complete_wait_secs as u64 {
                     let (active, removed_players) = {
                         // First pass: collect wallet->player_id mappings with read lock
                         let wallet_to_player_id: std::collections::HashMap<String, String> = {
                             let gs = state.state.read().await;
                             let mut map = std::collections::HashMap::new();
                             if let Some(table) = gs.tables.get(&table_id) {
-                                for seat in table.seats.values() {
+                                for seat in table.seats().values() {
                                     let is_broke = seat.stack == 0;
                                     let is_sitting_out = seat.sitting_out;
                                     if is_broke || is_sitting_out {
@@ -499,7 +496,7 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                         let mut gs = state.state.write().await;
                         if let Some(table) = gs.tables.get_mut(&table_id) {
                             let mut to_remove = Vec::new();
-                            for seat in table.seats.values_mut() {
+                            for seat in table.local_seats.values_mut() {
                                 let is_broke = seat.stack == 0;
                                 let is_sitting_out = seat.sitting_out;
                                 if is_broke || is_sitting_out {
@@ -514,7 +511,7 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                                 if *stack > 0 {
                                     tracing::info!("return chips to sitting_out player: {} stack: {}", address, stack);
                                     if let Some(pid) = wallet_to_player_id.get(address) {
-                                        let _ = state.db.update_chips(pid, *stack as i64).await;
+                                        let _ = state.db.unlock_chips(pid, *stack as i64).await;
                                     }
                                 }
                             }
@@ -543,7 +540,7 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                         if let Some(sid_str) = socket_id {
                             if let Ok(sid) = sid_str.parse::<socketioxide::socket::Sid>() {
                                 if let Some(socket) = io.get_socket(sid) {
-                                    let _ = socket.emit(actions::TABLE_LEFT, &TableLeftPayload { tables: tables_info.clone(), table_id });
+                                    let _ = socket.emit(actions::TABLE_LEFT, &TableLeftPayload { tables: tables_info.clone(), table_id, reason: None });
                                 }
                             }
                         }
@@ -559,28 +556,129 @@ pub(crate) async fn process_tick(io: &SocketIo, state: &Arc<SocketState>, table_
                         }
                     }
 
-                    tracing::info!("[TICK] Table {} HandComplete: {} active after reset, {} players removed", table_id, active, removed_players.len());
+                    tracing::info!("[TICK] Table {} Waiting: cleanup after hand_complete, {} active, {} players removed", table_id, active, removed_players.len());
                     if active < MIN_START_NUM as usize {
                         broadcast::broadcast_to_table(io, state, table_id, Some("Waiting for more players")).await;
                         return false;
-                    } else {
-                        broadcast::broadcast_to_table(io, state, table_id, None).await;
                     }
+                    // hand_complete_at already cleared by reset_for_next_hand; proceed to auto-start
+                } else {
+                    // Not timed out yet, wait
+                    return true;
+                }
+            }
+
+            // Auto-start logic (do_start_hand: start_shuffle)
+            if active_count >= MIN_START_NUM as usize {
+                let io_c = io.clone();
+                let state_c = state.clone();
+                if ready_at != 0 {
+                    let elapsed = now_ms().saturating_sub(ready_at) / 1000;
+                    if elapsed <= state.config.ready_countdown_secs as u64 {
+                        tracing::debug!("[TICK] Table {} Waiting: {} active, ready countdown {}/5s", table_id, active_count, elapsed);
+                        return true;
+                    }
+                    tracing::info!("[TICK] Table {} Waiting → starting hand ({} active)", table_id, active_count);
+
+                    {
+                        let mut gs = state_c.state.write().await;
+                        if let Some(table) = gs.tables.get_mut(&table_id) {
+                            if table.active_players().len() >= MIN_START_NUM as usize {
+                                // 对齐 Move tick → do_start_hand：start_hand 内部会
+                                // move_button + start_preflop_shuffle + advance_shuffle
+                                let _ = table.start_shuffle();
+                            }
+                        }
+                    }
+                    state_c.send_shuffle_notice(table_id).await;
+                    broadcast::broadcast_to_table(&io_c, &state_c, table_id, Some("--- New hand started ---")).await;
+                } else {
+                    tracing::info!("[TICK] Table {} Waiting: setting ready_at, starting 5s countdown", table_id);
+                    {
+                        let mut gs = state_c.state.write().await;
+                        if let Some(table) = gs.tables.get_mut(&table_id) {
+                            table.set_ready_at(now_ms());
+                        }
+                    }
+                    broadcast::broadcast_to_table(io, state, table_id, Some("---New hand starting in 5 seconds---")).await;
                 }
             } else {
-                tracing::info!("Table {} HandComplete: no active players", table_id);
+                // tracing::info!("[TICK] Table {} Waiting: only {} active, stopping game loop", table_id, active_count);
+                return false;
+            }
+        }
+        RoundState::PreFlop | RoundState::Flop | RoundState::Turn | RoundState::River => {
+            // Priority 5: betting round
+            let timeout_result = {
+                let mut gs = state.state.write().await;
+                if let Some(table) = gs.tables.get_mut(&table_id) {
+                    table.check_betting_timeout(state.config.betting_timeout_secs)
+                } else { None }
+            };
+            if let Some(res) = timeout_result {
+                tracing::info!("[TICK] Table {} {:?}: betting timeout → {}", table_id, round_state, res.message);
+                broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
+                handle_turn_advance(io, state, table_id).await;
+                return true;
+            }
+
+            let auto_folded = handle_auto_fold(io, state, table_id).await;
+
+            // 修复：handle_auto_fold 内部 fold 后已调用 handle_turn_advance，
+            // 此处不再重复检查 is_complete，避免双重推进 turn（导致连续行动/阶段跳进）。
+            if !auto_folded {
+                let is_complete = {
+                    let gs = state.state.read().await;
+                    if let Some(table) = gs.tables.get(&table_id) {
+                        table.is_betting_round_complete()
+                    } else { false }
+                };
+
+                if is_complete {
+                    tracing::info!("[TICK] Table {} {:?}: betting round complete, advancing", table_id, round_state);
+                    handle_turn_advance(io, state, table_id).await;
+                }
+            }
+        }
+        RoundState::Showdown => {
+            // Priority 6: showdown
+            if showdown_at != 0 {
+                let elapsed = now_ms().saturating_sub(showdown_at) / 1000;
+                if elapsed >= state.config.showdown_display_secs as u64 {
+                    tracing::info!("[TICK] Table {} Showdown: display time elapsed, finishing showdown", table_id);
+                    // on_reveal_complete(ShowdownReveal) 已确定赢家并设置 showdown_at，
+                    // 此处只需 finish_showdown 重置牌桌。使用 settle_hand 会重复分配底池。
+                    {
+                        let mut gs = state.state.write().await;
+                        if let Some(table) = gs.tables.get_mut(&table_id) {
+                            table.finish_showdown();
+                        }
+                    }
+                    broadcast::broadcast_to_table(io, state, table_id, None).await;
+                } else {
+                    tracing::debug!("[TICK] Table {} Showdown: displaying results {}/{}s", table_id, elapsed, state.config.showdown_display_secs);
+                }
+            } else {
+                // showdown_at 未设置，设置它（下一轮 tick 再检查超时）
+                tracing::info!("[TICK] Table {} Showdown: setting showdown_at", table_id);
+                {
+                    let mut gs = state.state.write().await;
+                    if let Some(table) = gs.tables.get_mut(&table_id) {
+                        table.set_showdown_at(now_ms());
+                    }
+                }
             }
         }
     }
     true
 }
 
-pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) {
+pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) -> bool {
     let auto_fold = {
         let gs = state.state.read().await;
         if let Some(table) = gs.tables.get(&table_id) {
-            if let Some(turn_id) = table.turn {
-                table.seats.get(&turn_id)
+            if let Some(turn_id) = table.turn() {
+                table.seats().get(&turn_id)
                     .and_then(|seat| {
                         if seat.disconnected && !seat.folded {
                             seat.player.as_ref().map(|p| p.pk_hex.clone())
@@ -607,8 +705,11 @@ pub(crate) async fn handle_auto_fold(io: &SocketIo, state: &Arc<SocketState>, ta
         if let Some(res) = fold_result {
             broadcast::broadcast_to_table(io, state, table_id, Some(&res.message)).await;
             handle_turn_advance(io, state, table_id).await;
+            // 已 fold 并推进 turn，调用方不应再次检查 is_complete（避免双重推进）
+            return true;
         }
     }
+    false
 }
 
 pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>, table_id: u32) {
@@ -619,22 +720,17 @@ pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>,
                 table.end_without_showdown();
             } else if table.is_betting_round_complete() {
                 table.advance_to_next_phase();
-                if table.round_state != RoundState::ShowdownReveal {
-                    table.turn = table.next_unfolded_player(table.button.unwrap_or(1), 1);
-                    table.betting_timeout_start = Some(std::time::Instant::now());
-                    for i in 1..=table.max_players {
-                        if let Some(seat) = table.seats.get_mut(&i) {
-                            seat.turn = table.turn == Some(i);
-                        }
-                    }
-                }
+                // advance_to_next_phase 启动 reveal phase，turn 由 on_reveal_complete 设置。
+                // 仅在 Showdown（无 reveal）时不需要设置 turn。
+                // 注意：不再手动设置 turn，因为 reveal 期间无行动者。
             } else {
-                let last_turn = table.turn.unwrap_or(1);
-                table.turn = table.next_unfolded_player(last_turn, 1);
-                table.betting_timeout_start = Some(std::time::Instant::now());
-                for i in 1..=table.max_players {
-                    if let Some(seat) = table.seats.get_mut(&i) {
-                        seat.turn = table.turn == Some(i);
+                let last_turn = table.turn().unwrap_or(1);
+                table.set_turn(table.next_unfolded_player(last_turn, 1));
+                table.set_betting_started_at(now_ms());
+                let current_turn = table.turn();
+                for i in 1..=table.max_players() {
+                    if let Some(seat) = table.local_seats.get_mut(&i) {
+                        seat.turn = current_turn == Some(i);
                     }
                 }
             }
@@ -643,6 +739,16 @@ pub(crate) async fn handle_turn_advance(io: &SocketIo, state: &Arc<SocketState>,
     };
     if result.is_some() {
         broadcast::broadcast_to_table(io, state, table_id, None).await;
+        broadcast_reveal_notice_if_active(io, state, table_id).await;
+        // crypto_event: reveal phase started (if active)
+        state.broadcast_crypto_event(
+            table_id,
+            broadcast::CryptoEventType::RevealToken,
+            "".to_string(),
+            None, true,
+            Some("reveal phase started".to_string()),
+            None,
+        ).await;
     }
 }
 
@@ -652,10 +758,10 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
         if let Some(table) = gs.tables.get_mut(&table_id) {
             // F8 fix: validate that it's the requesting player's turn and
             // the game is in a betting phase before processing any action.
-            let is_betting_phase = matches!(table.round_state,
+            let is_betting_phase = matches!(table.round_state(),
                 RoundState::PreFlop | RoundState::Flop | RoundState::Turn | RoundState::River);
-            let is_valid_turn = is_betting_phase && table.turn.map_or(false, |turn_id| {
-                table.seats.get(&turn_id).map_or(false, |seat| {
+            let is_valid_turn = is_betting_phase && table.turn().map_or(false, |turn_id| {
+                table.seats().get(&turn_id).map_or(false, |seat| {
                     seat.player.as_ref().map_or(false, |p| p.pk_hex == req.pk_hex)
                         && !seat.folded
                         && !seat.sitting_out
@@ -666,7 +772,7 @@ pub(crate) async fn process_action(io: &SocketIo, state: &Arc<SocketState>, tabl
             if !is_valid_turn {
                 tracing::warn!(
                     "[process_action] Rejected action {} from pk={}: not their turn or not betting phase (turn={:?}, state={:?})",
-                    req.action, req.pk_hex, table.turn, table.round_state
+                    req.action, req.pk_hex, table.turn(), table.round_state()
                 );
                 None
             } else {

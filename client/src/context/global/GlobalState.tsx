@@ -12,6 +12,7 @@ const GlobalState: React.FC<GlobalStateProps> = ({ children }) => {
   const [userName, setUserName] = useState<GlobalContextType['userName']>(null);
   const [email, setEmail] = useState<GlobalContextType['email']>(null);
   const [chipsAmount, setChipsAmount] = useState<GlobalContextType['chipsAmount']>(null);
+  const [suiBalance, setSuiBalance] = useState<GlobalContextType['suiBalance']>(null);
   const [tables, setTables] = useState<GlobalContextType['tables']>(null);
   const [players, setPlayers] = useState<GlobalContextType['players']>(null);
 
@@ -26,6 +27,8 @@ const GlobalState: React.FC<GlobalStateProps> = ({ children }) => {
         setEmail,
         chipsAmount,
         setChipsAmount,
+        suiBalance,
+        setSuiBalance,
         id,
         setId,
         tables,

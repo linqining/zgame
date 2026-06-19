@@ -1,5 +1,4 @@
 import React from 'react';
-import PokerChip from '../icons/PokerChip';
 import { Input } from '../forms/Input';
 import styled from 'styled-components';
 
@@ -23,6 +22,14 @@ const IconWrapper = styled.label`
   height: 40px;
   left: 0;
   top: calc(50% - 40px / 2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  img {
+    width: 22px;
+    height: 22px;
+  }
 `;
 
 interface ChipsAmountProps {
@@ -34,7 +41,7 @@ const ChipsAmount: React.FC<ChipsAmountProps> = ({ chipsAmount, clickHandler }) 
   return (
     <Wrapper onClick={clickHandler}>
       <IconWrapper htmlFor="chipsAmount">
-        <PokerChip />
+        <img src="/sui-sui-logo.svg" alt="SUI" />
       </IconWrapper>
       <Input
         disabled

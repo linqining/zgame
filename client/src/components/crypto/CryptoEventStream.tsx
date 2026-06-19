@@ -1,10 +1,16 @@
 import type { CryptoEvent, CryptoEventType } from '../../types/game'
 import { Shuffle, RefreshCw, Eye, LogOut, RefreshCcw } from 'lucide-react'
+import { useContentContext } from '../../context/content/contentContext'
+import { OnchainVerificationBadge } from './OnchainVerificationBadge'
 
 interface CryptoEventStreamProps {
   events: CryptoEvent[]
   onSelect?: (event: CryptoEvent) => void
   selectedTimestamp?: number // 高亮选中项
+  /** 紧凑模式：适配主牌桌侧边/底部布局，单行更小行高，仅展示最近 N 条 */
+  compact?: boolean
+  /** 紧凑模式下展示的最大条数，默认 6 */
+  compactMaxItems?: number
 }
 
 // 事件类型 → 图标映射（lucide-react）
@@ -28,6 +34,7 @@ export default function CryptoEventStream({
   onSelect,
   selectedTimestamp,
 }: CryptoEventStreamProps) {
+  const { getLocalizedString: t } = useContentContext()
   // 最新事件在顶部：倒序展示
   const sorted = [...events].reverse()
 
@@ -56,7 +63,7 @@ export default function CryptoEventStream({
             fontSize: '0.85rem',
           }}
         >
-          等待密码学事件…
+          {t('crypto_waiting-events')}
         </div>
       ) : (
         sorted.map((ev, i) => {
@@ -153,8 +160,21 @@ export default function CryptoEventStream({
                       color: ev.verified ? '#10b981' : '#ef4444',
                     }}
                   >
-                    {ev.verified ? '✓ verified' : '✗ failed'}
+                    {ev.verified ? t('crypto_verified') : t('crypto_failed')}
                   </span>
+                  {/* 链上交易 digest：点击跳转区块浏览器 */}
+                  {ev.tx_digest && (
+                    <span
+                      onClick={(e) => e.stopPropagation()}
+                      style={{ display: 'inline-flex' }}
+                    >
+                      <OnchainVerificationBadge
+                        txDigest={ev.tx_digest}
+                        verified={ev.verified}
+                        compact
+                      />
+                    </span>
+                  )}
                 </div>
                 {/* 消息（一行小字） */}
                 {ev.message && (

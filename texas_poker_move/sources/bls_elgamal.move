@@ -18,6 +18,9 @@ public struct ElGamalCiphertext has store, copy, drop {
 #[error]
 const EC1IsIdentity: vector<u8> = b"c1 is identity point, cannot remask";
 
+#[error]
+const EInvalidCiphertextLength: vector<u8> = b"ciphertext bytes must be exactly 96 bytes";
+
 // ========== 加密操作 ==========
 
 /// ElGamal 加密：c1 = G*r, c2 = M + pk*r
@@ -113,7 +116,7 @@ public fun ciphertext_to_bytes(ct: &ElGamalCiphertext): vector<u8> {
 
 /// 从 96 字节反序列化密文
 public fun ciphertext_from_bytes(bytes: &vector<u8>): ElGamalCiphertext {
-    assert!(bytes.length() == 96, 0);
+    assert!(bytes.length() == 96, EInvalidCiphertextLength);
     let mut c1_bytes = vector[];
     let mut c2_bytes = vector[];
     let mut i = 0;

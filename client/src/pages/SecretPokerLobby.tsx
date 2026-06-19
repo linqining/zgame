@@ -9,7 +9,6 @@ import { useGlobalContext } from '../context/global/globalContext';
 import { useContentContext } from '../context/content/contentContext';
 import { useModalContext } from '../context/modal/modalContext';
 import authContext from '../context/auth/authContext';
-import { ConnectButton } from '@mysten/dapp-kit-react/ui';
 import Text from '../components/typography/Text';
 import { PlayerName } from '../components/game/PlayerName';
 
@@ -21,7 +20,7 @@ const PageWrapper = styled.div`
   flex-direction: column;
   align-items: center;
   justify-content: flex-end;
-  background: #f8fafc;
+  background: ${({ theme }) => theme.colors.fontColorLight};
   padding: 5rem 1.5rem 2rem;
 
   @media screen and (max-width: 468px) {
@@ -38,12 +37,13 @@ const WelcomeHeading = styled.h2`
   font-size: 1.6rem;
   font-weight: 700;
   text-align: center;
-  color: #0f172a;
+  color: ${({ theme }) => theme.colors.fontColorDark};
   margin: 2rem auto;
   letter-spacing: -0.02em;
 
   span {
-    background: linear-gradient(135deg, #667eea, #764ba2);
+    /* TODO: #764ba2 提取到 theme */
+    background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -120,7 +120,7 @@ const MenuCard = styled.div`
     font-family: 'Inter', -apple-system, sans-serif;
     font-size: 1rem;
     font-weight: 700;
-    color: #667eea;
+    color: ${({ theme }) => theme.colors.secondaryCta};
     text-transform: uppercase;
     letter-spacing: 0.05em;
     margin: 0;
@@ -167,16 +167,20 @@ export default function Lobby() {
   const navigate = useNavigate();
   const { userName } = useGlobalContext();
   const { getLocalizedString } = useContentContext();
-  const { openModal } = useModalContext();
+  const { openModal, closeModal } = useModalContext();
   const { isLoggedIn, walletAddress } = useContext(authContext)!;
   const hasWallet = !!walletAddress;
 
   const requireAuthAndNavigate = () => {
     if (!isLoggedIn && !hasWallet) {
       openModal(
-        () => <ConnectButton />,
-        getLocalizedString('game_buyin-modal_header'),
-        getLocalizedString('game_buyin-modal_cancel'),
+        () => <Text textAlign="center">{getLocalizedString('game_login-required_text')}</Text>,
+        getLocalizedString('login_page-header_txt'),
+        getLocalizedString('navbar-login_btn'),
+        () => {
+          closeModal();
+          navigate('/', { state: { showLogin: true } });
+        },
       );
       return;
     }

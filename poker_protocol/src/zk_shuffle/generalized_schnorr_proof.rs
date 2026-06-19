@@ -4,10 +4,10 @@ use crate::zk_shuffle::error::VerificationError;
 
 /// Generalized Schnorr proof for proving that a point R is a linear combination
 /// of multiple base points G_1, G_2, ..., G_n.
-/// Proves: R = sum(k_i * G_i) for secret scalars k_1, k_2, ..., k_n.
+/// Proves: R = sum(k_i * g_i) for secret scalars k_1, k_2, ..., k_n.
 #[derive(Debug, Clone)]
 pub struct GeneralizedSchnorrProof<C: Curve> {
-    /// Commitment point T = sum(r_i * G_i)
+    /// Commitment point T = sum(r_i * g_i)
     pub commitment: C::Point,
     /// Response scalars s_i = r_i + c * k_i for each secret
     pub responses: Vec<C::Scalar>,
@@ -19,7 +19,7 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
     /// # Arguments
     /// * `base_points` - Base points G_1, G_2, ..., G_n
     /// * `secrets` - Secret scalars k_1, k_2, ..., k_n
-    /// * `R` - The point R = sum(k_i * G_i) to prove knowledge of
+    /// * `R` - The point R = sum(k_i * g_i) to prove knowledge of
     /// * `transcript` - Merlin transcript for Fiat-Shamir transform
     ///
     /// # Security
@@ -42,16 +42,16 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
         let n = base_points.len();
 
         // SECURITY: Validate that no base point is identity (zero point)
-        for G_i in base_points.iter() {
-            if G_i.is_identity() {
+        for g_i in base_points.iter() {
+            if g_i.is_identity() {
                 return Err(VerificationError::IdentityBasePoint);
             }
         }
 
         // Append public values to transcript
         transcript.append_message(b"gen_schnorr_n", &(n as u64).to_le_bytes());
-        for G_i in base_points {
-            transcript.append_point::<C>(b"gen_schnorr_base", G_i);
+        for g_i in base_points {
+            transcript.append_point::<C>(b"gen_schnorr_base", g_i);
         }
         transcript.append_point::<C>(b"gen_schnorr_R", R);
 
@@ -60,8 +60,13 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
             .map(|_| C::Scalar::random(&mut rand_core::OsRng))
             .collect();
 
-        // Compute commitment T = sum(r_i * G_i)
+        // Compute commitment T = sum(r_i * g_i)
         let commitment = C::Point::vartime_multiscalar_mul(&r_vec, base_points);
+
+        // 兼容 Move 合约 M-P17 修复：校验承诺点非 identity——identity 承诺削弱证明安全性
+        if commitment.is_identity() {
+            return Err(VerificationError::InvalidDLEQProof);
+        }
 
         // Append commitment to transcript
         transcript.append_point::<C>(b"gen_schnorr_commitment", &commitment);
@@ -110,16 +115,21 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
         let n = base_points.len();
 
         // SECURITY FIX: Validate that no base point is identity (zero point)
-        for G_i in base_points.iter() {
-            if G_i.is_identity(){
+        for g_i in base_points.iter() {
+            if g_i.is_identity(){
                 return Err(VerificationError::InvalidDLEQProof);
             }
         }
 
+        // 兼容 Move 合约 M-P17 修复：校验承诺点非 identity——identity 承诺削弱证明安全性
+        if self.commitment.is_identity() {
+            return Err(VerificationError::InvalidDLEQProof);
+        }
+
         // Append public values to transcript (same as in prove)
         transcript.append_message(b"gen_schnorr_n", &(n as u64).to_le_bytes());
-        for G_i in base_points {
-            transcript.append_point::<C>(b"gen_schnorr_base", G_i);
+        for g_i in base_points {
+            transcript.append_point::<C>(b"gen_schnorr_base", g_i);
         }
         transcript.append_point::<C>(b"gen_schnorr_R", R);
 
@@ -129,7 +139,7 @@ impl<C: Curve> GeneralizedSchnorrProof<C> {
         // Get challenge scalar c
         let c = transcript.challenge::<C>(b"gen_schnorr_challenge").scalar;
 
-        // Verify: sum(s_i * G_i) == T + c * R
+        // Verify: sum(s_i * g_i) == T + c * R
         let lhs = C::Point::vartime_multiscalar_mul(&self.responses, base_points);
         let rhs = self.commitment + *R * c;
 

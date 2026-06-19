@@ -3,14 +3,9 @@ import type { ZkLoginState, SponsoredTxState, AuthMethod } from '../../types/sui
 
 export interface AuthContextType {
   isLoggedIn: boolean;
-  // Legacy auth (keep for transition)
-  login: (email: string, password: string) => Promise<void>;
   logout: () => void;
-  register: (name: string, email: string, password: string) => Promise<void>;
   loadUser: (token: string) => Promise<void>;
-  // Sui wallet auth
   walletAddress: string | null;
-  connectWallet: () => void;
   disconnectWallet: () => void;
   // zkLogin
   zkLoginState: ZkLoginState;

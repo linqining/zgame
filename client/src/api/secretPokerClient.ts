@@ -1,4 +1,5 @@
-const API_BASE = '/api';
+import httpClient from '../helpers/httpClient';
+import type { AxiosError, AxiosRequestConfig } from 'axios';
 
 export interface GameConfig {
   num_players: number;
@@ -64,7 +65,7 @@ export interface SubmitRevealToken {
 }
 
 export interface SubmitRevealTokenRequest {
-  player_pk: string;
+  pk_hex: string;
   reveal_tokens: SubmitRevealToken[];
 }
 
@@ -177,29 +178,21 @@ export interface KeypairResponse {
 }
 
 class ApiClient {
-  private baseUrl: string;
-
-  constructor(baseUrl: string = API_BASE) {
-    this.baseUrl = baseUrl;
-  }
-
   private async request<T>(path: string, options?: RequestInit): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
-
-    const res = await fetch(url, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options?.headers as Record<string, string>),
-      },
-    });
-
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({ error: 'Request failed' }));
-      throw new Error(error.error || `HTTP ${res.status}`);
+    try {
+      const config: AxiosRequestConfig = {
+        method: (options?.method || 'GET') as AxiosRequestConfig['method'],
+        url: path,
+        data: options?.body,
+        headers: options?.headers as Record<string, string> | undefined,
+      };
+      const res = await httpClient(config);
+      return res.data;
+    } catch (err) {
+      const axiosErr = err as AxiosError<{ error?: string }>;
+      const errorData = axiosErr.response?.data;
+      throw new Error(errorData?.error || `HTTP ${axiosErr.response?.status ?? 'unknown'}`);
     }
-
-    return res.json();
   }
 
   async getConfig(): Promise<GameConfig> {

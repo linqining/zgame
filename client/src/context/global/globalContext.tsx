@@ -11,6 +11,8 @@ export interface GlobalContextType {
   setEmail: React.Dispatch<React.SetStateAction<string | null>>;
   chipsAmount: number | null;
   setChipsAmount: React.Dispatch<React.SetStateAction<number | null>>;
+  suiBalance: number | null;
+  setSuiBalance: React.Dispatch<React.SetStateAction<number | null>>;
   tables: unknown[] | null;
   setTables: React.Dispatch<React.SetStateAction<unknown[] | null>>;
   players: unknown[] | null;

@@ -125,8 +125,9 @@ const Button = styled.button.withConfig({
   ${({ dark, large, small }) =>
     dark &&
     css`
-      background: linear-gradient(135deg, #667eea, #764ba2);
-      color: white;
+      /* TODO: #764ba2 提取到 theme */
+      background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2);
+      color: ${({ theme }) => theme.colors.lightestBg};
       border: none;
       box-shadow: 0 4px 20px rgba(102, 126, 234, 0.35);
       padding: ${() => {
@@ -137,8 +138,9 @@ const Button = styled.button.withConfig({
 
       &,
       &:visited {
-        background: linear-gradient(135deg, #667eea, #764ba2);
-        color: white;
+        /* TODO: #764ba2 提取到 theme */
+        background: linear-gradient(135deg, ${({ theme }) => theme.colors.secondaryCta}, #764ba2);
+        color: ${({ theme }) => theme.colors.lightestBg};
       }
 
       &:hover,
@@ -146,19 +148,19 @@ const Button = styled.button.withConfig({
         background: linear-gradient(135deg, #7b8ff0, #8559ad);
         transform: translateY(-2px);
         box-shadow: 0 12px 35px rgba(102, 126, 234, 0.55);
-        color: white;
+        color: ${({ theme }) => theme.colors.lightestBg};
       }
 
       &:focus {
         outline: none;
         box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.3);
-        color: white;
+        color: ${({ theme }) => theme.colors.lightestBg};
       }
 
       &:disabled {
         background: grey;
         box-shadow: none;
-        color: white;
+        color: ${({ theme }) => theme.colors.lightestBg};
       }
     `}
 
@@ -166,7 +168,7 @@ const Button = styled.button.withConfig({
     darkSecondary &&
     css`
       background: rgba(241, 245, 249, 0.8);
-      color: #0f172a;
+      color: ${({ theme }) => theme.colors.fontColorDark};
       border: 1px solid rgba(203, 213, 225, 0.8);
       backdrop-filter: blur(10px);
       padding: ${() => {
@@ -178,7 +180,7 @@ const Button = styled.button.withConfig({
       &,
       &:visited {
         background: rgba(241, 245, 249, 0.8);
-        color: #0f172a;
+        color: ${({ theme }) => theme.colors.fontColorDark};
         border-color: rgba(203, 213, 225, 0.8);
       }
 
@@ -186,21 +188,21 @@ const Button = styled.button.withConfig({
       &:active {
         background: rgba(226, 232, 240, 0.9);
         border-color: #3b82f6;
-        color: #0f172a;
+        color: ${({ theme }) => theme.colors.fontColorDark};
         transform: translateY(-2px);
       }
 
       &:focus {
         outline: none;
-        border-color: #667eea;
+        border-color: ${({ theme }) => theme.colors.secondaryCta};
         box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
-        color: #0f172a;
+        color: ${({ theme }) => theme.colors.fontColorDark};
       }
 
       &:disabled {
         background: grey;
         border-color: grey;
-        color: white;
+        color: ${({ theme }) => theme.colors.lightestBg};
       }
     `}
 

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Lock } from 'lucide-react'
+import { useContentContext } from '../../context/content/contentContext'
 
 interface EncryptedCardProps {
   // 密文摘要（ElGamal c1/c2 的 hex 前 8 字符）
@@ -41,6 +42,7 @@ export default function EncryptedCard({
   cardIndex,
   size = 'md',
 }: EncryptedCardProps) {
+  const { getLocalizedString: t } = useContentContext()
   const s = SIZE_MAP[size]
   // 初始阶段：挂载时若已解密则直接处于解密态（不播放动画）
   const [phase, setPhase] = useState<CardPhase>(decryptedValue ? 'decrypted' : 'encrypted')
@@ -145,7 +147,7 @@ export default function EncryptedCard({
               lineHeight: 1,
             }}
           >
-            ENC
+            {t('crypto_enc')}
           </span>
           {/* 底部 c1/c2 密文摘要 */}
           {ciphertextPreview && (
@@ -219,7 +221,7 @@ export default function EncryptedCard({
                 textOverflow: 'ellipsis',
               }}
             >
-              decrypted by {decryptedBy}
+              {t('crypto_decrypted-by')}{decryptedBy}
             </span>
           )}
         </div>

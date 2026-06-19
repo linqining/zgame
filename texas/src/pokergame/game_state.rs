@@ -53,9 +53,58 @@ macro_rules! hex_proof_adapter {
     };
 }
 
+/// 对齐 Move table_constants::shuffle_phase_*：
+/// None=0, Waiting=1, Reconstruct=2, BeforePreflop=3
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum ShufflePhase {
+    #[default]
+    None,
+    Waiting,
+    Reconstruct,
+    BeforePreflop,
+}
+
+impl ShufflePhase {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ShufflePhase::None),
+            1 => Some(ShufflePhase::Waiting),
+            2 => Some(ShufflePhase::Reconstruct),
+            3 => Some(ShufflePhase::BeforePreflop),
+            _ => None,
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            ShufflePhase::None => 0,
+            ShufflePhase::Waiting => 1,
+            ShufflePhase::Reconstruct => 2,
+            ShufflePhase::BeforePreflop => 3,
+        }
+    }
+
+    /// 等价于 Move 的 shuffle_state.phase != shuffle_phase_none()
+    pub fn is_active(self) -> bool {
+        self != ShufflePhase::None
+    }
+}
+
+impl std::fmt::Display for ShufflePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShufflePhase::None => write!(f, "none"),
+            ShufflePhase::Waiting => write!(f, "waiting"),
+            ShufflePhase::Reconstruct => write!(f, "reconstruct"),
+            ShufflePhase::BeforePreflop => write!(f, "before_preflop"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShuffleState {
-    pub is_active: bool,
+    /// 对齐 Move ShuffleState.phase：None 表示不活跃，BeforePreflop/Reconstruct 表示活跃
+    pub phase: ShufflePhase,
     pub current_player_pk: Option<GamePkHex>,
     #[serde(skip)]
     pub timeout_start: Option<std::time::Instant>,
@@ -67,7 +116,7 @@ pub struct ShuffleState {
 impl ShuffleState {
     pub fn new() -> Self {
         Self {
-            is_active: false,
+            phase: ShufflePhase::None,
             current_player_pk: None,
             timeout_start: None,
             timeout_seconds: 10,
@@ -76,8 +125,13 @@ impl ShuffleState {
         }
     }
 
+    /// 等价于 Move 的 shuffle_state.phase != shuffle_phase_none()
+    pub fn is_active(&self) -> bool {
+        self.phase.is_active()
+    }
+
     pub fn reset(&mut self) {
-        self.is_active = false;
+        self.phase = ShufflePhase::None;
         self.current_player_pk = None;
         self.timeout_start = None;
         self.timeout_seconds = 0;
@@ -86,28 +140,48 @@ impl ShuffleState {
     }
 }
 
+/// 对齐 Move table_constants::reveal_phase_*：
+/// None=0 (inactive), HandReveal=1 (preflop), RedealReveal=2,
+/// CommunityReveal=3 (flop/turn/river), ShowdownReveal=6
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub enum RevealPhase {
     #[default]
+    None,
     HandReveal,
+    RedealReveal,
     CommunityReveal,
     ShowdownReveal,
-    RedealReveal,
 }
 
 impl RevealPhase {
-    /// 将链上 u8 reveal_phase 转换为 RevealPhase 枚举。
+    /// Rust 内部 u8 映射（None=0, HandReveal=1, RedealReveal=2, CommunityReveal=3, ShowdownReveal=4）
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
-            0 => Some(RevealPhase::HandReveal),
-            1 => Some(RevealPhase::CommunityReveal),
-            2 => Some(RevealPhase::ShowdownReveal),
-            3 => Some(RevealPhase::RedealReveal),
+            0 => Some(RevealPhase::None),
+            1 => Some(RevealPhase::HandReveal),
+            2 => Some(RevealPhase::RedealReveal),
+            3 => Some(RevealPhase::CommunityReveal),
+            4 => Some(RevealPhase::ShowdownReveal),
             _ => None,
         }
     }
 
-    /// 将 Move 合约的 7 值 reveal_phase 映射为 Rust 内部 4 值 RevealPhase。
+    pub fn to_u8(self) -> u8 {
+        match self {
+            RevealPhase::None => 0,
+            RevealPhase::HandReveal => 1,
+            RevealPhase::RedealReveal => 2,
+            RevealPhase::CommunityReveal => 3,
+            RevealPhase::ShowdownReveal => 4,
+        }
+    }
+
+    /// 等价于 Move 的 reveal_phase != reveal_phase_none()
+    pub fn is_active(self) -> bool {
+        self != RevealPhase::None
+    }
+
+    /// 将 Move 合约的 7 值 reveal_phase 映射为 Rust 内部 RevealPhase。
     /// Move: 0=NONE, 1=PREFLOP, 2=REDEAL, 3=FLOP, 4=TURN, 5=RIVER, 6=SHOWDOWN
     pub fn from_chain_u8(v: u8) -> Option<Self> {
         match v {
@@ -124,6 +198,7 @@ impl RevealPhase {
 impl std::fmt::Display for RevealPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RevealPhase::None => write!(f, "none"),
             RevealPhase::HandReveal => write!(f, "hand_reveal"),
             RevealPhase::CommunityReveal => write!(f, "community_reveal"),
             RevealPhase::ShowdownReveal => write!(f, "show_down_reveal"),
@@ -134,7 +209,7 @@ impl std::fmt::Display for RevealPhase {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RevealTokenState {
-    pub is_active: bool,
+    /// 对齐 Move RevealTokenState.reveal_phase：None 表示不活跃
     pub phase: RevealPhase,
     pub current_card_index: usize,
     pub total_cards_per_player: usize,
@@ -150,8 +225,7 @@ pub struct RevealTokenState {
 impl RevealTokenState {
     pub fn new(cards_per_player: usize, community_cards: usize) -> Self {
         Self {
-            is_active: false,
-            phase: RevealPhase::HandReveal,
+            phase: RevealPhase::None,
             current_card_index: 0,
             total_cards_per_player: cards_per_player,
             total_community_cards: community_cards,
@@ -163,8 +237,13 @@ impl RevealTokenState {
         }
     }
 
+    /// 等价于 Move 的 reveal_phase != reveal_phase_none()
+    pub fn is_active(&self) -> bool {
+        self.phase.is_active()
+    }
+
     pub fn reset(&mut self) {
-        self.is_active = false;
+        self.phase = RevealPhase::None;
         self.current_card_index = 0;
         self.timeout_start = None;
         self.completed_players.clear();
@@ -292,7 +371,6 @@ impl ReconstructState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevealTokenPublicState {
-    pub is_active: bool,
     pub phase: String,
     pub completed_players: Vec<GamePkHex>,
     pub pending_players: Vec<GamePkHex>,
@@ -326,7 +404,7 @@ impl ElGamalCiphertextJson {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShufflePublicState {
-    pub is_active: bool,
+    pub phase: ShufflePhase,
     pub current_player_pk: Option<GamePkHex>,
     pub completed_players: Vec<GamePkHex>,
     pub pending_players: Vec<GamePkHex>,
@@ -558,6 +636,8 @@ pub struct RevealTokenProofJson {
     pub commitment_t1_hex: String,
     pub commitment_t2_hex: String,
     pub response_s_hex: String,
+    /// M4: anti-replay nonce（对齐 Move reveal_token_proof.move）
+    pub nonce_hex: String,
 }
 
 impl RevealTokenProofJson {
@@ -567,6 +647,7 @@ impl RevealTokenProofJson {
             commitment_t1: hex_to_ecpoint(&self.commitment_t1_hex)?,
             commitment_t2: hex_to_ecpoint(&self.commitment_t2_hex)?,
             response_s: hex_to_scalar(&self.response_s_hex)?,
+            nonce: hex_to_scalar(&self.nonce_hex)?,
         })
     }
     pub fn from_proof(proof: RevealTokenProof<DefaultCurve>) -> Self {
@@ -575,6 +656,7 @@ impl RevealTokenProofJson {
             commitment_t1_hex: ecpoint_to_hex(&proof.commitment_t1),
             commitment_t2_hex: ecpoint_to_hex(&proof.commitment_t2),
             response_s_hex: scalar_to_hex(&proof.response_s),
+            nonce_hex: scalar_to_hex(&proof.nonce),
         }
     }
 }

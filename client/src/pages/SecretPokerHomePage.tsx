@@ -1,11 +1,12 @@
 import { useNavigate } from 'react-router-dom'
+import * as S from './SecretPokerHomePage.styles'
 import {
   Lock, Users, Zap, Eye, Shuffle, ArrowRight,
   Award, TrendingUp, Globe, Clock, Sparkles, CheckCircle2, Wallet, Gamepad2
 } from 'lucide-react'
 import { motion, useInView, useScroll, useTransform } from 'framer-motion'
 import { useRef, useState, useEffect, useCallback } from 'react'
-import { ConnectButton } from '@mysten/dapp-kit-react/ui'
+import { useContentContext } from '../context/content/contentContext'
 
 function FadeIn({ children, delay = 0, direction = 'up' }: { children: React.ReactNode; delay?: number; direction?: 'up' | 'down' | 'left' | 'right' }) {
   const ref = useRef(null)
@@ -30,12 +31,12 @@ function FadeIn({ children, delay = 0, direction = 'up' }: { children: React.Rea
   )
 }
 
-function StaggerContainer({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+function StaggerContainer({ children }: { children: React.ReactNode }) {
   const ref = useRef(null)
   const isInView = useInView(ref, { once: true, margin: '-80px' })
 
   return (
-    <motion.div
+    <S.StaggerGrid
       ref={ref}
       initial="hidden"
       animate={isInView ? 'visible' : 'hidden'}
@@ -43,10 +44,9 @@ function StaggerContainer({ children, className = '' }: { children: React.ReactN
         hidden: {},
         visible: { transition: { staggerChildren: 0.12 } },
       }}
-      className={className}
     >
       {children}
-    </motion.div>
+    </S.StaggerGrid>
   )
 }
 
@@ -64,37 +64,21 @@ function StaggerItem({ children, className = '' }: { children: React.ReactNode; 
   )
 }
 
-const sections = [
-  { id: 'hero', label: 'Home' },
-  { id: 'features', label: 'Features' },
-  { id: 'value', label: 'Benefits' },
-  { id: 'how', label: 'How It Works' },
-  { id: 'cta', label: 'Play' },
-  { id: 'footer', label: 'Footer' },
-]
-
-function ScrollNav({ activeIndex, onNavigate }: { activeIndex: number; onNavigate: (index: number) => void }) {
-  return (
-    <nav className="sp-scroll-nav">
-      {sections.map((s, i) => (
-        <button
-          key={s.id}
-          className={`sp-scroll-dot ${i === activeIndex ? 'active' : ''}`}
-          onClick={() => onNavigate(i)}
-          aria-label={s.label}
-        >
-          <span className="sp-scroll-label">{s.label}</span>
-        </button>
-      ))}
-    </nav>
-  )
-}
-
 export default function SecretPokerHomePage() {
   const navigate = useNavigate()
+  const { getLocalizedString: t } = useContentContext()
   const heroRef = useRef<HTMLElement | null>(null)
   const sectionRefs = useRef<(HTMLElement | null)[]>([])
   const [activeIndex, setActiveIndex] = useState(0)
+
+  const sections = [
+    { id: 'hero', label: t('homepage_nav-home') },
+    { id: 'features', label: t('homepage_nav-features') },
+    { id: 'value', label: t('homepage_nav-benefits') },
+    { id: 'how', label: t('homepage_nav-how') },
+    { id: 'cta', label: t('homepage_nav-play') },
+    { id: 'footer', label: t('homepage_nav-footer') },
+  ]
 
   const { scrollYProgress } = useScroll({
     target: heroRef,
@@ -137,13 +121,12 @@ export default function SecretPokerHomePage() {
   }, [])
 
   return (
-    <div className="sp-home">
+    <S.Home>
       {/* Subtle ambient particles */}
-      <div className="sp-particles">
+      <S.Particles>
         {Array.from({ length: 12 }).map((_, i) => (
-          <div
+          <S.Particle
             key={i}
-            className="sp-particle"
             style={{
               left: `${15 + Math.random() * 70}%`,
               top: `${15 + Math.random() * 70}%`,
@@ -153,338 +136,329 @@ export default function SecretPokerHomePage() {
             }}
           />
         ))}
-      </div>
+      </S.Particles>
 
       {/* Hero */}
-      <section className="sp-hero" ref={(el) => { heroRef.current = el; setSectionRef(0)(el) }}>
-        <div className="sp-hero-bg">
-          <div className="sp-hero-gradient"></div>
-          <div className="sp-hero-orb sp-orb-1"></div>
-          <div className="sp-hero-orb sp-orb-2"></div>
-        </div>
-        <motion.div
-          className="sp-hero-content"
+      <S.Hero ref={(el) => { heroRef.current = el; setSectionRef(0)(el) }}>
+        <S.HeroBg>
+          <S.HeroGradient />
+          <S.HeroOrb $variant={1} />
+          <S.HeroOrb $variant={2} />
+        </S.HeroBg>
+        <S.HeroContent
           style={{ opacity: heroOpacity, y: heroY }}
         >
-          <motion.div
-            className="sp-hero-badge"
+          <S.HeroBadge
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8, delay: 0.1 }}
           >
             <Sparkles size={14} strokeWidth={1.5} />
-            <span>Mathematically Unfair to Cheaters</span>
-          </motion.div>
+            <span>{t('homepage_hero-badge')}</span>
+          </S.HeroBadge>
 
-          <motion.h1
+          <S.HeroTitle
             initial={{ opacity: 0, y: 30 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 1, delay: 0.2 }}
           >
-            The Only Poker Room<br />
-            <span className="sp-gradient-text">Where Cheating Is Impossible</span>
-          </motion.h1>
+            {t('homepage_hero-title-1')}<br />
+            <S.GradientText>{t('homepage_hero-title-2')}</S.GradientText>
+          </S.HeroTitle>
 
-          <motion.p
-            className="sp-hero-desc"
+          <S.HeroDesc
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8, delay: 0.4 }}
           >
-            Every card is encrypted before it leaves your device.
-            The server cannot see your hand. Neither can we.
-          </motion.p>
+            {t('homepage_hero-desc-1')}
+            {t('homepage_hero-desc-2')}
+          </S.HeroDesc>
 
-          <motion.div
-            className="sp-hero-actions"
+          <S.HeroActions
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8, delay: 0.55 }}
           >
-            <motion.button
-              className="sp-btn-primary sp-btn-lg"
+            <S.BtnPrimary
+              $lg
               onClick={() => navigate('/lobby')}
               whileHover={{ scale: 1.03 }}
               whileTap={{ scale: 0.97 }}
             >
               <Zap size={18} strokeWidth={1.5} />
-              Join a Table
-            </motion.button>
-            <motion.button
-              className="sp-btn-secondary sp-btn-lg"
+              {t('homepage_hero-btn-join')}
+            </S.BtnPrimary>
+            <S.BtnSecondary
+              $lg
               onClick={() => handleNavigate(3)}
               whileHover={{ scale: 1.03 }}
               whileTap={{ scale: 0.97 }}
             >
-              See How It Works
+              {t('homepage_hero-btn-how')}
               <ArrowRight size={16} strokeWidth={1.5} />
-            </motion.button>
-          </motion.div>
+            </S.BtnSecondary>
+          </S.HeroActions>
 
-          <motion.div
-            className="sp-hero-stats"
+          <S.HeroStats
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: 1, delay: 0.8 }}
           >
-            <div className="sp-stat">
-              <span className="sp-stat-value">Server-Blind</span>
-              <span className="sp-stat-label">Your Cards Stay Hidden</span>
-            </div>
-            <div className="sp-stat-divider"></div>
-            <div className="sp-stat">
-              <span className="sp-stat-value">256-bit</span>
-              <span className="sp-stat-label">End-to-End Encrypted</span>
-            </div>
-            <div className="sp-stat-divider"></div>
-            <div className="sp-stat">
-              <span className="sp-stat-value">100%</span>
-              <span className="sp-stat-label">Provably Fair</span>
-            </div>
-          </motion.div>
-        </motion.div>
-      </section>
+            <S.Stat>
+              <S.StatValue>{t('homepage_stat-server-blind')}</S.StatValue>
+              <S.StatLabel>{t('homepage_stat-hidden')}</S.StatLabel>
+            </S.Stat>
+            <S.StatDivider />
+            <S.Stat>
+              <S.StatValue>{t('homepage_stat-256bit')}</S.StatValue>
+              <S.StatLabel>{t('homepage_stat-e2e')}</S.StatLabel>
+            </S.Stat>
+            <S.StatDivider />
+            <S.Stat>
+              <S.StatValue>{t('homepage_stat-100pct')}</S.StatValue>
+              <S.StatLabel>{t('homepage_stat-fair')}</S.StatLabel>
+            </S.Stat>
+          </S.HeroStats>
+        </S.HeroContent>
+      </S.Hero>
 
       {/* Features */}
-      <section id="features" className="sp-section" ref={setSectionRef(1)}>
-        <div className="sp-container">
+      <S.Section id="features" ref={setSectionRef(1)}>
+        <S.Container>
           <FadeIn>
-            <div className="sp-section-header">
-              <span className="sp-section-tag">What Traditional Poker Rooms Hide From You</span>
-              <h2 className="sp-section-title">Your Cards Are Invisible to Everyone but You</h2>
-              <p className="sp-section-subtitle">
-                In a normal poker room, the server knows every card.
-                Here, it sees nothing.
-              </p>
-            </div>
+            <S.SectionHeader>
+              <S.SectionTag>{t('homepage_features-tag')}</S.SectionTag>
+              <S.SectionTitle>{t('homepage_features-title')}</S.SectionTitle>
+              <S.SectionSubtitle>
+                {t('homepage_features-subtitle-1')}
+                {t('homepage_features-subtitle-2')}
+              </S.SectionSubtitle>
+            </S.SectionHeader>
           </FadeIn>
-          <StaggerContainer className="sp-feature-grid">
+          <StaggerContainer>
             {[
               {
                 icon: <Lock size={24} strokeWidth={1.5} />,
-                title: 'Encrypted on Your Device',
-                desc: 'Your hole cards are locked before they leave your browser. Even a server breach exposes nothing.',
+                title: t('homepage_feature-encrypted-title'),
+                desc: t('homepage_feature-encrypted-desc'),
                 color: '#10b981',
               },
               {
                 icon: <Shuffle size={24} strokeWidth={1.5} />,
-                title: 'Everyone Shuffles',
-                desc: 'Every player shuffles the deck. No single person — not even the platform — knows the card order.',
+                title: t('homepage_feature-shuffle-title'),
+                desc: t('homepage_feature-shuffle-desc'),
                 color: '#3b82f6',
               },
               {
                 icon: <Eye size={24} strokeWidth={1.5} />,
-                title: 'Only Your Browser Can Unlock Your Hand',
-                desc: 'Your private key never leaves your device. The server can never peek at your cards.',
+                title: t('homepage_feature-unlock-title'),
+                desc: t('homepage_feature-unlock-desc'),
                 color: '#8b5cf6',
               },
               {
                 icon: <Wallet size={24} strokeWidth={1.5} />,
-                title: 'You Hold the Keys',
-                desc: 'Your private key stays on your device. You control access, or safely delegate it.',
+                title: t('homepage_feature-keys-title'),
+                desc: t('homepage_feature-keys-desc'),
                 color: '#f59e0b',
               },
             ].map((f, i) => (
               <StaggerItem key={i}>
-                <motion.div
-                  className="sp-feature-card"
+                <S.FeatureCard
                   whileHover={{ y: -6 }}
                   transition={{ duration: 0.4 }}
                 >
-                  <div className="sp-feature-icon" style={{ color: f.color }}>
+                  <S.FeatureIcon style={{ color: f.color }}>
                     {f.icon}
-                  </div>
+                  </S.FeatureIcon>
                   <h3>{f.title}</h3>
                   <p>{f.desc}</p>
-                </motion.div>
+                </S.FeatureCard>
               </StaggerItem>
             ))}
           </StaggerContainer>
-        </div>
-      </section>
+        </S.Container>
+      </S.Section>
 
       {/* Benefits */}
-      <section id="value" className="sp-section sp-section-alt" ref={setSectionRef(2)}>
-        <div className="sp-container">
+      <S.Section id="value" $variant="alt" ref={setSectionRef(2)}>
+        <S.Container>
           <FadeIn>
-            <div className="sp-section-header">
-              <span className="sp-section-tag">The House Cannot Cheat What It Cannot See</span>
-              <h2 className="sp-section-title">Keep Your Edge. Keep Your Privacy.</h2>
-              <p className="sp-section-subtitle">
-                Lower fees. Zero server visibility. Games that run forever.
-              </p>
-            </div>
+            <S.SectionHeader>
+              <S.SectionTag>{t('homepage_benefits-tag')}</S.SectionTag>
+              <S.SectionTitle>{t('homepage_benefits-title')}</S.SectionTitle>
+              <S.SectionSubtitle>
+                {t('homepage_benefits-subtitle')}
+              </S.SectionSubtitle>
+            </S.SectionHeader>
           </FadeIn>
-          <StaggerContainer className="sp-value-grid">
+          <StaggerContainer>
             {[
               {
                 icon: <Award size={28} strokeWidth={1.5} />,
-                title: 'Every Hand Is Auditable',
-                desc: 'Every hand leaves a cryptographic proof. Anyone can verify fairness. No trust required.',
-                stat: '100%',
-                statLabel: 'Auditable',
+                title: t('homepage_benefit-auditable-title'),
+                desc: t('homepage_benefit-auditable-desc'),
+                stat: t('homepage_benefit-auditable-stat'),
+                statLabel: t('homepage_benefit-auditable-label'),
                 color: '#f59e0b',
               },
               {
                 icon: <Globe size={28} strokeWidth={1.5} />,
-                title: 'Play Instantly, Anywhere',
-                desc: 'Open your browser and play. No downloads, no accounts, no waiting.',
-                stat: '0',
-                statLabel: 'Downloads',
+                title: t('homepage_benefit-instant-title'),
+                desc: t('homepage_benefit-instant-desc'),
+                stat: t('homepage_benefit-instant-stat'),
+                statLabel: t('homepage_benefit-instant-label'),
                 color: '#3b82f6',
               },
               {
                 icon: <TrendingUp size={28} strokeWidth={1.5} />,
-                title: 'We Take Less Than 1%',
-                desc: 'Traditional platforms take 2-5% per pot. We take less than 1%. That difference adds up fast.',
-                stat: '<1%',
-                statLabel: 'Platform Fee',
+                title: t('homepage_benefit-fee-title'),
+                desc: t('homepage_benefit-fee-desc'),
+                stat: t('homepage_benefit-fee-stat'),
+                statLabel: t('homepage_benefit-fee-label'),
                 color: '#10b981',
               },
               {
                 icon: <Clock size={28} strokeWidth={1.5} />,
-                title: 'No Downtime. No Maintenance.',
-                desc: 'Built on decentralized infrastructure. No single point of failure means no "server maintenance" excuses.',
-                stat: '24/7',
-                statLabel: 'Availability',
+                title: t('homepage_benefit-uptime-title'),
+                desc: t('homepage_benefit-uptime-desc'),
+                stat: t('homepage_benefit-uptime-stat'),
+                statLabel: t('homepage_benefit-uptime-label'),
                 color: '#8b5cf6',
               },
             ].map((item, i) => (
               <StaggerItem key={i}>
-                <motion.div
-                  className="sp-value-card"
+                <S.ValueCard
                   whileHover={{ y: -4 }}
                   transition={{ duration: 0.4 }}
                 >
-                  <div className="sp-value-header">
-                    <div className="sp-value-icon" style={{ color: item.color }}>
+                  <S.ValueHeader>
+                    <S.ValueIcon style={{ color: item.color }}>
                       {item.icon}
-                    </div>
-                    <div className="sp-value-stat">
-                      <span className="sp-stat-number" style={{ color: item.color }}>{item.stat}</span>
-                      <span className="sp-stat-desc">{item.statLabel}</span>
-                    </div>
-                  </div>
+                    </S.ValueIcon>
+                    <S.ValueStat>
+                      <S.StatNumber style={{ color: item.color }}>{item.stat}</S.StatNumber>
+                      <S.StatDesc>{item.statLabel}</S.StatDesc>
+                    </S.ValueStat>
+                  </S.ValueHeader>
                   <h3>{item.title}</h3>
                   <p>{item.desc}</p>
-                </motion.div>
+                </S.ValueCard>
               </StaggerItem>
             ))}
           </StaggerContainer>
-        </div>
-      </section>
+        </S.Container>
+      </S.Section>
 
       {/* How It Works */}
-      <section id="how" className="sp-section" ref={setSectionRef(3)}>
-        <div className="sp-container">
+      <S.Section id="how" $variant="how" ref={setSectionRef(3)}>
+        <S.Container>
           <FadeIn>
-            <div className="sp-section-header">
-              <span className="sp-section-tag">Five Steps. Total Transparency.</span>
-              <h2 className="sp-section-title">How We Deal a Hand Without Seeing Your Cards</h2>
-              <p className="sp-section-subtitle">
-                No math degree required. Here is exactly what happens, step by step.
-              </p>
-            </div>
+            <S.SectionHeader>
+              <S.SectionTag>{t('homepage_how-tag')}</S.SectionTag>
+              <S.SectionTitle>{t('homepage_how-title')}</S.SectionTitle>
+              <S.SectionSubtitle>
+                {t('homepage_how-subtitle')}
+              </S.SectionSubtitle>
+            </S.SectionHeader>
           </FadeIn>
-          <div className="sp-protocol-flow">
+          <S.ProtocolFlow>
             {[
               {
                 step: '01',
-                title: 'Lock the Deck',
-                desc: 'Each player adds a digital lock to the deck. No one can open it alone.',
+                title: t('homepage_step-lock-title'),
+                desc: t('homepage_step-lock-desc'),
                 icon: <Lock size={18} strokeWidth={1.5} />,
               },
               {
                 step: '02',
-                title: 'Shuffle Together',
-                desc: 'Every player shuffles in turn. The final order is random and unknown to anyone.',
+                title: t('homepage_step-shuffle-title'),
+                desc: t('homepage_step-shuffle-desc'),
                 icon: <Shuffle size={18} strokeWidth={1.5} />,
               },
               {
                 step: '03',
-                title: 'Deal Face-Down',
-                desc: 'Cards are dealt while locked. The server sees only encrypted data.',
+                title: t('homepage_step-deal-title'),
+                desc: t('homepage_step-deal-desc'),
                 icon: <Gamepad2 size={18} strokeWidth={1.5} />,
               },
               {
                 step: '04',
-                title: 'Reveal When Ready',
-                desc: 'When it is time to show, your browser unlocks your cards locally using your private key.',
+                title: t('homepage_step-reveal-title'),
+                desc: t('homepage_step-reveal-desc'),
                 icon: <Eye size={18} strokeWidth={1.5} />,
               },
               {
                 step: '05',
-                title: 'Community Cards Open',
-                desc: 'The shared cards are unlocked piece by piece by all players working together.',
+                title: t('homepage_step-community-title'),
+                desc: t('homepage_step-community-desc'),
                 icon: <Users size={18} strokeWidth={1.5} />,
               },
               {
                 step: '06',
-                title: 'Verify Everything',
-                desc: 'Every action leaves a proof. If anything was tampered with, anyone can spot it instantly.',
+                title: t('homepage_step-verify-title'),
+                desc: t('homepage_step-verify-desc'),
                 icon: <CheckCircle2 size={18} strokeWidth={1.5} />,
               },
             ].map((s, i) => (
               <FadeIn key={i} delay={i * 0.1} direction="up">
-                <div className="sp-protocol-step">
-                  <div className="sp-step-number">
-                    <span className="sp-step-num">{s.step}</span>
-                    <span className="sp-step-icon">{s.icon}</span>
-                  </div>
-                  <div className="sp-step-content">
+                <S.ProtocolStep>
+                  <S.StepNumber>
+                    <S.StepNum>{s.step}</S.StepNum>
+                    <S.StepIcon>{s.icon}</S.StepIcon>
+                  </S.StepNumber>
+                  <S.StepContent>
                     <h4>{s.title}</h4>
                     <p>{s.desc}</p>
-                  </div>
-                  {i < 5 && <div className="sp-step-line" />}
-                </div>
+                  </S.StepContent>
+                  {i < 5 && <S.StepLine />}
+                </S.ProtocolStep>
               </FadeIn>
             ))}
-          </div>
-        </div>
-      </section>
+          </S.ProtocolFlow>
+        </S.Container>
+      </S.Section>
 
       {/* CTA */}
-      <section className="sp-section sp-cta-section" ref={setSectionRef(4)}>
-        <div className="sp-container">
+      <S.Section $variant="cta" ref={setSectionRef(4)}>
+        <S.Container>
           <FadeIn>
-            <div className="sp-cta-content">
-              <h2>No Trust Required. Just Math.</h2>
-              <p>Join a table in seconds. No downloads. No hidden cards. No house edge.</p>
-              <motion.button
-                className="sp-btn-primary sp-btn-lg"
+            <S.CTAContent>
+              <h2>{t('homepage_cta-title')}</h2>
+              <p>{t('homepage_cta-desc')}</p>
+              <S.BtnPrimary
+                $lg
                 onClick={() => navigate('/lobby')}
                 whileHover={{ scale: 1.03 }}
                 whileTap={{ scale: 0.97 }}
               >
                 <Sparkles size={18} strokeWidth={1.5} />
-                Start Playing Free
-              </motion.button>
-            </div>
+                {t('homepage_cta-btn')}
+              </S.BtnPrimary>
+            </S.CTAContent>
           </FadeIn>
-        </div>
-      </section>
+        </S.Container>
+      </S.Section>
 
-      <footer className="sp-footer" ref={setSectionRef(5)}>
-        <div className="sp-container">
-          <div className="sp-footer-content">
-            <div className="sp-footer-brand">
-              <span>🃏 Secret Poker</span>
-              <p>Trust the math, not the house.</p>
-            </div>
-            <div className="sp-footer-links">
-              <motion.button
-                className="sp-footer-link"
+      <S.Footer ref={setSectionRef(5)}>
+        <S.Container>
+          <S.FooterContent>
+            <S.FooterBrand>
+              <span>🃏 {t('homepage_footer-brand')}</span>
+              <p>{t('homepage_footer-tagline')}</p>
+            </S.FooterBrand>
+            <S.FooterLinks>
+              <S.FooterLink
                 onClick={() => navigate('/lobby')}
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
               >
-                Lobby
-              </motion.button>
-              <ConnectButton />
-            </div>
-            <div className="sp-footer-tech">
-              <span>Built with:</span>
-              <div className="sp-tech-tags">
+                {t('homepage_footer-lobby')}
+              </S.FooterLink>
+            </S.FooterLinks>
+            <S.FooterTech>
+              <span>{t('homepage_footer-built-with')}</span>
+              <S.TechTags>
                 {['Rust', 'React', 'WebAssembly', 'Cryptography'].map((tag) => (
                   <motion.span
                     key={tag}
@@ -494,19 +468,30 @@ export default function SecretPokerHomePage() {
                     {tag}
                   </motion.span>
                 ))}
-              </div>
-            </div>
-            <div className="sp-footer-ref">
-              <span>Based on:</span>
+              </S.TechTags>
+            </S.FooterTech>
+            <S.FooterRef>
+              <span>{t('homepage_footer-based-on')}</span>
               <a href="https://github.com/linqining/mental-poker-rust" target="_blank" rel="noopener noreferrer">
-                Peer-reviewed mental poker cryptography
+                {t('homepage_footer-ref-text')}
               </a>
-            </div>
-          </div>
-        </div>
-      </footer>
+            </S.FooterRef>
+          </S.FooterContent>
+        </S.Container>
+      </S.Footer>
 
-      <ScrollNav activeIndex={activeIndex} onNavigate={handleNavigate} />
-    </div>
+      <S.ScrollNav>
+        {sections.map((s, i) => (
+          <S.ScrollDot
+            key={s.id}
+            $active={i === activeIndex}
+            onClick={() => handleNavigate(i)}
+            aria-label={s.label}
+          >
+            <S.ScrollLabel>{s.label}</S.ScrollLabel>
+          </S.ScrollDot>
+        ))}
+      </S.ScrollNav>
+    </S.Home>
   )
 }

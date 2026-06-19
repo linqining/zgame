@@ -42,21 +42,58 @@ fn shared_http_client() -> &'static reqwest::Client {
 }
 
 /// 通过 Sui JSON-RPC 获取当前 epoch，用于设置交易过期时间。
+///
+/// 优先使用 `sui_getLatestSuiSystemState`；若节点不支持（公共 testnet 节点
+/// 可能返回 -32601 Method not found），回退到 `sui_getCheckpoints` 取最新
+/// checkpoint 的 epoch 字段。
 async fn get_current_epoch(config: &Config) -> Result<u64, String> {
     let http = shared_http_client();
+
+    // 尝试 sui_getLatestSuiSystemState
+    match sponsor::sui_jsonrpc(http, &config.fullnode_url, "sui_getLatestSuiSystemState", vec![]).await {
+        Ok(result) => {
+            let epoch = result
+                .get("epoch")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| result.get("epoch").and_then(|v| v.as_u64()))
+                .ok_or("Missing epoch in system state")?;
+            return Ok(epoch);
+        }
+        Err(e) => {
+            tracing::debug!("[submit] sui_getLatestSuiSystemState failed ({}), falling back to sui_getCheckpoints", e);
+        }
+    }
+
+    // 回退：sui_getCheckpoints（取最新 checkpoint 的 epoch）
     let result = sponsor::sui_jsonrpc(
         http,
         &config.fullnode_url,
-        "sui_getLatestSuiSystemState",
-        vec![],
+        "sui_getCheckpoints",
+        vec![
+            serde_json::Value::Null,
+            serde_json::json!(1),
+            serde_json::json!(true), // descending = 最新
+        ],
     )
     .await?;
+
     let epoch = result
-        .get("epoch")
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|cp| cp.get("epoch"))
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<u64>().ok())
-        .or_else(|| result.get("epoch").and_then(|v| v.as_u64()))
-        .ok_or("Missing epoch in system state")?;
+        .or_else(|| {
+            result
+                .get("data")
+                .and_then(|d| d.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|cp| cp.get("epoch"))
+                .and_then(|v| v.as_u64())
+        })
+        .ok_or("Missing epoch in checkpoint response")?;
     Ok(epoch)
 }
 
@@ -257,6 +294,12 @@ pub async fn submit_tick_tx(
         &config.sui_clock_object_id,
     )?;
 
+    // 1.5 解析 shared object 的 initial_shared_version（placeholder 0 → 真实版本）。
+    //     公共 Sui 全节点的 sui_executeTransactionBlock 不会自动解析 version 0，
+    //     必须显式解析，否则返回 -32602 "Invalid value was given to the function"。
+    let http = shared_http_client();
+    let pt = ptb::resolve_shared_object_versions(http, &config.fullnode_url, pt).await?;
+
     // 2. 序列化为 TransactionKind (base64)
     let tx_kind_b64 = ptb::serialize_tx_kind(pt)?;
 
@@ -264,7 +307,8 @@ pub async fn submit_tick_tx(
     let tx_kind = decode_tx_kind(&tx_kind_b64)?;
 
     // 4. 获取 sponsor gas 信息
-    let gas_info = sponsor::fetch_gas_info(config).await?;
+    let gas_info = sponsor::fetch_gas_info(config).await
+        .map_err(|e| format!("fetch_gas_info: {}", e))?;
 
     // 5. 解析 sponsor 地址（sender = gas_owner = sponsor）
     let sender: Address = gas_info
@@ -276,7 +320,8 @@ pub async fn submit_tick_tx(
     let gas_payment = build_gas_payment(&gas_info, sender, config.sponsor_gas_budget)?;
 
     // F14: 获取当前 epoch，设置交易过期时间（当前 epoch + 2），避免交易无过期被重放
-    let current_epoch = get_current_epoch(config).await?;
+    let current_epoch = get_current_epoch(config).await
+        .map_err(|e| format!("get_current_epoch: {}", e))?;
 
     // 7. 构建完整 Transaction
     let transaction = Transaction {
@@ -297,6 +342,7 @@ pub async fn submit_tick_tx(
 
     // 10. 提交（只需 sponsor 一个签名）
     execute_tx(config, &tx_bytes_b64, vec![sponsor_signature]).await
+        .map_err(|e| format!("execute_tx: {}", e))
 }
 
 // ---------------------------------------------------------------------------
@@ -312,28 +358,26 @@ mod tests {
         Config {
             port: 9001,
             jwt_secret: String::new(),
-            initial_chips_amount: 0,
             jwt_token_expires_in: 0,
-            mongodb_uri: String::new(),
-            mongodb_db_name: String::new(),
             betting_timeout_secs: 0,
             showdown_display_secs: 0,
             hand_complete_wait_secs: 0,
             ready_countdown_secs: 0,
-            free_chips_threshold: 0,
-            free_chips_cooldown_secs: 0,
             max_players_per_table: 0,
             sponsor_private_key: zeroize::Zeroizing::new(String::new()),
             sponsor_gas_budget: 0,
             fullnode_url: String::new(),
+            grpc_url: String::new(),
             zklogin_salt_secret: String::new(),
             inodra_webhook_secret: String::new(),
             sui_package_id: String::new(),
+            sui_origin_package_id: String::new(),
             sui_network: String::new(),
             sui_event_provider: String::new(),
             sui_tick_interval_ms: 0,
             sui_clock_object_id: "0x6".to_string(),
             sui_on_chain_enabled: false,
+            shinami_api_key: String::new(),
         }
     }
 

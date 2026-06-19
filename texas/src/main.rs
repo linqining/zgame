@@ -10,16 +10,18 @@ mod sui_events;
 mod sui_webhook;
 mod sui_listener;
 mod sui_grpc;
+mod sui_graphql_sub;
 mod sui_query;
 mod relayer;
 #[cfg(test)]
 mod move_verify_tests;
+#[cfg(test)]
+mod join_and_shuffle_testnet;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{routing, Router};
-use mongodb::Client as MongoClient;
 use socket::SocketState;
 use socketioxide::SocketIo;
 use tower::ServiceBuilder;
@@ -35,7 +37,7 @@ async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "debug,tokio_runtime=info".into())
+                .unwrap_or_else(|_| "info,texas=debug".into())
         )
         .with_target(true)
         .with_thread_ids(false)
@@ -46,20 +48,12 @@ async fn main() -> std::io::Result<()> {
     let config = Config::from_env();
     let port = config.port;
 
-    let mongo_client = match MongoClient::with_uri_str(&config.mongodb_uri).await {
-        Ok(client) => client,
-        Err(e) => {
-            tracing::error!("Failed to connect to MongoDB at {}: {}", config.mongodb_uri, e);
-            std::process::exit(1);
-        }
-    };
-    let mongo_db = mongo_client.database(&config.mongodb_db_name);
-    let db = Database::new(&mongo_db).await;
+    let db = Database::new();
 
     let mut initial_tables = HashMap::new();
-    initial_tables.insert(1, Table::new(1, "Table 1".to_string(), 10000, config.max_players_per_table, "0xc0c2c7e6dd9aaee5b3293869b698cff875a09f3c15af01c7062111ab7d8d3e0e".to_string()));
-    initial_tables.insert(2, Table::new(2, "Table 2".to_string(), 20000, config.max_players_per_table, "0x43aade11dde19ef6116d04c88f3b9a75c444fefcdd22d4e3691de251155949d8".to_string()));
-    initial_tables.insert(3, Table::new(3, "Table 3".to_string(), 50000, config.max_players_per_table, "0x54b3e41a7a34f07ef4f87031c1bbe76edbcafe3e4b8b16c959f53e016e3e409b".to_string()));
+    initial_tables.insert(1, Table::new(1, "Table 1".to_string(), 10000, config.max_players_per_table, "0x4f645d36695b43015021883fcf26780d3a85963a058e9b10180c6f0f482518ef".to_string()));
+    // initial_tables.insert(2, Table::new(2, "Table 2".to_string(), 20000, config.max_players_per_table, "".to_string()));
+    // initial_tables.insert(3, Table::new(3, "Table 3".to_string(), 50000, config.max_players_per_table, "".to_string()));
     for table in initial_tables.values_mut() {
         table.start_shuffle();
     }
@@ -73,34 +67,35 @@ async fn main() -> std::io::Result<()> {
         .build_layer();
 
     socket::set_socket_io(io.clone());
+    socket_state.init_table_event_channels(io.clone()).await;
     socket::register_handlers(&io);
-
-    let relayer_state = Arc::new(relayer::RelayerState::new());
 
     let app_state = Arc::new(AppState {
         db: socket_state.db.clone(),
         config: config.clone(),
         socket_state: socket_state.clone(),
-        relayer_state: relayer_state.clone(),
+        processed_actions: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         processed_webhook_ids: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        action_retry_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
 
     // 克隆用于 Sui 监听器后台任务
     let listener_state = app_state.clone();
     // 克隆用于 relayer tick 后台任务
     let tick_state = app_state.clone();
+    // 克隆用于 action retry 后台任务（Task 10）
+    let retry_state = app_state.clone();
 
     let api_routes = Router::new()
-        .route("/auth",routing::get(handlers::get_current_user).post(handlers::login))
+        .route("/auth",routing::get(handlers::get_current_user))
         .route("/auth/wallet", routing::post(handlers::wallet_login))
         .route("/auth/wallet/logout", routing::post(handlers::wallet_logout))
         .route("/auth/zklogin", routing::post(sponsor::zklogin_auth))
         .route("/auth/zklogin/salt", routing::post(sponsor::get_zklogin_salt))
-        .route("/users", routing::post(handlers::register))
-        .route("/chips/free", routing::get(handlers::free_chips))
+        .route("/auth/zklogin/prover", routing::post(sponsor::post_zklogin_prover))
+        .route("/sui/balance", routing::get(handlers::get_sui_balance))
         .route("/tables/:table_id", routing::get(handlers::get_table))
         .route("/sponsor/transaction", routing::post(sponsor::sponsor_transaction))
-        .route("/sponsor/gas-info", routing::get(sponsor::get_gas_info))
         .route("/sui/webhook", routing::post(sui_webhook::inodra_webhook))
         .route("/sui/tables", routing::get(handlers::list_sui_tables))
         .route("/sui/tables/:table_id", routing::get(handlers::get_sui_table))
@@ -113,7 +108,7 @@ async fn main() -> std::io::Result<()> {
 
     let app = Router::new()
         .nest("/api", api_routes)
-        .route("/", routing::get(|| async { "Welcome to Vintage Poker (Rust)!" }))
+        .route("/", routing::get(|| async { "Welcome to Secret Poker (Rust)!" }))
         // G17 TODO: 当前未实现 API 速率限制（rate limiting）。生产环境应引入
         // tower_governor 或类似中间件对 /api/* 路由（尤其是 /auth/*、/chips/free、
         // /sponsor/* 等敏感端点）添加 per-IP / per-user 限流，防止暴力破解与滥用。
@@ -136,8 +131,8 @@ async fn main() -> std::io::Result<()> {
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    tracing::info!("Vintage Poker Server (Rust) starting on port {}", port);
-    tracing::info!("Connected to MongoDB: {}@{}", socket_state.config.mongodb_db_name, socket_state.config.mongodb_uri);
+    tracing::info!("Secret Poker Server (Rust) starting on port {}", port);
+    tracing::info!("Using in-memory user storage (MongoDB removed). SUI wallet balance = chip balance (1 SUI = 10000 chips).");
 
     // 启动 Sui 事件监听器后台任务（历史回填）
     tokio::spawn(async move {
@@ -147,6 +142,11 @@ async fn main() -> std::io::Result<()> {
     // 启动 relayer 定时 tick 后台任务（处理链上超时）
     tokio::spawn(async move {
         relayer::tick::run_tick_loop(tick_state).await;
+    });
+
+    // 启动 action retry 后台任务（Task 10：重试失败的玩家行动事件）
+    tokio::spawn(async move {
+        relayer::run_action_retry_loop(retry_state).await;
     });
 
     axum::serve(listener, app).await

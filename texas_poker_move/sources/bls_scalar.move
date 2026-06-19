@@ -7,7 +7,9 @@ use std::hash;
 
 // ========== 常量 ==========
 const N_CARDS: u64 = 52;
-const MSM_MAX: u64 = 32;
+
+#[error]
+const EMSMLengthMismatch: vector<u8> = b"scalars and points length mismatch in g1_msm";
 
 // ========== 标量辅助函数 ==========
 
@@ -27,13 +29,30 @@ public fun hash_to_scalar(data: &vector<u8>): group_ops::Element<Scalar> {
 }
 
 /// 从密文和私钥派生标量
-/// SHA3-256(c1*sk_bytes || c2*sk_bytes) → hash_to_scalar
+/// SHA3-256(len(c1_sk) || c1_sk || len(c2_sk) || c2_sk) → hash_to_scalar
+/// m6 修复：添加长度前缀防止歧义编码
 public fun derive_scalar_from_card_and_sk(
     c1_sk: &vector<u8>,
     c2_sk: &vector<u8>,
 ): group_ops::Element<Scalar> {
-    let mut data = *c1_sk;
+    let mut data = vector[];
+    // 长度前缀（4 字节小端）
+    let len1 = c1_sk.length();
+    data.push_back(((len1) & 0xFF) as u8);
+    data.push_back(((len1 >> 8) & 0xFF) as u8);
+    data.push_back(((len1 >> 16) & 0xFF) as u8);
+    data.push_back(((len1 >> 24) & 0xFF) as u8);
     let mut i = 0;
+    while (i < c1_sk.length()) {
+        data.push_back(*(vector::borrow(c1_sk, i)));
+        i = i + 1;
+    };
+    let len2 = c2_sk.length();
+    data.push_back(((len2) & 0xFF) as u8);
+    data.push_back(((len2 >> 8) & 0xFF) as u8);
+    data.push_back(((len2 >> 16) & 0xFF) as u8);
+    data.push_back(((len2 >> 24) & 0xFF) as u8);
+    i = 0;
     while (i < c2_sk.length()) {
         data.push_back(*(vector::borrow(c2_sk, i)));
         i = i + 1;
@@ -42,18 +61,40 @@ public fun derive_scalar_from_card_and_sk(
 }
 
 /// 从密文和公钥派生标量
-/// SHA3-256(c1_bytes || c2_bytes || pk_bytes) → hash_to_scalar
+/// SHA3-256(len(c1) || c1 || len(c2) || c2 || len(pk) || pk) → hash_to_scalar
+/// m6 修复：添加长度前缀防止歧义编码
 public fun derive_scalar_from_card_and_pk(
     c1: &vector<u8>,
     c2: &vector<u8>,
     pk: &vector<u8>,
 ): group_ops::Element<Scalar> {
-    let mut data = *c1;
+    let mut data = vector[];
+    // 长度前缀（4 字节小端）
+    let len1 = c1.length();
+    data.push_back(((len1) & 0xFF) as u8);
+    data.push_back(((len1 >> 8) & 0xFF) as u8);
+    data.push_back(((len1 >> 16) & 0xFF) as u8);
+    data.push_back(((len1 >> 24) & 0xFF) as u8);
     let mut i = 0;
+    while (i < c1.length()) {
+        data.push_back(*(vector::borrow(c1, i)));
+        i = i + 1;
+    };
+    let len2 = c2.length();
+    data.push_back(((len2) & 0xFF) as u8);
+    data.push_back(((len2 >> 8) & 0xFF) as u8);
+    data.push_back(((len2 >> 16) & 0xFF) as u8);
+    data.push_back(((len2 >> 24) & 0xFF) as u8);
+    i = 0;
     while (i < c2.length()) {
         data.push_back(*(vector::borrow(c2, i)));
         i = i + 1;
     };
+    let len3 = pk.length();
+    data.push_back(((len3) & 0xFF) as u8);
+    data.push_back(((len3 >> 8) & 0xFF) as u8);
+    data.push_back(((len3 >> 16) & 0xFF) as u8);
+    data.push_back(((len3 >> 24) & 0xFF) as u8);
     i = 0;
     while (i < pk.length()) {
         data.push_back(*(vector::borrow(pk, i)));
@@ -123,36 +164,27 @@ public fun scalar_from_bytes(bytes: &vector<u8>): group_ops::Element<Scalar> {
 
 // ========== G1 辅助函数 ==========
 
-/// 分块 MSM：g1_multi_scalar_multiplication 最多32对
-/// 将超过32对的拆分为多个块，结果相加
+/// 多标量乘法（MSM）：sum(scalars[i] * points[i])
+///
+/// 注意：Sui testnet 的 `bls12381::g1_multi_scalar_multiplication` 原生实现
+/// 在当前协议版本下不可用（abort ENotSupported），因此使用 `g1_mul` + `g1_add`
+/// 循环实现等价功能。功能完全等价，仅性能差异。
 public fun g1_msm(
     scalars: &vector<group_ops::Element<Scalar>>,
     points: &vector<group_ops::Element<bls12381::G1>>,
 ): group_ops::Element<bls12381::G1> {
     let n = scalars.length();
-    assert!(n == points.length(), 0);
+    assert!(n == points.length(), EMSMLengthMismatch);
     if (n == 0) {
         return bls12381::g1_identity()
     };
-    if (n <= MSM_MAX) {
-        return bls12381::g1_multi_scalar_multiplication(scalars, points)
-    };
-    // 分块处理
+    // 使用 g1_mul 循环替代 g1_multi_scalar_multiplication
     let mut result = bls12381::g1_identity();
     let mut i = 0;
     while (i < n) {
-        let end = if (i + MSM_MAX < n) { i + MSM_MAX } else { n };
-        let mut chunk_scalars = vector[];
-        let mut chunk_points = vector[];
-        let mut j = i;
-        while (j < end) {
-            chunk_scalars.push_back(*(vector::borrow(scalars, j)));
-            chunk_points.push_back(*(vector::borrow(points, j)));
-            j = j + 1;
-        };
-        let chunk_result = bls12381::g1_multi_scalar_multiplication(&chunk_scalars, &chunk_points);
-        result = bls12381::g1_add(&result, &chunk_result);
-        i = end;
+        let term = bls12381::g1_mul(vector::borrow(scalars, i), vector::borrow(points, i));
+        result = bls12381::g1_add(&result, &term);
+        i = i + 1;
     };
     result
 }

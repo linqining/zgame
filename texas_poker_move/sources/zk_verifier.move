@@ -217,6 +217,8 @@ public fun verify_reconstruct_or_abort(
 /// 从字节反序列化密文数组
 /// 每个密文 96 字节（48 c1 + 48 c2）
 public fun deserialize_ciphertexts(data: &vector<u8>): vector<ElGamalCiphertext> {
+    // m3 修复：校验数据长度为 96 的整数倍，防止截断数据被静默解析
+    assert!(data.length() % 96 == 0, EShuffleProofFailed);
     let n = data.length() / 96;
     let mut result = vector[];
     let mut i = 0;
@@ -245,6 +247,25 @@ public fun deserialize_ciphertexts(data: &vector<u8>): vector<ElGamalCiphertext>
 /// 从字节反序列化公钥
 public fun deserialize_pk(pk_bytes: &vector<u8>): group_ops::Element<G1> {
     bls12381::g1_from_bytes(pk_bytes)
+}
+
+/// 从字节反序列化多个 G1 点（兼容性保留：原始发布版本包含此函数）
+public fun deserialize_g1_points(data: &vector<u8>): vector<group_ops::Element<G1>> {
+    let mut result = vector[];
+    let mut i = 0;
+    let len = data.length();
+    // 每个 G1 compressed 点为 48 字节
+    while (i + 48 <= len) {
+        let mut point_bytes = vector[];
+        let mut j = 0;
+        while (j < 48) {
+            vector::push_back(&mut point_bytes, data[i + j]);
+            j = j + 1;
+        };
+        vector::push_back(&mut result, bls12381::g1_from_bytes(&point_bytes));
+        i = i + 48;
+    };
+    result
 }
 
 // ========== PK 所有权证明 ==========
