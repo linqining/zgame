@@ -182,6 +182,7 @@ public struct Timestamps has store, drop {
     reconstruct_started_at: u64,        // reconstruct 投票开始时间
     showdown_at: u64,                   // 摊牌展示结束时间
     hand_complete_at: u64,              // 一手结束时间
+    current_turn_changed_at: u64,       // current_turn 最后变化时间 (0=待 tick 填充)
 }
 
 // ========== 牌组状态 ==========
@@ -382,6 +383,7 @@ public struct TableSummaryState has drop {
     reconstruct_started_at: u64,
     showdown_at: u64,
     hand_complete_at: u64,
+    current_turn_changed_at: u64,
     // 一致性保证
     epoch: u64,
 }
