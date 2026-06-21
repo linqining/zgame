@@ -351,6 +351,13 @@ public struct DeckRebuilt has copy, drop {
     deck_size: u64,
 }
 
+public struct CurrentTurnChanged has copy, drop {
+    table_id: ID,
+    old_turn: Option<u64>,
+    new_turn: Option<u64>,
+    round_state: u8,
+}
+
 // ========== 便捷发射函数 ==========
 
 // --- 牌桌生命周期 ---
@@ -511,4 +518,8 @@ public fun emit_timeout_config_updated(table_id: ID, betting_timeout_ms: u64, sh
 
 public fun emit_deck_rebuilt(table_id: ID, reason: u8, deck_size: u64) {
     event::emit(DeckRebuilt { table_id, reason, deck_size });
+}
+
+public fun emit_current_turn_changed(table_id: ID, old_turn: Option<u64>, new_turn: Option<u64>, round_state: u8) {
+    event::emit(CurrentTurnChanged { table_id, old_turn, new_turn, round_state });
 }

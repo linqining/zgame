@@ -479,6 +479,7 @@ public fun get_table_summary(table: &Table, ctx: &TxContext): TableSummary {
         reconstruct_started_at: table.timestamps.reconstruct_started_at,
         showdown_at: table.timestamps.showdown_at,
         hand_complete_at: table.timestamps.hand_complete_at,
+        current_turn_changed_at: table.timestamps.current_turn_changed_at,
         epoch: ctx.epoch(),
     };
     TableSummary { meta, state }
@@ -583,6 +584,7 @@ public fun summary_betting_started_at(s: &TableSummary): u64 { s.state.betting_s
 public fun summary_reconstruct_started_at(s: &TableSummary): u64 { s.state.reconstruct_started_at }
 public fun summary_showdown_at(s: &TableSummary): u64 { s.state.showdown_at }
 public fun summary_hand_complete_at(s: &TableSummary): u64 { s.state.hand_complete_at }
+public fun summary_current_turn_changed_at(s: &TableSummary): u64 { s.state.current_turn_changed_at }
 public fun summary_epoch(s: &TableSummary): u64 { s.state.epoch }
 public fun summary_crypto(s: &TableSummaryV2): &TableSummaryCryptoState { &s.crypto }
 public fun summary_crypto_deck_encrypted(s: &TableSummaryV2): &vector<vector<u8>> { &s.crypto.deck_encrypted }
@@ -753,6 +755,7 @@ public  fun create_table(
             reconstruct_started_at: 0,
             showdown_at: 0,
             hand_complete_at: 0,
+            current_turn_changed_at: 0,
         },
         sui_balance: balance::zero(),
     };
@@ -1651,6 +1654,10 @@ public  fun tick(table: &mut Table, clock: &Clock, ctx: &mut TxContext) {
             // 设置下注开始时间
             if (table.timestamps.betting_started_at == 0) {
                 table.timestamps.betting_started_at = now;
+            };
+            // 填充 current_turn 变化时间戳
+            if (table.timestamps.current_turn_changed_at == 0) {
+                table.timestamps.current_turn_changed_at = now;
             };
             if (table.timestamps.betting_started_at > 0 && now >= table.timestamps.betting_started_at + table.timeout_config.betting_timeout_ms) {
                 on_betting_timeout(table);
@@ -2622,7 +2629,7 @@ fun post_blinds(table: &mut Table) {
     } else {
         find_next_active_seat(&table.seats, bb_seat, n)
     };
-    table.current_turn = option::some(first_to_act);
+    set_current_turn(table, option::some(first_to_act));
     table_events::emit_blinds_posted(
         object::id(table),
         sb_seat, bb_seat,
@@ -2654,7 +2661,7 @@ fun start_betting_round(table: &mut Table, is_preflop: bool) {
         // 此时下注轮立即完成，直接收集下注并推进到下一阶段。
         if (has_actionable_player(&table.seats)) {
             let first = find_next_active_seat(&table.seats, table.button, table.max_players);
-            table.current_turn = option::some(first);
+            set_current_turn(table, option::some(first));
         } else {
             // 所有玩家 all-in，跳过下注轮
             collect_bets_to_pot(table);
@@ -2664,7 +2671,7 @@ fun start_betting_round(table: &mut Table, is_preflop: bool) {
     } else {
         // Preflop：post_blinds 已设置 current_turn，但全员 all-in 时需跳过下注轮
         if (!has_actionable_player(&table.seats)) {
-            table.current_turn = option::none();
+            set_current_turn(table, option::none());
             collect_bets_to_pot(table);
             advance_round(table);
             return
@@ -2712,6 +2719,14 @@ fun is_player_turn(table: &Table, seat_index: u64): bool {
     table.current_turn.is_some() && *table.current_turn.borrow() == seat_index
 }
 
+/// 设置 current_turn 并重置变化时间戳（由 tick 填充实际时间），同时发出事件
+fun set_current_turn(table: &mut Table, turn: Option<u64>) {
+    let old_turn = table.current_turn;
+    table.current_turn = turn;
+    table.timestamps.current_turn_changed_at = 0;
+    table_events::emit_current_turn_changed(object::id(table), old_turn, turn, table.round_state);
+}
+
 fun advance_turn(table: &mut Table) {
     if (is_betting_complete(table)) {
         collect_bets_to_pot(table);
@@ -2721,7 +2736,7 @@ fun advance_turn(table: &mut Table) {
 
     let current = *table.current_turn.borrow();
     let next = find_next_active_seat(&table.seats, current, table.max_players);
-    table.current_turn = option::some(next);
+    set_current_turn(table, option::some(next));
 }
 
 fun is_betting_complete(table: &Table): bool {
@@ -2767,7 +2782,7 @@ fun collect_bets_to_pot(table: &mut Table) {
 fun advance_round(table: &mut Table) {
     let from_round = table.round_state;
     table.betting_round = option::none();
-    table.current_turn = option::none();
+    set_current_turn(table, option::none());
 
     // 下注轮结束后进入对应的 Reveal 阶段
     if (from_round == table_constants::round_preflop()) {
@@ -3510,7 +3525,7 @@ fun reset_for_next_hand(table: &mut Table) {
     table.side_pots = vector[];
     table.community_cards = vector[];
     table.betting_round = option::none();
-    table.current_turn = option::none();
+    set_current_turn(table, option::none());
     table.round_state = table_constants::round_waiting();
     table.deck_state.encrypted = vector[];
     table.deck_state.cards_dealt = 0;
@@ -3526,6 +3541,7 @@ fun reset_for_next_hand(table: &mut Table) {
         reconstruct_started_at: 0,
         showdown_at: 0,
         hand_complete_at: 0,
+        current_turn_changed_at: 0,
     };
     set_initial_encrypted_deck(table);
     // shuffle_state 已通过 empty_shuffle_state() 重置为 NONE，
@@ -3688,6 +3704,7 @@ public fun betting_started_at(table: &Table): u64 { table.timestamps.betting_sta
 public fun reconstruct_started_at(table: &Table): u64 { table.timestamps.reconstruct_started_at }
 public fun showdown_at(table: &Table): u64 { table.timestamps.showdown_at }
 public fun hand_complete_at(table: &Table): u64 { table.timestamps.hand_complete_at }
+public fun current_turn_changed_at(table: &Table): u64 { table.timestamps.current_turn_changed_at }
 
 // ========== 超时配置设置 ==========
 // m2 修复：校验超时参数不为 0，防止 0 超时导致玩家无法行动
@@ -3791,6 +3808,7 @@ public fun create_table_for_test(
             reconstruct_started_at: 0,
             showdown_at: 0,
             hand_complete_at: 0,
+            current_turn_changed_at: 0,
         },
         sui_balance: balance::zero(),
     }
