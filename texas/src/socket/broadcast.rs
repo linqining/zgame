@@ -375,6 +375,123 @@ impl SocketState {
         broadcast_to_table(&io, self, table_id, None).await;
     }
 
+    /// 链上模式：从链上 `seat_hand` 批量读取玩家底牌并广播 `TABLE_UPDATED`。
+    ///
+    /// 合约 `write_decrypted_cards_to_hands` 在 `RevealPhaseComplete` (showdown) 交易内
+    /// 将解密后的底牌写入 `table.seats[seat].hand`。链上模式下 `mental_poker_game`
+    /// 无玩家数据，改为通过 `fetch_seat_hands` 直接读取合约已写入的底牌，
+    /// 更新内部 `local_seats` 后通过 `broadcast_to_table` 广播。
+    pub async fn broadcast_showdown_result_from_summary(
+        self: &Arc<Self>,
+        table_id: u32,
+        summary: &crate::sui_events::TableSummaryV2,
+    ) {
+        let io = match get_socket_io() {
+            Some(io) => io,
+            None => return,
+        };
+
+        // 1. 获取 chain_table_id + 座位数
+        let (chain_table_id, num_seats): (String, usize) = {
+            let gs = self.state.read().await;
+            let Some(table) = gs.tables.get(&table_id) else {
+                return;
+            };
+            let id = match table.chain_table_id.clone() {
+                Some(id) => id,
+                None => {
+                    tracing::warn!(
+                        "[showdown_from_summary] chain_table_id is None, table_id={}",
+                        table_id
+                    );
+                    return;
+                }
+            };
+            // 用 summary.crypto.seat_pks 的长度作为座位数
+            let n = summary.crypto.seat_pks.len();
+            (id, n)
+        };
+
+        // 2. 从链上批量读取所有座位的底牌
+        let seat_hands = match crate::sui_query::fetch_seat_hands(
+            &self.config.fullnode_url,
+            &self.config.sui_package_id,
+            &self.config.sui_origin_package_id,
+            &chain_table_id,
+            num_seats,
+        )
+        .await
+        {
+            Ok(hands) => hands,
+            Err(e) => {
+                tracing::warn!(
+                    "[showdown_from_summary] fetch_seat_hands failed, table_id={}: {}",
+                    table_id,
+                    e
+                );
+                // 降级：仍广播 TABLE_UPDATED（不含底牌），避免前端卡住
+                broadcast_to_table(&io, self, table_id, None).await;
+                return;
+            }
+        };
+
+        // 3. 转换 CardBcs → Card 并更新 local_seats
+        //    合约 card::Card: suit 0=SPADES,1=HEARTS,2=DIAMONDS,3=CLUBS; rank 2-14
+        //    Rust Card: suit "s"/"h"/"d"/"c"; rank "2".."10"/"J"/"Q"/"K"/"A"
+        let mut updated = 0;
+        {
+            let mut gs = self.state.write().await;
+            if let Some(table) = gs.tables.get_mut(&table_id) {
+                for (seat_idx, cards_bcs) in seat_hands.iter().enumerate() {
+                    if cards_bcs.is_empty() {
+                        continue;
+                    }
+                    let seat_id = seat_idx as u32;
+                    let cards: Vec<Card> = cards_bcs
+                        .iter()
+                        .filter_map(|c| {
+                            let suit = match c.suit {
+                                0 => "s",
+                                1 => "h",
+                                2 => "d",
+                                3 => "c",
+                                _ => return None,
+                            };
+                            let rank = match c.rank {
+                                2..=10 => c.rank.to_string(),
+                                11 => "J".to_string(),
+                                12 => "Q".to_string(),
+                                13 => "K".to_string(),
+                                14 => "A".to_string(),
+                                _ => return None,
+                            };
+                            Some(Card {
+                                suit: suit.to_string(),
+                                rank,
+                            })
+                        })
+                        .collect();
+
+                    if let Some(seat) = table.local_seats.get_mut(&seat_id) {
+                        seat.hand = cards;
+                        updated += 1;
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            "[showdown_from_summary] table_id={} seats_fetched={} seats_updated={}",
+            table_id,
+            seat_hands.len(),
+            updated
+        );
+
+        // 4. 广播 TABLE_UPDATED（含底牌）
+        broadcast_to_table(&io, self, table_id, None).await;
+    }
+
+    /// 链下模式：从 `mental_poker_game` 读取已揭示的公共牌并广播 `COMMUNITY_REVEAL_RESULT`。
     pub async fn broadcast_community_cards(&self, table_id: u32) {
         let io = match get_socket_io() {
             Some(io) => io,
@@ -389,9 +506,111 @@ impl SocketState {
             }
         };
 
-        let cards: Vec<Card> = community_cards.iter()
+        let cards: Vec<Card> = community_cards
+            .iter()
             .map(|pc| Card::from_playing_card(pc))
             .collect();
+
+        let payload = CommunityRevealResultPayload {
+            table_id,
+            community_cards: cards,
+        };
+        let _ = io
+            .to(table_room_name(table_id))
+            .emit(actions::COMMUNITY_REVEAL_RESULT, &payload)
+            .await;
+    }
+
+    /// 链上模式：从链上 `community_cards` 直接广播 `COMMUNITY_REVEAL_RESULT`。
+    ///
+    /// 合约 `write_decrypted_cards_to_community` 在 `RevealPhaseComplete` 交易内将
+    /// 解密后的公共牌写入 `table.community_cards` 并清空 `plaintext_bytes`，因此
+    /// relayer 不能再从 `decrypted_cards_info.plaintext_bytes` 重建公共牌（此时已空）。
+    /// 改为直接调用 `table::community_cards` getter 读取合约已写入的明文牌。
+    pub async fn broadcast_community_cards_from_summary(
+        &self,
+        table_id: u32,
+        _summary: &crate::sui_events::TableSummaryV2,
+    ) {
+        let io = match get_socket_io() {
+            Some(io) => io,
+            None => return,
+        };
+
+        // 1. 获取 chain_table_id
+        let chain_table_id: String = {
+            let gs = self.state.read().await;
+            let Some(table) = gs.tables.get(&table_id) else {
+                return;
+            };
+            match table.chain_table_id.clone() {
+                Some(id) => id,
+                None => {
+                    tracing::warn!(
+                        "[community_cards_from_summary] chain_table_id is None, table_id={}",
+                        table_id
+                    );
+                    return;
+                }
+            }
+        };
+
+        // 2. 从链上直接读取 community_cards（合约已写入的明文牌）
+        let cards_bcs = match crate::sui_query::fetch_community_cards(
+            &self.config.fullnode_url,
+            &self.config.sui_package_id,
+            &self.config.sui_origin_package_id,
+            &chain_table_id,
+        )
+        .await
+        {
+            Ok(cards) => cards,
+            Err(e) => {
+                tracing::warn!(
+                    "[community_cards_from_summary] fetch_community_cards failed, table_id={}: {}",
+                    table_id,
+                    e
+                );
+                return;
+            }
+        };
+
+        // 3. 转换 CardBcs → Card
+        //    合约 card::Card: suit 0=SPADES,1=HEARTS,2=DIAMONDS,3=CLUBS; rank 2-14
+        //    Rust Card: suit "s"/"h"/"d"/"c"; rank "2".."10"/"J"/"Q"/"K"/"A"
+        let cards: Vec<Card> = cards_bcs
+            .iter()
+            .filter_map(|c| {
+                let suit = match c.suit {
+                    0 => "s",
+                    1 => "h",
+                    2 => "d",
+                    3 => "c",
+                    _ => return None,
+                };
+                let rank = match c.rank {
+                    2..=10 => c.rank.to_string(),
+                    11 => "J".to_string(),
+                    12 => "Q".to_string(),
+                    13 => "K".to_string(),
+                    14 => "A".to_string(),
+                    _ => return None,
+                };
+                Some(Card {
+                    suit: suit.to_string(),
+                    rank,
+                })
+            })
+            .collect();
+
+        tracing::info!(
+            "[community_cards_from_summary] table_id={} community_cards={}",
+            table_id,
+            cards.len()
+        );
+        if cards.is_empty() {
+            return;
+        };
 
         let payload = CommunityRevealResultPayload {
             table_id,

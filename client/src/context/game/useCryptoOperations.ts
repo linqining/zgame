@@ -281,7 +281,7 @@ export const useCryptoOperations = (
     console.log(COMMUNITY_REVEAL_RESULT, data);
     const { tableId, communityCards: cards } = data;
 
-    if (!cards || !Array.isArray(cards)) {
+    if (!cards || !Array.isArray(cards) || cards.length === 0) {
       console.warn('[CommunityReveal] No community cards in payload');
       return;
     }

@@ -3,10 +3,11 @@ import styled from 'styled-components';
 import contentContext from '../../context/content/contentContext';
 import ChipsAmountPill from './ChipsAmountPill';
 import { InfoPill } from './InfoPill';
-import { Table } from '../../types/game';
+import { Table, Card } from '../../types/game';
 
 interface GameStateInfoProps {
   currentTable: Table;
+  communityCards?: Card[];
 }
 
 const Wrapper = styled.div`
@@ -19,8 +20,9 @@ const Wrapper = styled.div`
   width: 100%;
 `;
 
-export const GameStateInfo: React.FC<GameStateInfoProps> = ({ currentTable }) => {
+export const GameStateInfo: React.FC<GameStateInfoProps> = ({ currentTable, communityCards }) => {
   const { getLocalizedString } = useContext(contentContext)!;
+  const boardLen = communityCards?.length ?? currentTable.board.length;
 
   return (
     <Wrapper>
@@ -28,10 +30,10 @@ export const GameStateInfo: React.FC<GameStateInfoProps> = ({ currentTable }) =>
         <InfoPill>{getLocalizedString('game_state-info_wait')}</InfoPill>
       ) : (
         <InfoPill>
-          {currentTable.board.length === 0 && getLocalizedString('game_state-info_pre-flop')}
-          {currentTable.board.length === 3 && getLocalizedString('game_state-info_flop')}
-          {currentTable.board.length === 4 && getLocalizedString('game_state-info_turn')}
-          {currentTable.board.length === 5 && getLocalizedString('game_state-info_river')}
+          {boardLen === 0 && getLocalizedString('game_state-info_pre-flop')}
+          {boardLen === 3 && getLocalizedString('game_state-info_flop')}
+          {boardLen === 4 && getLocalizedString('game_state-info_turn')}
+          {boardLen === 5 && getLocalizedString('game_state-info_river')}
           {currentTable.wentToShowdown && getLocalizedString('game_state-info_showdown')}
         </InfoPill>
       )}

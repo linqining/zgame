@@ -2102,6 +2102,32 @@ async fn apply_reveal_phase_evt_to_socket(
 
         // 3b. 从 summary 重建 reveal_token_state
         let rust_phase = RevealPhase::from_chain_u8(chain_phase);
+
+        // 3c. ShowdownReveal 阶段需从链上获取 decrypted_cards_info，用 owner_seat_index
+        //     精确匹配每个牌主的手牌（对齐 Move start_showdown_reveal_phase）
+        let decrypted_cards_info: Vec<crate::sui_query::DecryptedCardInfoBcs> =
+            if matches!(rust_phase, Some(RevealPhase::ShowdownReveal)) {
+                match crate::sui_query::fetch_decrypted_cards_info(
+                    &app_state.socket_state.config.fullnode_url,
+                    &app_state.socket_state.config.sui_package_id,
+                    &app_state.socket_state.config.sui_origin_package_id,
+                    table_id,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "[bridge::reveal] fetch_decrypted_cards_info failed for ShowdownReveal: {}, fallback to deck position",
+                            e
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
         let mut gs = app_state.socket_state.state.write().await;
         if let Some(table) = gs.tables.get_mut(&socket_table_id) {
             match rust_phase {
@@ -2128,7 +2154,7 @@ async fn apply_reveal_phase_evt_to_socket(
                     }
                 }
                 Some(RevealPhase::ShowdownReveal) => {
-                    if let Err(e) = rebuild_showdown_reveal_from_summary(table, summary_ref) {
+                    if let Err(e) = rebuild_showdown_reveal_from_summary(table, summary_ref, &decrypted_cards_info) {
                         tracing::warn!("[bridge::reveal] rebuild ShowdownReveal failed: {}", e);
                     } else {
                         tracing::info!(
@@ -2379,8 +2405,10 @@ fn rebuild_community_reveal_from_summary(
 fn rebuild_showdown_reveal_from_summary(
     table: &mut crate::pokergame::table::Table,
     summary: &TableSummaryV2,
+    decrypted_cards_info: &[crate::sui_query::DecryptedCardInfoBcs],
 ) -> Result<(), String> {
     use crate::pokergame::game_state::{PlayerRevealAssignment, RevealTokenState};
+    use poker_protocol::crypto::curve::{CurvePoint, Curve};
 
     const CARDS_PER_PLAYER: usize = 2;
 
@@ -2401,12 +2429,75 @@ fn rebuild_showdown_reveal_from_summary(
     // 2. 构建 seat_index -> GamePkHex 映射
     let seat_pk_map = build_seat_pk_map(&summary.crypto.seat_pks);
 
-    // 3. 优先从 mental_poker_game 获取手牌（部分解密密文）
-    //    若 mental_poker_game 无数据，则从 deck_encrypted 按索引重建
-    let active_count = active_seats.len() as u64;
-    let cards_dealt = summary.state.cards_dealt;
+    // 3. 获取加密牌组
     let deck = table.deck_encrypted();
+    if deck.is_empty() {
+        return Err("deck_encrypted is empty".to_string());
+    }
 
+    // 4. 构建 pending_players（所有未 fold 的活跃玩家）
+    let pending_players: Vec<GamePkHex> = non_folded_seats
+        .iter()
+        .filter_map(|&seat_idx| seat_pk_map.get(&seat_idx).cloned())
+        .collect();
+
+    // 5. 构建 player_assignments：每个牌主提交自己手牌的 reveal token
+    //    对齐 Move start_showdown_reveal_phase (table.move#L2976-3000)：
+    //    - 遍历 decrypted_cards，找 owner_seat_index == s && ciphertext_bytes.len() > 0
+    //    - pending_players = [owner]（只有牌主提交）
+    //    - 用 ciphertext_bytes 的 c1（前 48 bytes）匹配 deck_encrypted 找到原始加密牌
+    let mut player_assignments: HashMap<GamePkHex, PlayerRevealAssignment> = HashMap::new();
+
+    if !decrypted_cards_info.is_empty() {
+        // 链上模式：用 decrypted_cards_info 按 owner_seat_index 精确匹配
+        type P = <poker_protocol::crypto::DefaultCurve as Curve>::Point;
+
+        for &seat_idx in &non_folded_seats {
+            let pk = match seat_pk_map.get(&seat_idx) {
+                Some(pk) => pk.clone(),
+                None => continue,
+            };
+
+            // 优先从 mental_poker_game 获取手牌
+            if let Some(mp_player) = table.mental_poker_game.players.get(pk.0.as_str()) {
+                if !mp_player.hand_encrypted.is_empty() {
+                    player_assignments.insert(pk, PlayerRevealAssignment {
+                        hand_card: mp_player.hand_encrypted.iter().map(|f| f.encrypted_card.clone()).collect(),
+                        community_card: vec![],
+                    });
+                    continue;
+                }
+            }
+
+            // 从 decrypted_cards_info 按 owner_seat_index 匹配
+            let mut hand_card: Vec<poker_protocol::crypto::ElGamalCiphertext> = Vec::new();
+            for dc in decrypted_cards_info {
+                if dc.owner_seat_index != seat_idx || dc.ciphertext_bytes.is_empty() {
+                    continue;
+                }
+                // ciphertext_bytes = c1(48) + c2'(48)，用 c1 匹配 deck_encrypted
+                let dc_c1_bytes = &dc.ciphertext_bytes[..48];
+                for card in &deck {
+                    let card_c1_compressed = card.c1.compress();
+                    let card_c1_bytes: &[u8] = card_c1_compressed.as_ref();
+                    if card_c1_bytes == dc_c1_bytes {
+                        hand_card.push(card.clone());
+                        break;
+                    }
+                }
+            }
+
+            if !hand_card.is_empty() {
+                player_assignments.insert(pk, PlayerRevealAssignment {
+                    hand_card,
+                    community_card: vec![],
+                });
+            }
+        }
+    } else {
+        // 降级：decrypted_cards_info 为空，从 deck_encrypted 按索引重建
+        let active_count = active_seats.len() as u64;
+        let cards_dealt = summary.state.cards_dealt;
     let hand_start = if cards_dealt >= active_count * CARDS_PER_PLAYER as u64 {
         (cards_dealt - active_count * CARDS_PER_PLAYER as u64) as usize
     } else {
@@ -2417,43 +2508,31 @@ fn rebuild_showdown_reveal_from_summary(
         ));
     };
 
-    // 4. 构建 pending_players（所有未 fold 的活跃玩家）
-    let pending_players: Vec<GamePkHex> = non_folded_seats
-        .iter()
-        .filter_map(|&seat_idx| seat_pk_map.get(&seat_idx).cloned())
-        .collect();
-
-    // 5. 构建 player_assignments：每个玩家的 assignment = 自己的手牌
-    //    （对齐 Rust start_showdown_reveal_phase：牌主需为自己的牌提交 reveal token）
-    let mut player_assignments: HashMap<GamePkHex, PlayerRevealAssignment> = HashMap::new();
-    for (order, &seat_idx) in active_seats.iter().enumerate() {
-        // 只为未 fold 的玩家构建 assignment
-        if !non_folded_seats.contains(&seat_idx) {
-            continue;
-        }
-        let pk = match seat_pk_map.get(&seat_idx) {
-            Some(pk) => pk.clone(),
-            None => continue,
-        };
-
-        // 优先从 mental_poker_game 获取手牌
-        let hand_card: Vec<poker_protocol::crypto::ElGamalCiphertext> =
-            if let Some(mp_player) = table.mental_poker_game.players.get(pk.0.as_str()) {
-                if !mp_player.hand_encrypted.is_empty() {
-                    mp_player.hand_encrypted.iter().map(|f| f.encrypted_card.clone()).collect()
-                } else {
-                    // mental_poker_game 无手牌，从 deck_encrypted 按索引重建
-                    extract_hand_from_deck(&deck, hand_start, order, CARDS_PER_PLAYER)?
-                }
-            } else {
-                // mental_poker_game 无该玩家，从 deck_encrypted 按索引重建
-                extract_hand_from_deck(&deck, hand_start, order, CARDS_PER_PLAYER)?
+        for (order, &seat_idx) in active_seats.iter().enumerate() {
+            if !non_folded_seats.contains(&seat_idx) {
+                continue;
+            }
+            let pk = match seat_pk_map.get(&seat_idx) {
+                Some(pk) => pk.clone(),
+                None => continue,
             };
 
-        player_assignments.insert(pk, PlayerRevealAssignment {
-            hand_card,
-            community_card: vec![],
-        });
+            let hand_card: Vec<poker_protocol::crypto::ElGamalCiphertext> =
+                if let Some(mp_player) = table.mental_poker_game.players.get(pk.0.as_str()) {
+                    if !mp_player.hand_encrypted.is_empty() {
+                        mp_player.hand_encrypted.iter().map(|f| f.encrypted_card.clone()).collect()
+                    } else {
+                        extract_hand_from_deck(&deck, hand_start, order, CARDS_PER_PLAYER)?
+                    }
+                } else {
+                    extract_hand_from_deck(&deck, hand_start, order, CARDS_PER_PLAYER)?
+                };
+
+            player_assignments.insert(pk, PlayerRevealAssignment {
+                hand_card,
+                community_card: vec![],
+            });
+        }
     }
 
     // 6. 写入 reveal_token_state
@@ -2858,10 +2937,26 @@ async fn apply_reveal_phase_complete_to_socket(
             }
         }
         3 | 4 | 5 => {
-            app_state.socket_state.broadcast_community_cards(socket_table_id).await;
+            // flop, turn, river, community reveal
+            // 链上模式 mental_poker_game 无公共牌数据，使用 from_summary 版本
+            // 从链上 decrypted_cards_info 的 plaintext_bytes 解析公共牌。
+            if let Some(s) = summary {
+                app_state.socket_state
+                    .broadcast_community_cards_from_summary(socket_table_id, s)
+                    .await;
+            } else {
+                app_state.socket_state.broadcast_community_cards(socket_table_id).await;
+            }
         }
         6 => {
-            app_state.socket_state.broadcast_showdown_result(socket_table_id).await;
+            // showdown：链上模式从链上 `seat_hand` 读取玩家底牌后广播
+            if let Some(s) = summary {
+                app_state.socket_state
+                    .broadcast_showdown_result_from_summary(socket_table_id, s)
+                    .await;
+            } else {
+                app_state.socket_state.broadcast_showdown_result(socket_table_id).await;
+            }
         }
         _ => {
             tracing::warn!(

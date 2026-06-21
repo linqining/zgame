@@ -2097,7 +2097,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
     });
 
     socket.on(actions::REVEAL_SUBMIT, async move |s: SocketRef, Data::<RevealSubmitPayload>(payload), io: SocketIo, State(state): State<Arc<SocketState>>| {
-        tracing::info!("[REVEAL_SUBMIT] Received RevealSubmitPayload: {:?}", payload);
+        // tracing::info!("[REVEAL_SUBMIT] Received RevealSubmitPayload: {:?}", payload);
         let socket_id = s.id.to_string();
         let wallet_address = {
             let gs = state.state.read().await;
@@ -2200,17 +2200,19 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                 // assignment_indices: 通过链上 reveal_assignments + 本地 deck_encrypted 推导全局索引
                 // 修复 0..n 占位导致的 MoveAbort (ENotPendingRevealer)：
                 // 链上 assignments 是跨所有玩家的全局 vector，0..n 可能指向属于其他玩家或已解密的 assignment。
-                let assignment_indices: Vec<u64> = match crate::sui_query::fetch_reveal_assignment_indices(
+                // showdown 阶段 pending_players = [owner]，只匹配属于当前玩家且未解密的 assignment。
+                let token_assignment_pairs: Vec<(usize, u64)> = match crate::sui_query::fetch_reveal_assignment_indices(
                     &state.config.fullnode_url,
                     &state.config.sui_package_id,
                     &state.config.sui_origin_package_id,
                     &chain_table_id,
                     &reveal_tokens,
                     &deck_encrypted,
+                    seat_index as u64,
                 )
                 .await
                 {
-                    Ok(indices) => indices,
+                    Ok(pairs) => pairs,
                     Err(e) => {
                         tracing::warn!(
                             "[REVEAL_SUBMIT] on-chain mode: failed to derive assignment_indices: {}",
@@ -2224,6 +2226,33 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                         return;
                     }
                 };
+
+                // 没有匹配到任何属于该玩家的待解密 assignment → 玩家未提交自己手牌的 reveal token
+                if token_assignment_pairs.is_empty() {
+                    tracing::warn!(
+                        "[REVEAL_SUBMIT] on-chain mode: no pending assignment matched for seat {} (tokens={}, table_id={}); player must submit reveal tokens for their own hand cards",
+                        seat_index,
+                        reveal_tokens.len(),
+                        payload.table_id
+                    );
+                    let _ = s.emit("error", &serde_json::json!({
+                        "msg": "on-chain mode: no pending reveal assignment matched your tokens; please submit reveal tokens for your own hand cards",
+                        "action": "reveal",
+                        "table_id": payload.table_id,
+                    }));
+                    return;
+                }
+
+                // 根据 token_assignment_pairs 过滤 reveal_tokens_bytes 和 reveal_proof_bytes_list
+                let assignment_indices: Vec<u64> = token_assignment_pairs.iter().map(|(_, idx)| *idx).collect();
+                let reveal_tokens_bytes: Vec<Vec<u8>> = token_assignment_pairs
+                    .iter()
+                    .map(|(token_idx, _)| reveal_tokens_bytes[*token_idx].clone())
+                    .collect();
+                let reveal_proof_bytes_list: Vec<Vec<u8>> = token_assignment_pairs
+                    .iter()
+                    .map(|(token_idx, _)| reveal_proof_bytes_list[*token_idx].clone())
+                    .collect();
 
                 match build_crypto_action_ptb(
                     &state.config,

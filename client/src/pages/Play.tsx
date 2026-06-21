@@ -33,6 +33,7 @@ const Play: React.FC = () => {
   const {
     messages,
     currentTable,
+    communityCards,
     isPlayerSeated,
     seatId,
     joinTable,
@@ -576,9 +577,9 @@ const Play: React.FC = () => {
                   alignItems: 'center',
                 }}
               >
-                {currentTable.board && currentTable.board.length > 0 && (
+                {communityCards && communityCards.length > 0 && (
                   <>
-                    {currentTable.board.map((card, index) => (
+                    {communityCards.map((card, index) => (
                       <PokerCard key={index} card={card} />
                     ))}
                   </>
@@ -605,7 +606,7 @@ const Play: React.FC = () => {
                 origin="center center"
               >
                 {(!currentTable.winMessages || currentTable.winMessages.length === 0) && (
-                  <GameStateInfo currentTable={currentTable} />
+                  <GameStateInfo currentTable={currentTable} communityCards={communityCards} />
                 )}
               </PositionedUISlot>
             </>

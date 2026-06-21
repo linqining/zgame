@@ -128,6 +128,8 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       });
 
       socket.on(SHUFFLE_NOTICE, async (data: ShuffleNoticeData) => {
+        // 新一手洗牌开始，清空上一手的公共牌
+        setCommunityCards([]);
         const result = await handleShuffleNotice(data);
         if (result) {
           console.log('SHUFFLE_NOTICE shuffle proof', result.shuffleResult.shuffle_proof);

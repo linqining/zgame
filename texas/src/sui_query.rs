@@ -496,7 +496,9 @@ pub async fn fetch_reveal_assignments(
 /// * `deck_encrypted` - 本地缓存的加密牌组（每个元素 96 bytes: c1 || c2）
 ///
 /// # 返回
-/// 成功返回与 `reveal_tokens` 等长的 `Vec<u64>`，每个元素为对应 token 的 assignment 全局索引。
+/// 成功返回 `Vec<(token_idx, assignment_idx)>`，仅包含属于该玩家且未解密的牌对应的 token。
+/// 已解密或不属于该玩家的牌会被跳过（记 warn 日志），避免合约 `ECardAlreadyDecrypted` /
+/// `ENotPendingRevealer` abort。
 pub async fn fetch_reveal_assignment_indices(
     rpc_url: &str,
     package_id: &str,
@@ -504,23 +506,27 @@ pub async fn fetch_reveal_assignment_indices(
     table_object_id: &str,
     reveal_tokens: &[crate::pokergame::game_state::SubmitRevealTokenJson],
     deck_encrypted: &[Vec<u8>],
-) -> Result<Vec<u64>, String> {
+    seat_index: u64,
+) -> Result<Vec<(usize, u64)>, String> {
     use std::collections::HashMap;
 
     // 1. 获取链上 assignments
     let assignments =
         fetch_reveal_assignments(rpc_url, package_id, origin_package_id, table_object_id).await?;
 
-    // 2. 构建 encrypted_card_index → assignment_index 映射（仅未解密）
+    // 2. 构建 encrypted_card_index → assignment_index 映射
+    //    仅包含：未解密 且 pending_players 包含当前玩家 seat_index
+    //    showdown 阶段 pending_players = [owner]，确保玩家只能揭示自己的底牌
     let mut card_to_assignment: HashMap<u64, u64> = HashMap::new();
     for (idx, a) in assignments.iter().enumerate() {
-        if !a.decrypted {
+        if !a.decrypted && a.pending_players.contains(&seat_index) {
             card_to_assignment.insert(a.encrypted_card_index, idx as u64);
         }
     }
 
     // 3. 对每个 token，匹配 encrypted_card → encrypted_card_index → assignment_index
-    let mut indices: Vec<u64> = Vec::with_capacity(reveal_tokens.len());
+    //    不属于该玩家或已解密的牌跳过
+    let mut result: Vec<(usize, u64)> = Vec::with_capacity(reveal_tokens.len());
     for (i, token) in reveal_tokens.iter().enumerate() {
         // 将 token.encrypted_card (c1_hex, c2_hex) 转为 96 bytes (c1 || c2)
         let c1 = hex::decode(&token.encrypted_card.c1_hex)
@@ -542,21 +548,21 @@ pub async fn fetch_reveal_assignment_indices(
                 )
             })? as u64;
 
-        // 查找对应的 assignment_index
-        let assignment_index = card_to_assignment
-            .get(&card_index)
-            .copied()
-            .ok_or_else(|| {
-                format!(
-                    "token[{}] encrypted_card_index={} not found in pending assignments (or already decrypted)",
-                    i, card_index
-                )
-            })?;
-
-        indices.push(assignment_index);
+        // 查找对应的 assignment_index；若已解密或不属于该玩家则跳过
+        match card_to_assignment.get(&card_index).copied() {
+            Some(assignment_index) => {
+                result.push((i, assignment_index));
+            }
+            None => {
+                tracing::warn!(
+                    "[fetch_reveal_assignment_indices] token[{}] encrypted_card_index={} not pending for seat {} (already decrypted or not owner), skipping",
+                    i, card_index, seat_index
+                );
+            }
+        }
     }
 
-    Ok(indices)
+    Ok(result)
 }
 
 /// Move 合约 `DecryptedCardInfo` 的 BCS 反序列化结构。
@@ -725,4 +731,363 @@ pub async fn fetch_decrypted_cards_info(
         .map_err(|e| format!("BCS outer deserialization failed: {}", e))?;
     bcs::from_bytes::<Vec<DecryptedCardInfoBcs>>(&inner_bytes)
         .map_err(|e| format!("BCS inner deserialization failed: {}", e))
+}
+
+/// Move 合约 `card::Card` 的 BCS 反序列化结构。
+/// 字段顺序必须与 `card.move` 中的 `Card` struct 一致：suit, rank。
+/// suit: 0=SPADES, 1=HEARTS, 2=DIAMONDS, 3=CLUBS
+/// rank: 2-14 (2=Two, ..., 14=Ace)
+#[derive(Debug, serde::Deserialize)]
+pub struct CardBcs {
+    pub suit: u8,
+    pub rank: u8,
+}
+
+/// 构建 `table::community_cards` + `bcs::to_bytes` 的 ProgrammableTransaction。
+fn build_community_cards_ptb(
+    package_id: &str,
+    origin_package_id: &str,
+    table_object_id: &str,
+) -> Result<sui_sdk_types::ProgrammableTransaction, String> {
+    use sui_sdk_types::{
+        Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
+        SharedInput, StructTag, TypeTag,
+    };
+
+    let parse_address = |s: &str| -> Result<Address, String> {
+        s.parse::<Address>()
+            .map_err(|e| format!("invalid address '{}': {}", s, e))
+    };
+
+    let table_id = parse_address(table_object_id)?;
+    let package = parse_address(package_id)?;
+    let origin_package = parse_address(origin_package_id)?;
+    let bcs_package = parse_address("0x2")?;
+
+    let inputs = vec![Input::Shared(SharedInput::new(table_id, 0, false))];
+
+    // Command 0: table::community_cards(&Table) → Result(0) = &vector<Card>
+    let cmd0 = Command::MoveCall(MoveCall {
+        package,
+        module: Identifier::from_static("table"),
+        function: Identifier::from_static("community_cards"),
+        type_arguments: Vec::new(),
+        arguments: vec![Argument::Input(0)],
+    });
+
+    // Command 1: 0x2::bcs::to_bytes<vector<origin::card::Card>>(&Result(0))
+    let card_type = TypeTag::Struct(Box::new(StructTag::new(
+        origin_package,
+        Identifier::from_static("card"),
+        Identifier::from_static("Card"),
+        Vec::new(),
+    )));
+    let cmd1 = Command::MoveCall(MoveCall {
+        package: bcs_package,
+        module: Identifier::from_static("bcs"),
+        function: Identifier::from_static("to_bytes"),
+        type_arguments: vec![TypeTag::Vector(Box::new(card_type))],
+        arguments: vec![Argument::Result(0)],
+    });
+
+    Ok(ProgrammableTransaction {
+        inputs,
+        commands: vec![cmd0, cmd1],
+    })
+}
+
+/// 通过 dev inspect 获取链上 `community_cards`。
+///
+/// 返回 `Vec<CardBcs>`，每个元素包含 `suit` 和 `rank`。
+///
+/// relayer 在 `RevealPhaseComplete` (flop/turn/river) 后调用此函数，
+/// 直接读取合约已写入的 `table.community_cards`，避免从 `plaintext_bytes` 重建——
+/// 合约 `write_decrypted_cards_to_community` 在同一笔交易内会清空 `plaintext_bytes`，
+/// 导致交易提交后 relayer 无法从中重建公共牌。
+pub async fn fetch_community_cards(
+    rpc_url: &str,
+    package_id: &str,
+    origin_package_id: &str,
+    table_object_id: &str,
+) -> Result<Vec<CardBcs>, String> {
+    let pt = build_community_cards_ptb(package_id, origin_package_id, table_object_id)?;
+
+    let http = crate::sponsor::shared_http_client();
+    let pt = crate::relayer::ptb::resolve_shared_object_versions(http, rpc_url, pt).await?;
+
+    let tx_kind_b64 = crate::relayer::ptb::serialize_tx_kind(pt)?;
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sui_devInspectTransactionBlock",
+        "params": [
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            tx_kind_b64,
+            null,
+            null,
+            {
+                "show_effects": true,
+                "show_input": true,
+                "show_object_changes": true,
+                "show_raw_input": false,
+                "show_raw_effects": false
+            }
+        ]
+    });
+
+    let client = reqwest::Client::new();
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("JSON parse failed: {}", e))?;
+
+    if let Some(error) = resp.get("error") {
+        return Err(format!("RPC error: {:?}", error));
+    }
+
+    let result = resp
+        .get("result")
+        .ok_or("No result in dev inspect response")?;
+
+    let status = result
+        .get("effects")
+        .and_then(|e| e.get("status"))
+        .and_then(|s| s.get("status"))
+        .and_then(|s| s.as_str())
+        .ok_or("Missing execution status in dev inspect response")?;
+
+    if status != "success" {
+        let error = result
+            .get("effects")
+            .and_then(|e| e.get("status"))
+            .and_then(|s| s.get("error"))
+            .and_then(|e| e.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("Dev inspect execution failed: {}", error));
+    }
+
+    let return_value = result
+        .get("results")
+        .and_then(|r| r.get(1))
+        .and_then(|r| r.get("returnValues"))
+        .and_then(|rv| rv.get(0))
+        .ok_or("No return values for bcs::to_bytes in dev inspect response")?;
+
+    let bcs_bytes = {
+        let bytes_val = return_value
+            .get(0)
+            .ok_or("Missing BCS bytes in return value")?;
+        if let Some(s) = bytes_val.as_str() {
+            let engine = base64::engine::general_purpose::STANDARD;
+            engine
+                .decode(s)
+                .map_err(|e| format!("Base64 decode error: {}", e))?
+        } else if let Some(arr) = bytes_val.as_array() {
+            arr.iter()
+                .map(|v| v.as_u64().unwrap_or(0) as u8)
+                .collect::<Vec<u8>>()
+        } else {
+            return Err("Unexpected BCS bytes format in return value".to_string());
+        }
+    };
+
+    let inner_bytes = bcs::from_bytes::<Vec<u8>>(&bcs_bytes)
+        .map_err(|e| format!("BCS outer deserialization failed: {}", e))?;
+    bcs::from_bytes::<Vec<CardBcs>>(&inner_bytes)
+        .map_err(|e| format!("BCS inner deserialization failed: {}", e))
+}
+
+/// 构建 `table::seat_hand` + `bcs::to_bytes` 的 PTB，批量获取所有座位的底牌。
+///
+/// PTB 结构：
+/// - Input 0: Shared table
+/// - Input 1..N: Pure u64 seat index (0, 1, ..., N-1)
+/// - 对每个座位 i:
+///   - Command 2*i: `table::seat_hand(&Table, Input(0), Input(1+i))` → Result(2*i)
+///   - Command 2*i+1: `bcs::to_bytes<vector<card::Card>>(&Result(2*i))` → Result(2*i+1)
+fn build_seat_hands_ptb(
+    package_id: &str,
+    origin_package_id: &str,
+    table_object_id: &str,
+    num_seats: usize,
+) -> Result<sui_sdk_types::ProgrammableTransaction, String> {
+    use sui_sdk_types::{
+        Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
+        SharedInput, StructTag, TypeTag,
+    };
+
+    let parse_address = |s: &str| -> Result<Address, String> {
+        s.parse::<Address>()
+            .map_err(|e| format!("invalid address '{}': {}", s, e))
+    };
+
+    let table_id = parse_address(table_object_id)?;
+    let package = parse_address(package_id)?;
+    let origin_package = parse_address(origin_package_id)?;
+    let bcs_package = parse_address("0x2")?;
+
+    // Input 0: shared table; Input 1..N: pure u64 seat indices
+    let mut inputs: Vec<Input> = vec![Input::Shared(SharedInput::new(table_id, 0, false))];
+    for i in 0..num_seats {
+        let idx = i as u64;
+        let bytes = bcs::to_bytes(&idx)
+            .map_err(|e| format!("BCS encode seat index failed: {}", e))?;
+        inputs.push(Input::Pure(bytes));
+    }
+
+    let card_type = TypeTag::Struct(Box::new(StructTag::new(
+        origin_package,
+        Identifier::from_static("card"),
+        Identifier::from_static("Card"),
+        Vec::new(),
+    )));
+
+    let mut commands = Vec::with_capacity(num_seats * 2);
+    for i in 0..num_seats {
+        let input_idx = (1 + i) as u16;
+        let result_idx = (2 * i) as u16;
+        // Command 2*i: table::seat_hand(&Table, seat_index) → Result(2*i)
+        commands.push(Command::MoveCall(MoveCall {
+            package,
+            module: Identifier::from_static("table"),
+            function: Identifier::from_static("seat_hand"),
+            type_arguments: Vec::new(),
+            arguments: vec![Argument::Input(0), Argument::Input(input_idx)],
+        }));
+        // Command 2*i+1: bcs::to_bytes<vector<card::Card>>(&Result(2*i))
+        commands.push(Command::MoveCall(MoveCall {
+            package: bcs_package,
+            module: Identifier::from_static("bcs"),
+            function: Identifier::from_static("to_bytes"),
+            type_arguments: vec![TypeTag::Vector(Box::new(card_type.clone()))],
+            arguments: vec![Argument::Result(result_idx)],
+        }));
+    }
+
+    Ok(ProgrammableTransaction { inputs, commands })
+}
+
+/// 通过 dev inspect 批量获取链上所有座位的底牌。
+///
+/// 返回 `Vec<Vec<CardBcs>>`，外层按座位索引，内层是该座位的底牌列表。
+/// relayer 在 `RevealPhaseComplete` (showdown) 后调用此函数，
+/// 直接读取合约 `write_decrypted_cards_to_hands` 已写入的 `table.seats[seat].hand`。
+pub async fn fetch_seat_hands(
+    rpc_url: &str,
+    package_id: &str,
+    origin_package_id: &str,
+    table_object_id: &str,
+    num_seats: usize,
+) -> Result<Vec<Vec<CardBcs>>, String> {
+    let pt = build_seat_hands_ptb(package_id, origin_package_id, table_object_id, num_seats)?;
+
+    let http = crate::sponsor::shared_http_client();
+    let pt = crate::relayer::ptb::resolve_shared_object_versions(http, rpc_url, pt).await?;
+
+    let tx_kind_b64 = crate::relayer::ptb::serialize_tx_kind(pt)?;
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sui_devInspectTransactionBlock",
+        "params": [
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            tx_kind_b64,
+            null,
+            null,
+            {
+                "show_effects": true,
+                "show_input": true,
+                "show_object_changes": true,
+                "show_raw_input": false,
+                "show_raw_effects": false
+            }
+        ]
+    });
+
+    let client = reqwest::Client::new();
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("JSON parse failed: {}", e))?;
+
+    if let Some(error) = resp.get("error") {
+        return Err(format!("RPC error: {:?}", error));
+    }
+
+    let result = resp
+        .get("result")
+        .ok_or("No result in dev inspect response")?;
+
+    let status = result
+        .get("effects")
+        .and_then(|e| e.get("status"))
+        .and_then(|s| s.get("status"))
+        .and_then(|s| s.as_str())
+        .ok_or("Missing execution status in dev inspect response")?;
+
+    if status != "success" {
+        let error = result
+            .get("effects")
+            .and_then(|e| e.get("status"))
+            .and_then(|s| s.get("error"))
+            .and_then(|e| e.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("Dev inspect execution failed: {}", error));
+    }
+
+    let results = result
+        .get("results")
+        .ok_or("No results in dev inspect response")?;
+
+    // bcs::to_bytes 的结果在奇数 command index (1, 3, 5, ...)
+    let mut seat_hands = Vec::with_capacity(num_seats);
+    for i in 0..num_seats {
+        let cmd_idx = (2 * i + 1) as usize;
+        let return_value = results
+            .get(cmd_idx)
+            .and_then(|r| r.get("returnValues"))
+            .and_then(|rv| rv.get(0))
+            .ok_or(format!(
+                "No return value for seat {} bcs::to_bytes (cmd {})",
+                i, cmd_idx
+            ))?;
+
+        let bcs_bytes = {
+            let bytes_val = return_value
+                .get(0)
+                .ok_or("Missing BCS bytes in return value")?;
+            if let Some(s) = bytes_val.as_str() {
+                let engine = base64::engine::general_purpose::STANDARD;
+                engine
+                    .decode(s)
+                    .map_err(|e| format!("Base64 decode error: {}", e))?
+            } else if let Some(arr) = bytes_val.as_array() {
+                arr.iter()
+                    .map(|v| v.as_u64().unwrap_or(0) as u8)
+                    .collect::<Vec<u8>>()
+            } else {
+                return Err("Unexpected BCS bytes format in return value".to_string());
+            }
+        };
+
+        let inner_bytes = bcs::from_bytes::<Vec<u8>>(&bcs_bytes)
+            .map_err(|e| format!("BCS outer deserialization failed for seat {}: {}", i, e))?;
+        let cards = bcs::from_bytes::<Vec<CardBcs>>(&inner_bytes)
+            .map_err(|e| format!("BCS inner deserialization failed for seat {}: {}", i, e))?;
+        seat_hands.push(cards);
+    }
+
+    Ok(seat_hands)
 }
