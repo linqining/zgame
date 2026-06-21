@@ -368,6 +368,7 @@ mod tests {
             sponsor_gas_budget: 0,
             fullnode_url: String::new(),
             grpc_url: String::new(),
+            grpc_token: String::new(),
             zklogin_salt_secret: String::new(),
             inodra_webhook_secret: String::new(),
             sui_package_id: String::new(),

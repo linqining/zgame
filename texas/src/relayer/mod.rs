@@ -80,6 +80,7 @@ fn event_type_name(event: &SuiChainEvent) -> &'static str {
         SuiChainEvent::PlayerRefund { .. } => "PlayerRefund",
         SuiChainEvent::HandReset { .. } => "HandReset",
         SuiChainEvent::TimeoutConfigUpdated { .. } => "TimeoutConfigUpdated",
+        SuiChainEvent::CurrentTurnChanged { .. } => "CurrentTurnChanged",
     }
 }
 
@@ -201,6 +202,7 @@ fn table_id_from_event(event: &SuiChainEvent) -> &str {
         SuiChainEvent::PlayerRefund { table_id, .. } => table_id,
         SuiChainEvent::HandReset { table_id, .. } => table_id,
         SuiChainEvent::TimeoutConfigUpdated { table_id, .. } => table_id,
+        SuiChainEvent::CurrentTurnChanged { table_id, .. } => table_id,
     }
 }
 
@@ -228,6 +230,7 @@ fn is_key_event(event: &SuiChainEvent) -> bool {
             | SuiChainEvent::PlayerRaised { .. }
             | SuiChainEvent::PlayerAllIn { .. }
             | SuiChainEvent::PotCollected { .. }
+            | SuiChainEvent::CurrentTurnChanged { .. }
     )
 }
 

@@ -376,6 +376,12 @@ pub enum SuiChainEvent {
         reconstruct_timeout_ms: u64,
         showdown_display_ms: u64,
     },
+    CurrentTurnChanged {
+        table_id: String,
+        old_turn: Option<u64>,
+        new_turn: Option<u64>,
+        round_state: u8,
+    },
 }
 
 /// Inodra Webhook 推送的事件载荷
@@ -704,6 +710,12 @@ fn parse_chain_event_inner(event_name: &str, data: &serde_json::Value) -> Option
             reconstruct_timeout_ms: json_as_u64(data.get("reconstruct_timeout_ms")?)?,
             showdown_display_ms: json_as_u64(data.get("showdown_display_ms")?)?,
         }),
+        "CurrentTurnChanged" => Some(SuiChainEvent::CurrentTurnChanged {
+            table_id: data.get("table_id")?.as_str()?.to_string(),
+            old_turn: data.get("old_turn").and_then(json_as_u64),
+            new_turn: data.get("new_turn").and_then(json_as_u64),
+            round_state: u64_to_u8(json_as_u64(data.get("round_state")?)?)?,
+        }),
         _ => {
             tracing::warn!("[sui_events] unknown event type: {}", event_name);
             None
@@ -823,6 +835,7 @@ pub fn parse_bcs_event(event_type: &str, bytes: &[u8]) -> Option<serde_json::Val
         "PlayerKicked" => { addr!("table_id"); u64!("seat_index"); addr!("player"); u8!("reason"); }
         "PlayerRefund" => { addr!("table_id"); u64!("seat_index"); addr!("player"); u64!("amount"); u8!("refund_type"); }
         "TimeoutConfigUpdated" => { addr!("table_id"); u64!("betting_timeout_ms"); u64!("shuffle_timeout_ms"); u64!("reveal_timeout_ms"); u64!("reconstruct_timeout_ms"); u64!("showdown_display_ms"); }
+        "CurrentTurnChanged" => { addr!("table_id"); ou64!("old_turn"); ou64!("new_turn"); u8!("round_state"); }
         _ => { tracing::warn!("[parse_bcs_event] unknown event: {}", event_name); return None; }
     }
     Some(serde_json::Value::Object(m))
@@ -1475,6 +1488,41 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_current_turn_changed() {
+        let data = serde_json::json!({
+            "table_id": "0x123",
+            "old_turn": 2,
+            "new_turn": 3,
+            "round_state": 1
+        });
+        let event = parse_event("CurrentTurnChanged", data).unwrap();
+        assert_eq!(event, SuiChainEvent::CurrentTurnChanged {
+            table_id: "0x123".to_string(),
+            old_turn: Some(2),
+            new_turn: Some(3),
+            round_state: 1,
+        });
+    }
+
+    #[test]
+    fn test_current_turn_changed_cleared() {
+        // new_turn 为 null 表示 current_turn 被清空（如轮次结束）
+        let data = serde_json::json!({
+            "table_id": "0x123",
+            "old_turn": 3,
+            "new_turn": null,
+            "round_state": 2
+        });
+        let event = parse_event("CurrentTurnChanged", data).unwrap();
+        assert_eq!(event, SuiChainEvent::CurrentTurnChanged {
+            table_id: "0x123".to_string(),
+            old_turn: Some(3),
+            new_turn: None,
+            round_state: 2,
+        });
+    }
+
     // ========== 边界/错误情况 ==========
 
     #[test]
@@ -1488,14 +1536,14 @@ mod tests {
 
     #[test]
     fn test_missing_required_field() {
-        // PlayerJoined 缺少必填字段 buy_in
+        // PlayerJoined 缺少必填字段 player
         let data = serde_json::json!({
             "table_id": "0x123",
             "seat_index": 0,
-            "player": "0xabc",
+            "buy_in": 1000,
             "is_waiting": false,
             "active_count_after": 1
-            // 缺少 buy_in
+            // 缺少 player
         });
         let result = parse_event("PlayerJoined", data);
         assert!(result.is_none());

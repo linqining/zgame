@@ -182,7 +182,6 @@ public struct Timestamps has store, drop {
     reconstruct_started_at: u64,        // reconstruct 投票开始时间
     showdown_at: u64,                   // 摊牌展示结束时间
     hand_complete_at: u64,              // 一手结束时间
-    current_turn_changed_at: u64,       // current_turn 最后变化时间 (0=待 tick 填充)
 }
 
 // ========== 牌组状态 ==========
@@ -383,7 +382,6 @@ public struct TableSummaryState has drop {
     reconstruct_started_at: u64,
     showdown_at: u64,
     hand_complete_at: u64,
-    current_turn_changed_at: u64,
     // 一致性保证
     epoch: u64,
 }
@@ -479,7 +477,6 @@ public fun get_table_summary(table: &Table, ctx: &TxContext): TableSummary {
         reconstruct_started_at: table.timestamps.reconstruct_started_at,
         showdown_at: table.timestamps.showdown_at,
         hand_complete_at: table.timestamps.hand_complete_at,
-        current_turn_changed_at: table.timestamps.current_turn_changed_at,
         epoch: ctx.epoch(),
     };
     TableSummary { meta, state }
@@ -584,7 +581,6 @@ public fun summary_betting_started_at(s: &TableSummary): u64 { s.state.betting_s
 public fun summary_reconstruct_started_at(s: &TableSummary): u64 { s.state.reconstruct_started_at }
 public fun summary_showdown_at(s: &TableSummary): u64 { s.state.showdown_at }
 public fun summary_hand_complete_at(s: &TableSummary): u64 { s.state.hand_complete_at }
-public fun summary_current_turn_changed_at(s: &TableSummary): u64 { s.state.current_turn_changed_at }
 public fun summary_epoch(s: &TableSummary): u64 { s.state.epoch }
 public fun summary_crypto(s: &TableSummaryV2): &TableSummaryCryptoState { &s.crypto }
 public fun summary_crypto_deck_encrypted(s: &TableSummaryV2): &vector<vector<u8>> { &s.crypto.deck_encrypted }
@@ -755,7 +751,6 @@ public  fun create_table(
             reconstruct_started_at: 0,
             showdown_at: 0,
             hand_complete_at: 0,
-            current_turn_changed_at: 0,
         },
         sui_balance: balance::zero(),
     };
@@ -1655,10 +1650,7 @@ public  fun tick(table: &mut Table, clock: &Clock, ctx: &mut TxContext) {
             if (table.timestamps.betting_started_at == 0) {
                 table.timestamps.betting_started_at = now;
             };
-            // 填充 current_turn 变化时间戳
-            if (table.timestamps.current_turn_changed_at == 0) {
-                table.timestamps.current_turn_changed_at = now;
-            };
+            // 填充 current_turn 变化时间戳已移除（兼容升级限制）
             if (table.timestamps.betting_started_at > 0 && now >= table.timestamps.betting_started_at + table.timeout_config.betting_timeout_ms) {
                 on_betting_timeout(table);
             };
@@ -2719,11 +2711,10 @@ fun is_player_turn(table: &Table, seat_index: u64): bool {
     table.current_turn.is_some() && *table.current_turn.borrow() == seat_index
 }
 
-/// 设置 current_turn 并重置变化时间戳（由 tick 填充实际时间），同时发出事件
+/// 设置 current_turn 并发出事件
 fun set_current_turn(table: &mut Table, turn: Option<u64>) {
     let old_turn = table.current_turn;
     table.current_turn = turn;
-    table.timestamps.current_turn_changed_at = 0;
     table_events::emit_current_turn_changed(object::id(table), old_turn, turn, table.round_state);
 }
 
@@ -3541,7 +3532,6 @@ fun reset_for_next_hand(table: &mut Table) {
         reconstruct_started_at: 0,
         showdown_at: 0,
         hand_complete_at: 0,
-        current_turn_changed_at: 0,
     };
     set_initial_encrypted_deck(table);
     // shuffle_state 已通过 empty_shuffle_state() 重置为 NONE，
@@ -3704,7 +3694,6 @@ public fun betting_started_at(table: &Table): u64 { table.timestamps.betting_sta
 public fun reconstruct_started_at(table: &Table): u64 { table.timestamps.reconstruct_started_at }
 public fun showdown_at(table: &Table): u64 { table.timestamps.showdown_at }
 public fun hand_complete_at(table: &Table): u64 { table.timestamps.hand_complete_at }
-public fun current_turn_changed_at(table: &Table): u64 { table.timestamps.current_turn_changed_at }
 
 // ========== 超时配置设置 ==========
 // m2 修复：校验超时参数不为 0，防止 0 超时导致玩家无法行动
@@ -3808,7 +3797,6 @@ public fun create_table_for_test(
             reconstruct_started_at: 0,
             showdown_at: 0,
             hand_complete_at: 0,
-            current_turn_changed_at: 0,
         },
         sui_balance: balance::zero(),
     }
