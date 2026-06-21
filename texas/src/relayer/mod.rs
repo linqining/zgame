@@ -206,6 +206,19 @@ fn table_id_from_event(event: &SuiChainEvent) -> &str {
     }
 }
 
+/// 从玩家行动事件中提取 round_state。
+/// 用于 trick：行动事件后直接同步 current_turn，需要 round_state 作为参数。
+fn round_state_from_event(event: &SuiChainEvent) -> Option<u8> {
+    match event {
+        SuiChainEvent::PlayerFolded { round_state, .. }
+        | SuiChainEvent::PlayerChecked { round_state, .. }
+        | SuiChainEvent::PlayerCalled { round_state, .. }
+        | SuiChainEvent::PlayerRaised { round_state, .. }
+        | SuiChainEvent::PlayerAllIn { round_state, .. } => Some(*round_state),
+        _ => None,
+    }
+}
+
 /// 判断事件是否为关键事件（状态变更类），需要 fetch 完整快照。
 /// 非关键事件（如 ShuffleTurn / RevealTokenSubmitted 等中间过程事件）
 /// 在缓存已存在且非 stale 时跳过 fetch，减少冗余 RPC。
@@ -571,16 +584,6 @@ pub async fn apply_event_to_socket(
     summary: Option<&TableSummaryV2>,
     tx_digest: Option<&str>,
 ) {
-    // Task 16: 全事件去重 - 在 match 之前对所有 SuiChainEvent 变体去重。
-    // Both 模式下 gRPC 和 webhook 可能同时投递同一事件，统一去重避免重复处理。
-    // 行动事件仍保留下方 match 内的 check_and_mark_action 调用以维持兼容。
-    if !app_state.check_and_mark_event(event) {
-        tracing::debug!(
-            "[bridge::dedup] duplicate event skipped: type={}",
-            event_type_name(event)
-        );
-        return;
-    }
 
     // 1. 处理玩家行动事件：转发到 game loop 的 ActionRequest 通道
     //    C2 修复：在 Both 模式下，gRPC 和 webhook 可能同时投递同一事件，
@@ -770,8 +773,8 @@ pub async fn apply_event_to_socket(
         SuiChainEvent::RevealTokenSubmitted { table_id, seat_index, card_index, .. } => {
             apply_reveal_token_submitted_to_socket(app_state, table_id, *seat_index, *card_index, tx_digest).await;
         }
-        SuiChainEvent::RevealPhaseComplete { table_id, .. } => {
-            apply_reveal_phase_complete_to_socket(app_state, table_id).await;
+        SuiChainEvent::RevealPhaseComplete { table_id, phase, .. } => {
+            apply_reveal_phase_complete_to_socket(app_state, table_id, *phase, summary).await;
         }
         SuiChainEvent::CardIsIdentity { table_id, card_index, .. } => {
             apply_card_is_identity_to_socket(app_state, table_id, *card_index).await;
@@ -833,6 +836,34 @@ pub async fn apply_event_to_socket(
             apply_current_turn_changed_to_socket(app_state, table_id, *old_turn, *new_turn, *round_state).await;
         }
         _ => tracing::warn!(target: "relayer", "unknown event: {:?}", event),
+    }
+
+    // 1.5 Trick: 玩家行动事件后，直接从 summary 读取 current_turn 同步本地状态。
+    //     链上合约在 call/check/raise/fold 后已更新 current_turn 到下一个玩家，
+    //     但 CurrentTurnChanged 事件可能缺失或延迟。此处不依赖该事件，
+    //     直接用 summary 中的 current_turn 同步，确保前端行动面板及时刷新。
+    let is_player_action = matches!(
+        event,
+        SuiChainEvent::PlayerFolded { .. }
+            | SuiChainEvent::PlayerChecked { .. }
+            | SuiChainEvent::PlayerCalled { .. }
+            | SuiChainEvent::PlayerRaised { .. }
+            | SuiChainEvent::PlayerAllIn { .. }
+    );
+    if is_player_action {
+        if let Some(s) = summary {
+            let sui_tid = table_id_from_event(event);
+            let new_turn = s.meta.current_turn;
+            let round_state = round_state_from_event(event).unwrap_or(0);
+            apply_current_turn_changed_to_socket(
+                app_state,
+                sui_tid,
+                None, // old_turn 未知，日志中显示 None
+                new_turn,
+                round_state,
+            )
+            .await;
+        }
     }
 
     // 2. 对所有事件同步 table 整体状态（round_state / shuffle / reveal / reconstruct）
@@ -2741,8 +2772,21 @@ async fn apply_reveal_token_submitted_to_socket(
 
 /// Task 20: RevealPhaseComplete 事件处理器。
 ///
-/// 广播 `TABLE_UPDATED`。
-async fn apply_reveal_phase_complete_to_socket(app_state: &Arc<AppState>, table_id: &str) {
+/// 广播 `TABLE_UPDATED`，并根据 `phase` 广播对应的 RevealResult：
+/// - phase 1 (Preflop/HandReveal) → `HAND_REVEAL_RESULT`
+/// - phase 2 (Redeal) → `REDEAL_RESULT`
+/// - phase 3/4/5 (Flop/Turn/River/CommunityReveal) → `COMMUNITY_REVEAL_RESULT`
+/// - phase 6 (Showdown) → `broadcast_showdown_result`
+///
+/// 广播 RevealResult 前先调用 `sync_table_state` 同步链上最新 crypto 状态
+/// （deck_encrypted / deck_plaintext / summary.crypto），确保 `HandRevealResultPayload`
+/// 中的 `readable_cards` 与 `deck_plaintext` 反映链上 RevealPhaseComplete 后的最新数据。
+async fn apply_reveal_phase_complete_to_socket(
+    app_state: &Arc<AppState>,
+    table_id: &str,
+    phase: u8,
+    summary: Option<&TableSummaryV2>,
+) {
     // 1. 获取 SocketIo 实例
     let io = match get_socket_io() {
         Some(io) => io,
@@ -2772,6 +2816,61 @@ async fn apply_reveal_phase_complete_to_socket(app_state: &Arc<AppState>, table_
         Some("Reveal phase complete"),
     )
     .await;
+
+    // 4. 广播 RevealResult 前先同步链上 crypto 状态
+    //    apply_event_to_socket 末尾的 sync_table_state 在本函数返回后才执行，
+    //    而 broadcast_hand_reveal_result 等需要读取 deck_plaintext /
+    //    player_readable_tokens，必须先同步才能拿到 RevealPhaseComplete 后的最新数据。
+    if let Some(s) = summary {
+        sync_table_state(app_state, table_id, false, true, s).await;
+    } else {
+        tracing::warn!(
+            "[bridge::reveal_complete] summary is None, table_id={}, skip crypto sync before reveal result broadcast",
+            table_id
+        );
+    }
+
+    // 5. 根据 phase 广播对应的 RevealResult
+    // Move 合约 reveal_phase 常量：1=Preflop, 2=Redeal, 3=Flop, 4=Turn, 5=River, 6=Showdown
+    // 链上模式 mental_poker_game 无玩家数据，手牌/重发阶段使用 from_summary 版本
+    // 直接从 summary.crypto.deck_encrypted 构造 HandRevealResultPayload。
+    match phase {
+        1 => {
+            if let Some(s) = summary {
+                tracing::debug!(
+                    "[bridge::reveal_complete] phase 1, table_id={}, broadcast hand reveal result from summary",
+                    socket_table_id
+                );
+                app_state.socket_state
+                    .broadcast_hand_reveal_result_from_summary(socket_table_id, s)
+                    .await;
+            } else {
+                app_state.socket_state.broadcast_hand_reveal_result(socket_table_id).await;
+            }
+        }
+        2 => {
+            if let Some(s) = summary {
+                app_state.socket_state
+                    .broadcast_redeal_result_from_summary(socket_table_id, s)
+                    .await;
+            } else {
+                app_state.socket_state.broadcast_redeal_result(socket_table_id).await;
+            }
+        }
+        3 | 4 | 5 => {
+            app_state.socket_state.broadcast_community_cards(socket_table_id).await;
+        }
+        6 => {
+            app_state.socket_state.broadcast_showdown_result(socket_table_id).await;
+        }
+        _ => {
+            tracing::warn!(
+                "[bridge::reveal_complete] unknown phase={}, table_id={}, skip reveal result broadcast",
+                phase,
+                socket_table_id
+            );
+        }
+    }
 }
 
 /// Task 20: CardIsIdentity 事件处理器。
