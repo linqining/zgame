@@ -168,7 +168,8 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
   }, [walletAddress]);
 
   const seat = currentTable.seats[seatNumber];
-  const maxBuyin = currentTable.limit;
+  // limit 在链上同步场景可能为 0（链上 BCS 不含此字段），回退到 bigBlind * 100
+  const maxBuyin = currentTable.limit || (currentTable.bigBlind * 100);
   const minBuyIn = Math.max(currentTable.minBet * 2 * 10, 1000);
   const BUYIN_STEP = 1000;
 

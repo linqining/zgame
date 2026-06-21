@@ -2271,13 +2271,13 @@ public  fun fold(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
         table.betting_round.borrow_mut().process_fold();
     };
 
+    table_events::emit_player_folded(object::id(table), seat_index, table_events::fold_reason_manual(), table.round_state);
     let active = count_active_players(&table.seats);
     if (active <= 1) {
         end_without_showdown(table);
     } else {
         advance_turn(table);
-    };
-    table_events::emit_player_folded(object::id(table), seat_index, table_events::fold_reason_manual(), table.round_state)
+    }
 }
 
 public  fun check(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
@@ -2300,8 +2300,8 @@ public  fun check(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     };
 
     seat.acted_this_round = true;
+    table_events::emit_player_checked(object::id(table), seat_index, table.round_state);
     advance_turn(table);
-    table_events::emit_player_checked(object::id(table), seat_index, table.round_state)
 }
 
 public  fun call(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
@@ -2329,11 +2329,11 @@ public  fun call(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
 
     let is_all_in = seat.stack == 0;
     seat.acted_this_round = true;
-    advance_turn(table);
     table_events::emit_player_called(object::id(table), seat_index, call_amount, table.round_state);
     if (is_all_in && call_amount > 0) {
         table_events::emit_player_all_in(object::id(table), seat_index, 0, call_amount, table.round_state);
     };
+    advance_turn(table);
 }
 
 public  fun raise(table: &mut Table, seat_index: u64, total_bet: u64, ctx: &mut TxContext) {
@@ -2362,11 +2362,11 @@ public  fun raise(table: &mut Table, seat_index: u64, total_bet: u64, ctx: &mut 
     let is_all_in = seat.stack == 0;
     seat.acted_this_round = true;
     reset_other_players_acted(&mut table.seats, seat_index);
-    advance_turn(table);
     table_events::emit_player_raised(object::id(table), seat_index, raise_amount, total_bet, table.round_state);
     if (is_all_in && raise_amount > 0) {
         table_events::emit_player_all_in(object::id(table), seat_index, 1, raise_amount, table.round_state);
     };
+    advance_turn(table);
 }
 
 // ========== 结算 ==========
