@@ -829,6 +829,9 @@ pub async fn apply_event_to_socket(
         SuiChainEvent::DeckRebuilt { table_id, .. } => {
             apply_deck_rebuilt_to_socket(app_state, table_id).await;
         }
+        SuiChainEvent::CurrentTurnChanged { table_id, old_turn, new_turn, round_state } => {
+            apply_current_turn_changed_to_socket(app_state, table_id, *old_turn, *new_turn, *round_state).await;
+        }
         _ => tracing::warn!(target: "relayer", "unknown event: {:?}", event),
     }
 
@@ -3514,6 +3517,75 @@ async fn apply_deck_rebuilt_to_socket(app_state: &Arc<AppState>, table_id: &str)
         "[bridge::deck_rebuilt] table {} deck rebuilt, will be synced by next sync_table_state",
         socket_table_id
     );
+}
+
+/// CurrentTurnChanged 事件处理器。
+///
+/// 链上 current_turn 变更时立即同步本地状态，避免玩家基于过期 turn 构建 PTB
+/// 导致 Shinami sponsor 阶段 MoveAbort(ENotPlayerTurn) 502。
+///
+/// 直接从事件 payload 读取 new_turn，无需等待完整快照 fetch，最小化状态滞后窗口。
+/// 随后的 sync_table_state 会用完整快照覆盖（一致即可）。
+async fn apply_current_turn_changed_to_socket(
+    app_state: &Arc<AppState>,
+    table_id: &str,
+    old_turn: Option<u64>,
+    new_turn: Option<u64>,
+    round_state: u8,
+) {
+    let io = match get_socket_io() {
+        Some(io) => io,
+        None => {
+            tracing::debug!("[bridge::turn] socket.io not initialized, skip");
+            return;
+        }
+    };
+
+    let socket_table_id = match locate_socket_table_by_chain_id(app_state, table_id).await {
+        Some(tid) => tid,
+        None => {
+            tracing::warn!(
+                "[bridge::turn] socket table not found for chain_table_id={}",
+                table_id
+            );
+            return;
+        }
+    };
+
+    // 1. 立即同步 current_turn 与 seat.turn
+    {
+        let mut gs = app_state.socket_state.state.write().await;
+        if let Some(table) = gs.tables.get_mut(&socket_table_id) {
+            let prev_turn = table.turn();
+            let new_turn_u32 = new_turn.map(|t| t as u32);
+            table.set_turn(new_turn_u32);
+            // 同步 seat.turn：前端依赖 seat.turn 显示行动面板和倒计时
+            for (seat_id, seat) in table.local_seats.iter_mut() {
+                seat.turn = new_turn_u32 == Some(*seat_id);
+            }
+            // 进入下注轮且 betting_started_at 未设置时，初始化计时器
+            if new_turn_u32.is_some() && table.betting_started_at() == 0 {
+                table.set_betting_started_at(now_ms());
+            }
+            tracing::info!(
+                "[bridge::turn] table {} current_turn changed: {:?} -> {:?} (prev_local={:?}, round_state={})",
+                socket_table_id,
+                old_turn,
+                new_turn,
+                prev_turn,
+                round_state
+            );
+        }
+    } // 写锁释放
+
+    // 2. 广播 TABLE_UPDATED，让前端立即刷新行动面板
+    broadcast::broadcast_to_table(
+        &io,
+        &app_state.socket_state,
+        socket_table_id,
+        Some("Current turn changed"),
+    )
+    .await;
 }
 
 /// Task 20: 将链上 hand_rank u64 转换为手牌等级名称。

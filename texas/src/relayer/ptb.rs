@@ -640,7 +640,7 @@ mod tests {
     use super::*;
 
     /// testnet package id for `texas_poker_move` (upgraded/latest)
-    const PACKAGE_ID: &str = "0xa8e7644c6aba2a5295d442046f7669608e511731621cdafe1ab9d4f8daa8b364";
+    const PACKAGE_ID: &str = "0x2468ec820fb4b0ccff92417d1cfb4a2fda903d14dd042e6a28d91381a28d2f94";
     /// a 32-byte hex object id used as a stand-in Table id
     const TABLE_ID: &str = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
     /// Sui system Clock object id

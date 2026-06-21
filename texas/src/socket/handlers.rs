@@ -116,6 +116,36 @@ async fn try_on_chain_action(
         }
     };
 
+    // 1b. 本地 turn 预检：避免基于过期 turn 构建 PTB 导致 Shinami sponsor 阶段
+    //     MoveAbort(ENotPlayerTurn) 502。CurrentTurnChanged 事件会实时同步本地 turn，
+    //     此处读取本地 turn 作为快速预判，不命中时直接告知前端刷新状态。
+    {
+        let gs = state.state.read().await;
+        if let Some(table) = gs.tables.get(&table_id) {
+            let current_turn = table.turn();
+            if current_turn != Some(seat_index) {
+                tracing::warn!(
+                    "[on_chain_action] not player's turn: table_id={}, seat_index={}, current_turn={:?}, action={}",
+                    table_id,
+                    seat_index,
+                    current_turn,
+                    action
+                );
+                let _ = socket.emit(
+                    "error",
+                    &serde_json::json!({
+                        "msg": format!("Not your turn (current_turn={:?}, your_seat={})", current_turn, seat_index),
+                        "action": action,
+                        "table_id": table_id,
+                        "current_turn": current_turn,
+                        "your_seat": seat_index,
+                    }),
+                );
+                return true;
+            }
+        }
+    }
+
     // 2. 构建 PTB 并序列化
     let tx_kind_b64 = match build_action_ptb_for_user(
         &state.config,
