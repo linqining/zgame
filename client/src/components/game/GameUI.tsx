@@ -15,6 +15,7 @@ interface GameUIProps {
   fold: () => void;
   check: () => void;
   call: () => void;
+  isActionLoading?: boolean;
 }
 
 export const GameUI: React.FC<GameUIProps> = ({
@@ -27,6 +28,7 @@ export const GameUI: React.FC<GameUIProps> = ({
   fold,
   check,
   call,
+  isActionLoading = false,
 }) => {
   const { getLocalizedString } = useContext(contentContext)!;
 
@@ -38,21 +40,22 @@ export const GameUI: React.FC<GameUIProps> = ({
         bet={bet}
         setBet={setBet}
       />
-      <Button small onClick={() => raise(bet + currentTable.seats[seatId].bet)}>
+      <Button small disabled={isActionLoading} onClick={() => raise(bet + currentTable.seats[seatId].bet)}>
         {getLocalizedString('game_ui_bet')} {bet}
       </Button>
-      <Button small secondary onClick={() => { standUp().catch(e => console.error('[GameUI] standUp failed:', e)); }}>
+      <Button small secondary disabled={isActionLoading} onClick={() => { standUp().catch(e => console.error('[GameUI] standUp failed:', e)); }}>
         {getLocalizedString('game_ui_stand-up')}
       </Button>
-      <Button small secondary onClick={fold}>
+      <Button small secondary disabled={isActionLoading} onClick={fold}>
         {getLocalizedString('game_ui_fold')}
       </Button>
       <Button
         small
         secondary
         disabled={
-          currentTable.callAmount !== currentTable.seats[seatId].bet &&
-          currentTable.callAmount > 0
+          isActionLoading ||
+          (currentTable.callAmount !== currentTable.seats[seatId].bet &&
+          currentTable.callAmount > 0)
         }
         onClick={check}
       >
@@ -61,6 +64,7 @@ export const GameUI: React.FC<GameUIProps> = ({
       <Button
         small
         disabled={
+          isActionLoading ||
           currentTable.callAmount === 0 ||
           currentTable.seats[seatId].bet >= currentTable.callAmount
         }
@@ -75,6 +79,7 @@ export const GameUI: React.FC<GameUIProps> = ({
       </Button>
       <Button
         small
+        disabled={isActionLoading}
         onClick={() =>
           raise(
             currentTable.seats[seatId].stack + currentTable.seats[seatId].bet,

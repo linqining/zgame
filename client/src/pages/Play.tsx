@@ -19,7 +19,7 @@ import PokerCard from '../components/game/PokerCard';
 import { useContentContext } from '../context/content/contentContext';
 import { PlayerContext } from '../context/player/PlayerContext';
 import Loader from '../components/loading/Loader';
-import { FETCH_LOBBY_INFO } from '../pokergame/actions';
+import { FETCH_LOBBY_INFO, RECEIVE_LOBBY_INFO } from '../pokergame/actions';
 import { getToken } from '../helpers/getToken';
 // ZK 密码学事件可视化（紧凑版）
 import CryptoEventStream from '../components/crypto/CryptoEventStream';
@@ -54,6 +54,9 @@ const Play: React.FC = () => {
   const [hasJoined, setHasJoined] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [isLeaving, setIsLeaving] = useState(false);
+  // 玩家操作（raise/call/fold/check/all-in）签名中：点击后置 true，TABLE_UPDATED 或超时后置 false
+  const [isActionLoading, setIsActionLoading] = useState(false);
+  const actionLoadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
   const hasShownLostModalRef = useRef(false);
   const isUnmountingRef = useRef(false);
@@ -64,10 +67,86 @@ const Play: React.FC = () => {
   const currentTableRef = useRef(currentTable);
   // ZK 密码学事件面板开关（默认收起，避免遮挡牌桌核心区域）
   const [showCryptoPanel, setShowCryptoPanel] = useState(false);
+  // lobby 是否就绪：收到 RECEIVE_LOBBY_INFO 表示 player 已在服务器注册，
+  // 之后才能 emit JOIN_TABLE，避免与 FETCH_LOBBY_INFO 并发导致 server 找不到 player
+  const [lobbyReady, setLobbyReady] = useState(false);
 
   useEffect(() => {
     currentTableRef.current = currentTable;
   }, [currentTable]);
+
+  // 监听 RECEIVE_LOBBY_INFO：服务器处理完 FETCH_LOBBY_INFO 后会 emit 此事件，
+  // 表示 player 已注册到 gs.players，此时再 emit JOIN_TABLE 才能正确触发 TABLE_UPDATED
+  useEffect(() => {
+    if (!socket) return;
+    const handler = () => {
+      console.log('[Play] RECEIVE_LOBBY_INFO received, lobby ready');
+      setLobbyReady(true);
+    };
+    socket.on(RECEIVE_LOBBY_INFO, handler);
+    return () => {
+      socket.off(RECEIVE_LOBBY_INFO, handler);
+    };
+  }, [socket]);
+
+  // 断线时重置 lobbyReady，重连后重新走 FETCH_LOBBY_INFO → RECEIVE_LOBBY_INFO → JOIN_TABLE 流程
+  useEffect(() => {
+    if (!isConnected) {
+      setLobbyReady(false);
+    } else {
+      joinRetryRef.current = 0;
+    }
+  }, [isConnected]);
+
+  // 玩家操作签名完成（TABLE_UPDATED 到达）后关闭 loading
+  useEffect(() => {
+    if (isActionLoading && currentTable) {
+      setIsActionLoading(false);
+      if (actionLoadingTimerRef.current) {
+        clearTimeout(actionLoadingTimerRef.current);
+        actionLoadingTimerRef.current = null;
+      }
+    }
+  }, [currentTable, isActionLoading]);
+
+  // 组件卸载时清理定时器
+  useEffect(() => {
+    return () => {
+      if (actionLoadingTimerRef.current) {
+        clearTimeout(actionLoadingTimerRef.current);
+        actionLoadingTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // 包装玩家操作：点击后立即显示 loading，30 秒超时兜底
+  const startActionLoading = () => {
+    setIsActionLoading(true);
+    if (actionLoadingTimerRef.current) {
+      clearTimeout(actionLoadingTimerRef.current);
+    }
+    actionLoadingTimerRef.current = setTimeout(() => {
+      setIsActionLoading(false);
+      actionLoadingTimerRef.current = null;
+    }, 30_000);
+  };
+
+  const wrappedFold = () => {
+    startActionLoading();
+    fold();
+  };
+  const wrappedCheck = () => {
+    startActionLoading();
+    check();
+  };
+  const wrappedCall = () => {
+    startActionLoading();
+    call();
+  };
+  const wrappedRaise = (amount: number) => {
+    startActionLoading();
+    raise(amount);
+  };
 
   useEffect(() => {
     return () => {
@@ -75,8 +154,12 @@ const Play: React.FC = () => {
     };
   }, []);
 
+  // join effect：等 lobby ready 后再 emit JOIN_TABLE。
+  // 根因：WebSocketProvider 在 socket connect 时 emit FETCH_LOBBY_INFO（注册 player 到服务器），
+  // 若客户端在 FETCH_LOBBY_INFO 处理完成前就 emit JOIN_TABLE，服务器端 join_table_push 会因
+  // 找不到 player 的 wallet 而静默失败，客户端永远收不到 TABLE_UPDATED。
+  // 修复：通过监听 RECEIVE_LOBBY_INFO 确认 player 已注册后再 emit JOIN_TABLE。
   useEffect(() => {
-    // 等待 socket 连接建立后再 joinTable。
     if (!socket || !isConnected) return;
 
     // 如果 currentTable 已经存在（例如从别的页面返回 /play，GameState 仍持有 table 状态），
@@ -86,12 +169,20 @@ const Play: React.FC = () => {
       return;
     }
 
-    // 重置重试计数器
-    joinRetryRef.current = 0;
+    if (!lobbyReady) {
+      // lobby info 还没收到，主动 emit FETCH_LOBBY_INFO 触发服务器注册 player，
+      // 收到 RECEIVE_LOBBY_INFO 后 lobbyReady 变 true，本 effect 会重新执行并 emit JOIN_TABLE
+      const token = getToken();
+      if (token) {
+        console.log('[Play] lobby not ready, emitting FETCH_LOBBY_INFO');
+        socket.emit(FETCH_LOBBY_INFO, token);
+      } else {
+        console.warn('[Play] No token, cannot emit FETCH_LOBBY_INFO');
+      }
+      return;
+    }
 
-    // 快速路径：WebSocketProvider 在 socket connect 时已 emit 过 FETCH_LOBBY_INFO，
-    // 服务器通常已注册当前玩家，直接 joinTable 即可拿到 TABLE_UPDATED。
-    // 若因竞态导致 joinTable 失败（currentTable 仍为空），由下方重试 effect 补发 FETCH_LOBBY_INFO。
+    console.log('[Play] lobby ready, emitting JOIN_TABLE');
     joinTable(1, pkHex || '');
     setHasJoined(true);
 
@@ -104,28 +195,24 @@ const Play: React.FC = () => {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [socket, isConnected]);
+  }, [socket, isConnected, lobbyReady]);
 
-  // 重试机制：joinTable 后若 currentTable 仍为空，则重试 FETCH_LOBBY_INFO + joinTable。
-  // 解决因服务器端 FETCH_LOBBY_INFO 与 JOIN_TABLE 并发处理导致的竞态问题。
+  // 重试机制：lobbyReady 后若 currentTable 仍为空，重置 lobbyReady 触发重新走
+  // FETCH_LOBBY_INFO → RECEIVE_LOBBY_INFO → JOIN_TABLE 流程，确保重试时不再并发。
   useEffect(() => {
-    if (!hasJoined || !socket || !isConnected || currentTable) return;
+    if (!hasJoined || !socket || !isConnected || currentTable || !lobbyReady) return;
     if (joinRetryRef.current >= MAX_JOIN_RETRIES) return;
 
     const timer = setTimeout(() => {
       joinRetryRef.current += 1;
-      console.log(`[Play] currentTable still null, retry ${joinRetryRef.current}/${MAX_JOIN_RETRIES}`);
-      // 重试时才补发 FETCH_LOBBY_INFO，确保服务器注册了当前玩家
-      const token = getToken();
-      if (token) {
-        socket.emit(FETCH_LOBBY_INFO, token);
-      }
-      joinTable(1, pkHex || '');
-    }, 1000);
+      console.log(`[Play] currentTable still null after join, retry ${joinRetryRef.current}/${MAX_JOIN_RETRIES}`);
+      // 重置 lobbyReady，触发 join effect 重新 emit FETCH_LOBBY_INFO → 等待 RECEIVE_LOBBY_INFO → emit JOIN_TABLE
+      setLobbyReady(false);
+    }, 1500);
 
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasJoined, socket, isConnected, currentTable]);
+  }, [hasJoined, socket, isConnected, currentTable, lobbyReady]);
 
   // Handle reconnection when connection is lost after joining
   useEffect(() => {
@@ -225,6 +312,26 @@ const Play: React.FC = () => {
           <Loader />
           <Text textAlign="center" style={{ marginTop: '1rem', color: '#fff' }}>
             {getLocalizedString('play_leaving') || '正在离开牌桌...'}
+          </Text>
+        </div>
+      )}
+      {isActionLoading && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.6)',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+            alignItems: 'center',
+            zIndex: 9998,
+            pointerEvents: 'auto',
+          }}
+        >
+          <Loader />
+          <Text textAlign="center" style={{ marginTop: '1rem', color: '#fff' }}>
+            {getLocalizedString('play_action-signing') || '等待签名确认...'}
           </Text>
         </div>
       )}
@@ -515,11 +622,12 @@ const Play: React.FC = () => {
               seatId={seatId}
               bet={bet}
               setBet={setBet}
-              raise={raise}
+              raise={wrappedRaise}
               standUp={standUp}
-              fold={fold}
-              check={check}
-              call={call}
+              fold={wrappedFold}
+              check={wrappedCheck}
+              call={wrappedCall}
+              isActionLoading={isActionLoading}
             />
           )}
       </Container>
