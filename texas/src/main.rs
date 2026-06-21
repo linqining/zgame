@@ -51,7 +51,7 @@ async fn main() -> std::io::Result<()> {
     let db = Database::new();
 
     let mut initial_tables = HashMap::new();
-    initial_tables.insert(1, Table::new(1, "Table 1".to_string(), 10000, config.max_players_per_table, "0x4f645d36695b43015021883fcf26780d3a85963a058e9b10180c6f0f482518ef".to_string()));
+    initial_tables.insert(1, Table::new(1, "Table 1".to_string(), 10000, config.max_players_per_table, "0x4bf39dfc438f5256c9e0eb4a2a878b35907a3ed3f296fe7a5de28d67ef928bc0".to_string()));
     // initial_tables.insert(2, Table::new(2, "Table 2".to_string(), 20000, config.max_players_per_table, "".to_string()));
     // initial_tables.insert(3, Table::new(3, "Table 3".to_string(), 50000, config.max_players_per_table, "".to_string()));
     for table in initial_tables.values_mut() {

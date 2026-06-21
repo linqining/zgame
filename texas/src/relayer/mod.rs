@@ -768,7 +768,7 @@ pub async fn apply_event_to_socket(
         }
         // Task 20: Reveal 事件
         SuiChainEvent::RevealTokenSubmitted { table_id, seat_index, card_index, .. } => {
-            apply_reveal_token_submitted_to_socket(app_state, table_id, *seat_index, *card_index).await;
+            apply_reveal_token_submitted_to_socket(app_state, table_id, *seat_index, *card_index, tx_digest).await;
         }
         SuiChainEvent::RevealPhaseComplete { table_id, .. } => {
             apply_reveal_phase_complete_to_socket(app_state, table_id).await;
@@ -2695,6 +2695,7 @@ async fn apply_reveal_token_submitted_to_socket(
     table_id: &str,
     seat_index: u64,
     card_index: u64,
+    tx_digest: Option<&str>,
 ) {
     // 1. 定位 socket table
     let socket_table_id = match locate_socket_table_by_chain_id(app_state, table_id).await {
@@ -2733,7 +2734,7 @@ async fn apply_reveal_token_submitted_to_socket(
             Some(card_index as u32),
             true,
             Some("reveal token submitted".to_string()),
-            None,
+            tx_digest.map(|s| s.to_string()),
         )
         .await;
 }
