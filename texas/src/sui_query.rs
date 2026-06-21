@@ -558,3 +558,171 @@ pub async fn fetch_reveal_assignment_indices(
 
     Ok(indices)
 }
+
+/// Move 合约 `DecryptedCardInfo` 的 BCS 反序列化结构。
+/// 字段顺序必须与 `table.move` 中的 `DecryptedCardInfo` struct 一致。
+#[derive(Debug, serde::Deserialize)]
+pub struct DecryptedCardInfoBcs {
+    pub owner_seat_index: u64,
+    pub ciphertext_bytes: Vec<u8>,   // 96 bytes: c1+c2，部分解密后即为 readable_card
+    pub plaintext_bytes: Vec<u8>,    // 48 bytes G1 compressed，空=仅部分解密
+}
+
+/// 构建 `table::decrypted_cards_info` + `bcs::to_bytes` 的 ProgrammableTransaction。
+fn build_decrypted_cards_info_ptb(
+    package_id: &str,
+    origin_package_id: &str,
+    table_object_id: &str,
+) -> Result<sui_sdk_types::ProgrammableTransaction, String> {
+    use sui_sdk_types::{
+        Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
+        SharedInput, StructTag, TypeTag,
+    };
+
+    let parse_address = |s: &str| -> Result<Address, String> {
+        s.parse::<Address>()
+            .map_err(|e| format!("invalid address '{}': {}", s, e))
+    };
+
+    let table_id = parse_address(table_object_id)?;
+    let package = parse_address(package_id)?;
+    let origin_package = parse_address(origin_package_id)?;
+    let bcs_package = parse_address("0x2")?;
+
+    let inputs = vec![Input::Shared(SharedInput::new(table_id, 0, false))];
+
+    // Command 0: table::decrypted_cards_info(&Table) → Result(0)
+    let cmd0 = Command::MoveCall(MoveCall {
+        package,
+        module: Identifier::from_static("table"),
+        function: Identifier::from_static("decrypted_cards_info"),
+        type_arguments: Vec::new(),
+        arguments: vec![Argument::Input(0)],
+    });
+
+    // Command 1: 0x2::bcs::to_bytes<vector<origin::table::DecryptedCardInfo>>(&Result(0))
+    let info_type = TypeTag::Struct(Box::new(StructTag::new(
+        origin_package,
+        Identifier::from_static("table"),
+        Identifier::from_static("DecryptedCardInfo"),
+        Vec::new(),
+    )));
+    let cmd1 = Command::MoveCall(MoveCall {
+        package: bcs_package,
+        module: Identifier::from_static("bcs"),
+        function: Identifier::from_static("to_bytes"),
+        type_arguments: vec![TypeTag::Vector(Box::new(info_type))],
+        arguments: vec![Argument::Result(0)],
+    });
+
+    Ok(ProgrammableTransaction {
+        inputs,
+        commands: vec![cmd0, cmd1],
+    })
+}
+
+/// 通过 dev inspect 获取链上 `decrypted_cards_info`。
+///
+/// 返回 `Vec<DecryptedCardInfoBcs>`，每个元素包含 `owner_seat_index` 和 `ciphertext_bytes`
+/// （96 bytes: c1+c2，部分解密后的 readable_card）。
+///
+/// relayer 在 `RevealPhaseComplete` 后调用此函数，用 `ciphertext_bytes` 作为
+/// `HandRevealResultPayload` 的 `readable_cards`。
+pub async fn fetch_decrypted_cards_info(
+    rpc_url: &str,
+    package_id: &str,
+    origin_package_id: &str,
+    table_object_id: &str,
+) -> Result<Vec<DecryptedCardInfoBcs>, String> {
+    let pt = build_decrypted_cards_info_ptb(package_id, origin_package_id, table_object_id)?;
+
+    let http = crate::sponsor::shared_http_client();
+    let pt = crate::relayer::ptb::resolve_shared_object_versions(http, rpc_url, pt).await?;
+
+    let tx_kind_b64 = crate::relayer::ptb::serialize_tx_kind(pt)?;
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sui_devInspectTransactionBlock",
+        "params": [
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            tx_kind_b64,
+            null,
+            null,
+            {
+                "show_effects": true,
+                "show_input": true,
+                "show_object_changes": true,
+                "show_raw_input": false,
+                "show_raw_effects": false
+            }
+        ]
+    });
+
+    let client = reqwest::Client::new();
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("JSON parse failed: {}", e))?;
+
+    if let Some(error) = resp.get("error") {
+        return Err(format!("RPC error: {:?}", error));
+    }
+
+    let result = resp
+        .get("result")
+        .ok_or("No result in dev inspect response")?;
+
+    let status = result
+        .get("effects")
+        .and_then(|e| e.get("status"))
+        .and_then(|s| s.get("status"))
+        .and_then(|s| s.as_str())
+        .ok_or("Missing execution status in dev inspect response")?;
+
+    if status != "success" {
+        let error = result
+            .get("effects")
+            .and_then(|e| e.get("status"))
+            .and_then(|s| s.get("error"))
+            .and_then(|e| e.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("Dev inspect execution failed: {}", error));
+    }
+
+    let return_value = result
+        .get("results")
+        .and_then(|r| r.get(1))
+        .and_then(|r| r.get("returnValues"))
+        .and_then(|rv| rv.get(0))
+        .ok_or("No return values for bcs::to_bytes in dev inspect response")?;
+
+    let bcs_bytes = {
+        let bytes_val = return_value
+            .get(0)
+            .ok_or("Missing BCS bytes in return value")?;
+        if let Some(s) = bytes_val.as_str() {
+            let engine = base64::engine::general_purpose::STANDARD;
+            engine
+                .decode(s)
+                .map_err(|e| format!("Base64 decode error: {}", e))?
+        } else if let Some(arr) = bytes_val.as_array() {
+            arr.iter()
+                .map(|v| v.as_u64().unwrap_or(0) as u8)
+                .collect::<Vec<u8>>()
+        } else {
+            return Err("Unexpected BCS bytes format in return value".to_string());
+        }
+    };
+
+    let inner_bytes = bcs::from_bytes::<Vec<u8>>(&bcs_bytes)
+        .map_err(|e| format!("BCS outer deserialization failed: {}", e))?;
+    bcs::from_bytes::<Vec<DecryptedCardInfoBcs>>(&inner_bytes)
+        .map_err(|e| format!("BCS inner deserialization failed: {}", e))
+}

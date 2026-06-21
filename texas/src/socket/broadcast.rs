@@ -139,15 +139,14 @@ impl SocketState {
         self.broadcast_player_reveal_result(table_id, actions::REDEAL_RESULT).await;
     }
 
-    /// 从 `TableSummaryV2` 构造 `HandRevealResultPayload` 并广播给每个活跃玩家。
+    /// 从链上 `decrypted_cards_info` 构造 `HandRevealResultPayload` 并广播给每个活跃玩家。
     ///
-    /// 链上模式下 `mental_poker_game` 无玩家数据（`get_player_readable_tokens` 返回空），
-    /// 需直接从 `summary.crypto.deck_encrypted` 按座位顺序提取手牌，
-    /// 并从 `summary.state.deck_plaintext` 构造明文牌组 hex 列表。
+    /// 链上模式下 `mental_poker_game` 无玩家数据，且 `readable_cards` 需要部分解密密文
+    /// （c2 - sum(reveal_tokens)），不能直接用原始 `deck_encrypted`。
     ///
-    /// 手牌索引对齐 Move `deal_hole_cards`：
-    /// `hand_start = cards_dealt - active_count * CARDS_PER_PLAYER`
-    /// 玩家 order 的手牌为 `deck[hand_start + order*2 .. hand_start + order*2 + 2]`
+    /// 解决方案：调用 Move `decrypted_cards_info` 获取链上已部分解密的 `ciphertext_bytes`
+    /// （96 bytes: c1+c2），直接作为 `readable_cards` 发给对应 `owner_seat_index` 的玩家。
+    /// 前端用私钥解密 readable_card 后在 `deck_plaintext` 中查找明文牌。
     pub async fn broadcast_player_reveal_result_from_summary(
         &self,
         table_id: u32,
@@ -165,50 +164,72 @@ impl SocketState {
         );
 
         use poker_protocol::crypto::curve::CurvePoint;
-        use poker_protocol::crypto::{DefaultCurve, ElGamalCiphertext};
+        use poker_protocol::crypto::DefaultCurve;
         type P = <DefaultCurve as poker_protocol::crypto::curve::Curve>::Point;
 
-        const CARDS_PER_PLAYER: usize = 2;
+        // 1. 获取 chain_table_id + socket_id 映射
+        let (chain_table_id, socket_id_map): (Option<String>, std::collections::HashMap<String, String>) = {
+            let gs = self.state.read().await;
+            let Some(table) = gs.tables.get(&table_id) else {
+                return;
+            };
+            let map = table.players().iter()
+                .filter_map(|(game_pk, wallet_addr)| {
+                    gs.players.values()
+                        .find(|p| p.wallet_address.0 == wallet_addr.0)
+                        .map(|player| (game_pk.0.clone(), player.socket_id.clone()))
+                })
+                .collect();
+            (table.chain_table_id.clone(), map)
+        };
 
-        // 1. 反序列化 deck_encrypted（96 bytes: c1 || c2 → ElGamalCiphertext）
-        if summary.crypto.deck_encrypted.is_empty() {
+        let chain_table_id = match chain_table_id {
+            Some(id) => id,
+            None => {
+                tracing::warn!(
+                    "[reveal_result_from_summary] chain_table_id is None, table_id={}",
+                    table_id
+                );
+                return;
+            }
+        };
+
+        // 2. 从链上获取 decrypted_cards_info（部分解密密文）
+        let decrypted_cards = match crate::sui_query::fetch_decrypted_cards_info(
+            &self.config.fullnode_url,
+            &self.config.sui_package_id,
+            &self.config.sui_origin_package_id,
+            &chain_table_id,
+        )
+        .await
+        {
+            Ok(cards) => cards,
+            Err(e) => {
+                tracing::warn!(
+                    "[reveal_result_from_summary] fetch_decrypted_cards_info failed, table_id={}: {}",
+                    table_id,
+                    e
+                );
+                return;
+            }
+        };
+
+        if decrypted_cards.is_empty() {
             tracing::warn!(
-                "[reveal_result_from_summary] deck_encrypted is empty, table_id={}",
+                "[reveal_result_from_summary] decrypted_cards is empty, table_id={}",
                 table_id
             );
             return;
         }
-        let deck: Vec<ElGamalCiphertext> = summary.crypto.deck_encrypted.iter()
-            .filter_map(|ct_bytes| {
-                if ct_bytes.len() != 96 {
-                    return None;
-                }
-                let (c1_bytes, c2_bytes) = ct_bytes.split_at(48);
-                match (
-                    <P as CurvePoint>::from_compressed(c1_bytes),
-                    <P as CurvePoint>::from_compressed(c2_bytes),
-                ) {
-                    (Some(c1), Some(c2)) => Some(ElGamalCiphertext { c1, c2 }),
-                    _ => None,
-                }
-            })
-            .collect();
-        if deck.is_empty() {
-            tracing::warn!(
-                "[reveal_result_from_summary] deck deserialization failed, table_id={}",
-                table_id
-            );
-            return;
-        }
 
-        // 2. 构造 deck_plaintext hex 列表（compressed G1 → EcPoint → hex）
+        // 3. 构造 deck_plaintext hex 列表（compressed G1 → EcPoint → hex）
         let deck_plaintext: Vec<String> = summary.state.deck_plaintext.iter()
             .filter_map(|bytes| {
                 <P as CurvePoint>::from_compressed(bytes).map(|pt| ecpoint_to_hex(&pt))
             })
             .collect();
 
-        // 3. 构建 seat_index → GamePkHex 映射
+        // 4. 构建 seat_index → GamePkHex 映射
         let seat_pk_map: std::collections::HashMap<u64, GamePkHex> = summary.crypto.seat_pks.iter()
             .enumerate()
             .filter_map(|(i, pk_bytes)| {
@@ -220,71 +241,41 @@ impl SocketState {
             })
             .collect();
 
-        // 4. 获取活跃座位列表（对齐 Move get_active_seat_indices）
-        let active_seats: Vec<u64> = (0..summary.meta.seats_occupied.len())
-            .filter(|&i| {
-                summary.meta.seats_occupied.get(i).copied().unwrap_or(false)
-                    && !summary.meta.seat_is_waiting.get(i).copied().unwrap_or(false)
-            })
-            .map(|i| i as u64)
-            .collect();
-        if active_seats.is_empty() {
-            tracing::warn!(
-                "[reveal_result_from_summary] no active seats, table_id={}",
-                table_id
-            );
-            return;
+        // 5. 按 owner_seat_index 分组，每个玩家的 readable_cards
+        //    ciphertext_bytes = 96 bytes (c1 || c2)，即部分解密后的 readable_card
+        let mut cards_by_seat: std::collections::HashMap<u64, Vec<ElGamalCiphertextJson>> =
+            std::collections::HashMap::new();
+        for card in &decrypted_cards {
+            if card.ciphertext_bytes.len() != 96 {
+                // ciphertext_bytes 为空表示已完全解密（公共牌场景），跳过
+                continue;
+            }
+            let readable = ElGamalCiphertextJson {
+                c1_hex: hex::encode(&card.ciphertext_bytes[..48]),
+                c2_hex: hex::encode(&card.ciphertext_bytes[48..]),
+            };
+            cards_by_seat
+                .entry(card.owner_seat_index)
+                .or_default()
+                .push(readable);
         }
 
-        // 5. 计算手牌起始索引
-        let active_count = active_seats.len() as u64;
-        let cards_dealt = summary.state.cards_dealt;
-        if cards_dealt < active_count * CARDS_PER_PLAYER as u64 {
-            tracing::warn!(
-                "[reveal_result_from_summary] cards_dealt {} < active_count*{}, table_id={}",
-                cards_dealt,
-                CARDS_PER_PLAYER,
-                table_id
-            );
-            return;
-        }
-        let hand_start = (cards_dealt - active_count * CARDS_PER_PLAYER as u64) as usize;
-
-        // 6. 获取 player_pk → socket_id 映射
-        let socket_id_map: std::collections::HashMap<String, String> = {
-            let gs = self.state.read().await;
-            let Some(table) = gs.tables.get(&table_id) else {
-                return;
-            };
-            table.players().iter()
-                .filter_map(|(game_pk, wallet_addr)| {
-                    gs.players.values()
-                        .find(|p| p.wallet_address.0 == wallet_addr.0)
-                        .map(|player| (game_pk.0.clone(), player.socket_id.clone()))
-                })
-                .collect()
-        };
-
-        // 7. 为每个活跃玩家构造 payload 并发送
-        for (order, &seat_idx) in active_seats.iter().enumerate() {
-            let pk = match seat_pk_map.get(&seat_idx) {
-                Some(pk) => pk.clone(),
-                None => continue,
-            };
-
-            let base = hand_start + order * CARDS_PER_PLAYER;
-            let readable_cards: Vec<ElGamalCiphertextJson> = (0..CARDS_PER_PLAYER)
-                .filter_map(|i| {
-                    if base + i < deck.len() {
-                        Some(ElGamalCiphertextJson::from_ciphertext(&deck[base + i]))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+        // 6. 为每个玩家构造 payload 并发送
+        for (seat_idx, readable_cards) in cards_by_seat {
             if readable_cards.is_empty() {
                 continue;
             }
+            let pk = match seat_pk_map.get(&seat_idx) {
+                Some(pk) => pk.clone(),
+                None => {
+                    tracing::warn!(
+                        "[reveal_result_from_summary] no pk for seat_idx={}, table_id={}",
+                        seat_idx,
+                        table_id
+                    );
+                    continue;
+                }
+            };
 
             let socket_id = match socket_id_map.get(&pk.0) {
                 Some(s) => s.clone(),

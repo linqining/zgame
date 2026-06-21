@@ -197,6 +197,15 @@ public struct DecryptedCard has store, drop {
     plaintext_bytes: vector<u8>,        // 完全解密明文 (48 bytes G1 compressed)，空=仅部分解密
 }
 
+/// `DecryptedCard` 的 copy+drop 投影，用于 `bcs::to_bytes` 序列化后传给 off-chain relayer。
+/// 链上模式下 `mental_poker_game` 无玩家数据，relayer 通过 `decrypted_cards_info` 读取
+/// 链上已部分解密的 `ciphertext_bytes`（96 bytes: c1+c2），直接作为前端的 `readable_cards`。
+public struct DecryptedCardInfo has copy, drop {
+    owner_seat_index: u64,
+    ciphertext_bytes: vector<u8>,       // 96 bytes (c1+c2)，部分解密后即为 readable_card
+    plaintext_bytes: vector<u8>,        // 48 bytes G1 compressed，空=仅部分解密
+}
+
 // ========== 牌组状态 ==========
 public struct DeckState has store, drop {
     encrypted: vector<ElGamalCiphertext>,
@@ -3648,6 +3657,26 @@ public fun deck_encrypted(table: &Table): &vector<ElGamalCiphertext> { &table.de
 public fun deck_size(table: &Table): u64 { table.deck_state.encrypted.length() }
 public fun aggregated_pk(table: &Table): &vector<u8> { &table.deck_state.aggregated_pk }
 public fun deck_plaintext(table: &Table): &vector<vector<u8>> { &table.deck_state.plaintext }
+
+/// 返回链上 `decrypted_cards` 的 copy+drop 投影，供 off-chain relayer 通过
+/// `dev_inspect_transaction_block` + `bcs::to_bytes` 读取。
+///
+/// 链上模式下 `mental_poker_game` 无玩家数据，relayer 用本函数返回的 `ciphertext_bytes`
+/// （96 bytes: c1+c2，部分解密后即为 readable_card）直接构造 `HandRevealResultPayload`。
+public fun decrypted_cards_info(table: &Table): vector<DecryptedCardInfo> {
+    let mut result = vector[];
+    let mut i = 0;
+    while (i < table.deck_state.decrypted_cards.length()) {
+        let card = &table.deck_state.decrypted_cards[i];
+        result.push_back(DecryptedCardInfo {
+            owner_seat_index: card.owner_seat_index,
+            ciphertext_bytes: card.ciphertext_bytes,
+            plaintext_bytes: card.plaintext_bytes,
+        });
+        i = i + 1;
+    };
+    result
+}
 
 public fun shuffle_current_shuffler(table: &Table): Option<u64> { table.shuffle_state.current_shuffler }
 public fun shuffle_pending_players(table: &Table): &vector<u64> { &table.shuffle_state.pending_players }
