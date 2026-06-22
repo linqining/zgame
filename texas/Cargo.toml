@@ -12,7 +12,7 @@ socketioxide = { version = "0.18.3", features = ["state"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 uuid = { version = "1", features = ["v4"] }
 jsonwebtoken = "9"
 rand = "0.8"
@@ -26,7 +26,7 @@ blake2b_simd = "1"
 base64 = "0.22"
 poker_protocol = { path = "../poker_protocol" }
 sui-serialization = { path = "../sui-serialization" }
-sui_sdk = { git = "https://github.com/mystenlabs/sui", package = "sui-sdk", rev = "11ea899f8b9a19417096b01c6c75df0a9a48c878" }
+sui_sdk = { git = "https://github.com/mystenlabs/sui", package = "sui-sdk", rev = "11ea899f8b9a19417096b01c6c75df0a9a48c878"}
 sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
 sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09", features = ["pem", "ed25519", "secp256k1", "secp256r1", "zklogin"] }
 sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
@@ -40,6 +40,6 @@ bcs = "0.1"
 hmac = "0.12"
 sha2 = "0.10"
 zeroize = { version = "1", features = ["alloc"] }
-tokio-tungstenite = { version = "0.27", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.27", features = ["__rustls-tls"] }
 futures-util = "0.3"
 

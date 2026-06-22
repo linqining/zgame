@@ -1,0 +1,71 @@
+server {
+    server_name secretpokers.com www.secretpokers.com;
+
+    root /home/ec2-user/zgame/front/dist;
+    index index.html;
+    location / {
+        # 示例：Node.js 反向代理
+        # proxy_pass http://127.0.0.1:3000;
+	try_files $uri $uri/ /index.html;
+    }
+        # 后端 API 代理
+    location /api/ {
+        proxy_pass http://127.0.0.1:9001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # WebSocket 代理（游戏服务）
+    location /socket.io/ {
+        proxy_pass http://127.0.0.1:9001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # 静态资源缓存（图片、字体等）
+    location ~* \.(jpg|jpeg|png|gif|ico|svg|woff2?|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # JS/CSS 缓存（Vite 产物自带 hash）
+    location ~* \.(js|css)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/secretpokers.com/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/secretpokers.com/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+}
+
+server {
+    if ($host = www.secretpokers.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    if ($host = secretpokers.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    listen 80;
+    server_name secretpokers.com www.secretpokers.com;
+    return 404; # managed by Certbot
+
+
+
+
+}

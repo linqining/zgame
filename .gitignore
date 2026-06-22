@@ -23,3 +23,5 @@ move_git_backup/*
 *.keystore
 vin_game_simulator/keys.json
 **/keys.json
+
+client/deploy/*

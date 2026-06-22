@@ -169,7 +169,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
 
   const seat = currentTable.seats[seatNumber];
   // limit 在链上同步场景可能为 0（链上 BCS 不含此字段），回退到 bigBlind * 100
-  const maxBuyin = currentTable.limit || (currentTable.bigBlind * 100);
+  const maxBuyin = 5000;
   const minBuyIn = Math.max(currentTable.minBet * 2 * 10, 1000);
   const BUYIN_STEP = 1000;
 
@@ -212,11 +212,15 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
       }, 2000);
     } catch (err: any) {
       const msg = err?.message || String(err);
-      if (msg.includes('Too many requests') || msg.includes('429')) {
-        setFaucetMsg('请求过于频繁，请稍后再试');
-      } else {
-        setFaucetMsg(`领取失败: ${msg}`);
-      }
+      const errMsg = msg.includes('Too many requests') || msg.includes('429')
+        ? '请求过于频繁，请稍后再试'
+        : `领取失败: ${msg}`;
+      setFaucetMsg(errMsg);
+      openModal(
+        () => <Text textAlign="center">{errMsg}</Text>,
+        '领取 SUI 失败',
+        '确定',
+      );
     } finally {
       setFaucetLoading(false);
     }
