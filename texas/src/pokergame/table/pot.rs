@@ -186,8 +186,9 @@ impl Table {
                 }
                 tracing::info!("evaluate_player_hands eval_cards: {:?}", eval_cards);
                 if eval_cards.len() >= 5 {
-                    let (hand_rank, _) = best_hand(&eval_cards);
-                    results.push((seat.id, hand_rank));
+                    if let Some((hand_rank, _)) = best_hand(&eval_cards) {
+                        results.push((seat.id, hand_rank));
+                    }
                 }
             }
         }

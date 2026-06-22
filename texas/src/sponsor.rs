@@ -54,8 +54,12 @@ fn derive_zklogin_salt(iss: &str, sub: &str, secret: &str) -> String {
     let normalized_iss = normalize_zklogin_issuer(iss);
     let input = format!("{}:{}:{}", normalized_iss, sub, secret);
     let hash = blake2b(input.as_bytes());
-    // Take first 16 bytes (128 bits) and convert to u128 decimal string
-    let bytes: [u8; 16] = hash.as_bytes()[..16].try_into().expect("slice has correct length");
+    // Take first 16 bytes (128 bits) and convert to u128 decimal string.
+    // blake2b always returns at least 64 bytes, so slicing [..16] is always valid.
+    let bytes: [u8; 16] = hash.as_bytes()[..16].try_into().unwrap_or_else(|e| {
+        tracing::error!("[derive_zklogin_salt] blake2b hash shorter than expected: {}", e);
+        [0u8; 16]
+    });
     let salt_val = u128::from_be_bytes(bytes);
     salt_val.to_string()
 }

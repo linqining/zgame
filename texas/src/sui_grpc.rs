@@ -33,7 +33,7 @@ pub async fn subscribe_checkpoints(
     if !config.grpc_token.is_empty() {
         let mut headers = HeadersInterceptor::new();
         let token_value = tonic::metadata::MetadataValue::try_from(config.grpc_token.as_str())
-            .expect("GRPC_TOKEN contains invalid characters for gRPC header");
+            .map_err(|e| format!("GRPC_TOKEN contains invalid characters for gRPC header: {}", e))?;
         headers.headers_mut().insert("x-token", token_value);
         client = client.with_headers(headers);
         tracing::info!("[sui_grpc] x-token authentication enabled");

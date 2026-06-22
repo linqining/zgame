@@ -334,10 +334,16 @@ pub async fn poll_events_loop(config: Config, state: Arc<AppState>) {
     };
 
     let poll_interval = std::time::Duration::from_millis(config.sui_tick_interval_ms.max(2000));
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .expect("failed to build HTTP client for GraphQL polling");
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("[sui_graphql_poll] failed to build HTTP client for GraphQL polling: {}", e);
+            return;
+        }
+    };
 
     // 从上次保存的 cursor 继续
     let mut cursor = load_last_cursor();

@@ -57,8 +57,10 @@ pub fn evaluate_five(cards: &[EvalCard; 5]) -> HandRank {
     HandRank::HighCard([ranks[0], ranks[1], ranks[2], ranks[3], ranks[4]])
 }
 
-pub fn best_hand(cards: &[EvalCard]) -> (HandRank, Vec<EvalCard>) {
-    assert!(cards.len() >= 5, "need at least 5 cards");
+pub fn best_hand(cards: &[EvalCard]) -> Option<(HandRank, Vec<EvalCard>)> {
+    if cards.len() < 5 {
+        return None;
+    }
     let mut best_rank: Option<HandRank> = None;
     let mut best_cards: Vec<EvalCard> = Vec::new();
     for combo in cards.iter().combinations(5) {
@@ -69,7 +71,7 @@ pub fn best_hand(cards: &[EvalCard]) -> (HandRank, Vec<EvalCard>) {
             best_cards = five.to_vec();
         }
     }
-    (best_rank.expect("at least one combination"), best_cards)
+    best_rank.map(|rank| (rank, best_cards))
 }
 
 fn is_straight_high(ranks: &[Rank]) -> bool {

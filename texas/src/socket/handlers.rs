@@ -1472,13 +1472,13 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             // leave_with_proof_verified 交易时，leave_round 为 None。
             // 此时跳过本地 proof 验证和 PTB 构建，仅清理 socket 状态，
             // 等待 relayer 从 PlayerLeft 事件同步。
-            if payload.leave_round.is_none() {
+            let Some(leave_round_ref) = payload.leave_round.as_ref() else {
                 tracing::info!(
                     "[STAND_UP] on-chain mode: leave_round is None (client already submitted tx via HTTP API), table_id={}, pk_hex={}",
                     table_id, pk_hex
                 );
                 return;
-            }
+            };
 
             // 解析 chain_table_id 和 seat_index
             // 优先用 payload.pk_hex 查找；若 pk_to_seat 中无匹配，
@@ -1537,7 +1537,7 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             // 本地验证 leave proof（提前拦截无效 proof，避免上链失败）
             {
                 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
-                let leave_round = match payload.leave_round.as_ref().unwrap().to_leave_game_round() {
+                let leave_round = match leave_round_ref.to_leave_game_round() {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::warn!("[STAND_UP] on-chain mode: leave_round parse failed: {}", e);
@@ -1601,7 +1601,6 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
             }
 
             // 序列化 output_cards 和 leave_proof bytes
-            let leave_round_ref = payload.leave_round.as_ref().unwrap();
             let output_cards_bytes = match serialize_ciphertexts_from_json(&leave_round_ref.output_cards) {
                 Ok(b) => b,
                 Err(e) => {

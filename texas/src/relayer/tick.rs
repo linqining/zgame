@@ -43,8 +43,7 @@ pub async fn run_tick_loop(state: Arc<AppState>) {
             let chain_tables: Vec<String> = {
                 let gs = state.socket_state.state.read().await;
                 gs.tables.values()
-                    .filter(|t| t.chain_table_id.is_some())
-                    .map(|t| t.chain_table_id.clone().unwrap())
+                    .filter_map(|t| t.chain_table_id.clone())
                     .collect()
             };
 
