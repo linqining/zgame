@@ -115,22 +115,10 @@ public fun verify(
 
     // 2. Derive batch coefficients rho_i
     // For each input_ct: append c1 with label "input c1", append c2 with label "input c2"
-    let mut i = 0;
-    while (i < n) {
-        let input_ct = vector::borrow(input_cts, i);
-        bls_transcript::append_point(t, &b"input c1", bls_elgamal::c1(input_ct));
-        bls_transcript::append_point(t, &b"input c2", bls_elgamal::c2(input_ct));
-        i = i + 1;
-    };
+    bls_transcript::append_ciphertexts(t, &b"input c1", &b"input c2", input_cts);
 
     // For each output_ct: append c1 with label "output c1", append c2 with label "output c2"
-    i = 0;
-    while (i < n) {
-        let output_ct = vector::borrow(output_cts, i);
-        bls_transcript::append_point(t, &b"output c1", bls_elgamal::c1(output_ct));
-        bls_transcript::append_point(t, &b"output c2", bls_elgamal::c2(output_ct));
-        i = i + 1;
-    };
+    bls_transcript::append_ciphertexts(t, &b"output c1", &b"output c2", output_cts);
 
     // Generate N rho_i scalars
     let rho = bls_transcript::challenge_vec(t, &b"rho_challenge", n);

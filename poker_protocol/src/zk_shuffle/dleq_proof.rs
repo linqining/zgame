@@ -118,6 +118,51 @@ pub struct DLEqProof<C: Curve, K: DLEqProofKind<C>> {
     _kind: PhantomData<K>,
 }
 
+/// Append the DLEq proof context to the transcript and derive the challenge scalar.
+///
+/// Shared between [`DLEqProof::prove`] and [`DLEqProof::verify`] to guarantee both
+/// sides append identical bytes in identical order. Any divergence between the two
+/// would silently break soundness (the prover and verifier would derive different
+/// challenges without any compile-time or runtime error).
+///
+/// Appends, in order: `player_pk`, per-card input `c1`/`c2`, per-card output
+/// `c1`/`c2`, per-card commitments, `commitment_pk`, per-card `d2` values, `nonce`.
+/// Then derives and returns the challenge scalar.
+fn append_dleq_context<C, K>(
+    transcript: &mut impl CryptoTranscript,
+    input_cts: &[ElGamalCiphertextGeneric<C>],
+    output_cts: &[ElGamalCiphertextGeneric<C>],
+    player_pk: &C::Point,
+    per_card_commitments: &[C::Point],
+    commitment_pk: &C::Point,
+    d2_values: &[C::Point],
+    nonce: &C::Scalar,
+) -> C::Scalar
+where
+    C: Curve,
+    K: DLEqProofKind<C>,
+{
+    let labels = K::labels();
+    transcript.append_point::<C>(labels.pk, player_pk);
+    for ct in input_cts {
+        transcript.append_point::<C>(labels.input_c1, &ct.c1);
+        transcript.append_point::<C>(labels.input_c2, &ct.c2);
+    }
+    for ct in output_cts {
+        transcript.append_point::<C>(labels.output_c1, &ct.c1);
+        transcript.append_point::<C>(labels.output_c2, &ct.c2);
+    }
+    for a_i in per_card_commitments {
+        transcript.append_point::<C>(labels.per_card_commitment, a_i);
+    }
+    transcript.append_point::<C>(labels.commitment_pk, commitment_pk);
+    for d2 in d2_values {
+        transcript.append_point::<C>(labels.d2, d2);
+    }
+    transcript.append_scalar::<C>(labels.nonce, nonce);
+    transcript.challenge::<C>(labels.challenge).scalar
+}
+
 impl<C: Curve, K: DLEqProofKind<C>> DLEqProof<C, K>
 {
     /// Reconstruct a DLEqProof from its constituent parts.
@@ -170,26 +215,19 @@ impl<C: Curve, K: DLEqProofKind<C>> DLEqProof<C, K>
             .map(|i| K::compute_d2(&input_cts[i].c2, &output_cts[i].c2))
             .collect();
 
-        // Derive challenge using Merlin Transcript (properly hashes all inputs)
-        let labels = K::labels();
-        transcript.append_point::<C>(labels.pk, player_pk);
-        for ct in &input_cts[..n] {
-            transcript.append_point::<C>(labels.input_c1, &ct.c1);
-            transcript.append_point::<C>(labels.input_c2, &ct.c2);
-        }
-        for ct in &output_cts[..n] {
-            transcript.append_point::<C>(labels.output_c1, &ct.c1);
-            transcript.append_point::<C>(labels.output_c2, &ct.c2);
-        }
-        for a_i in &per_card_commitments {
-            transcript.append_point::<C>(labels.per_card_commitment, a_i);
-        }
-        transcript.append_point::<C>(labels.commitment_pk, &commitment_pk);
-        for d2 in &d2_values {
-            transcript.append_point::<C>(labels.d2, d2);
-        }
-        transcript.append_scalar::<C>(labels.nonce, &nonce);
-        let c = transcript.challenge::<C>(labels.challenge).scalar;
+        // Derive challenge using Merlin Transcript (properly hashes all inputs).
+        // Shared with verify() via append_dleq_context to guarantee identical
+        // transcript bytes — any divergence would silently break soundness.
+        let c = append_dleq_context::<C, K>(
+            transcript,
+            &input_cts[..n],
+            &output_cts[..n],
+            player_pk,
+            &per_card_commitments,
+            &commitment_pk,
+            &d2_values,
+            &nonce,
+        );
 
         let response = omega + c * *player_sk;
 
@@ -264,26 +302,19 @@ impl<C: Curve, K: DLEqProofKind<C>> DLEqProof<C, K>
             return false;
         }
 
-        // 3. 构建 challenge：追加到 transcript
-        let labels = K::labels();
-        transcript.append_point::<C>(labels.pk, player_pk);
-        for ct in &input_cts[..n] {
-            transcript.append_point::<C>(labels.input_c1, &ct.c1);
-            transcript.append_point::<C>(labels.input_c2, &ct.c2);
-        }
-        for ct in &output_cts[..n] {
-            transcript.append_point::<C>(labels.output_c1, &ct.c1);
-            transcript.append_point::<C>(labels.output_c2, &ct.c2);
-        }
-        for a_i in &self.per_card_commitments {
-            transcript.append_point::<C>(labels.per_card_commitment, a_i);
-        }
-        transcript.append_point::<C>(labels.commitment_pk, &self.commitment_pk);
-        for d2 in &d2_values {
-            transcript.append_point::<C>(labels.d2, d2);
-        }
-        transcript.append_scalar::<C>(labels.nonce, &self.nonce);
-        let c = transcript.challenge::<C>(labels.challenge).scalar;
+        // 3. 构建 challenge：追加到 transcript。
+        // Shared with prove() via append_dleq_context to guarantee identical
+        // transcript bytes — any divergence would silently break soundness.
+        let c = append_dleq_context::<C, K>(
+            transcript,
+            &input_cts[..n],
+            &output_cts[..n],
+            player_pk,
+            &self.per_card_commitments,
+            &self.commitment_pk,
+            &d2_values,
+            &self.nonce,
+        );
 
         // 4. 验证 pk DLEq: G * response == commitment_pk + pk * c
         if C::base_g() * self.response != self.commitment_pk + *player_pk * c {

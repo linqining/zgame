@@ -2,6 +2,7 @@ module texas_poker::table;
 
 use sui::clock::Clock;
 use sui::bls12381;
+use sui::group_ops;
 use sui::balance::{Self, Balance};
 use sui::coin::{Self, Coin};
 use sui::sui::SUI;
@@ -700,7 +701,7 @@ fun init(ctx: &mut TxContext) {
 }
 
 // ========== 创建牌桌 ==========
-public  fun create_table(
+public fun create_table(
     name: String,
     small_blind: u64,
     big_blind: u64,
@@ -770,10 +771,10 @@ public  fun create_table(
 }
 
 // ========== 玩家加入（带密码学验证） ==========
-public  fun join_and_shuffle(
+public fun join_and_shuffle(
     table: &mut Table,
     seat_index: u64,
-    buy_in_coin: Coin<SUI>,             // 玩家存入的 SUI 代币，按 1:10000 兑换成 stack
+    buy_in_coin: Coin<SUI>,             // 玩家存入的 SUI 代币，按 1:100000 兑换成 stack
     pk: vector<u8>,                     // 玩家 ElGamal 公钥 (G1 compressed bytes)
     pk_ownership_proof: vector<u8>,    // PK ownership Schnorr proof (serialized, 80 bytes: 48 commitment + 32 response)
     mask_cards: vector<u8>,             // remask 后的中间牌组 (serialized ciphertexts, flat bytes)
@@ -850,10 +851,10 @@ public  fun join_and_shuffle(
 }
 
 // ========== 玩家加入（带密码学验证） ==========
-public  fun join_and_shuffle_verified(
+public fun join_and_shuffle_verified(
     table: &mut Table,
     seat_index: u64,
-    buy_in_coin: Coin<SUI>,             // 玩家存入的 SUI 代币，按 1:10000 兑换成 stack
+    buy_in_coin: Coin<SUI>,             // 玩家存入的 SUI 代币，按 1:100000 兑换成 stack
     pk: vector<u8>,                     // 玩家 ElGamal 公钥 (G1 compressed bytes)
     pk_ownership_proof: vector<u8>,    // PK ownership Schnorr proof (serialized, 80 bytes: 48 commitment + 32 response)
     _mask_cards: vector<u8>,             // remask 后的中间牌组 (serialized ciphertexts, flat bytes)
@@ -899,7 +900,7 @@ public  fun join_and_shuffle_verified(
 
 // ========== 玩家离开（带密码学验证） ==========
 // 玩家洗过牌
-public  fun leave_with_proof(
+public fun leave_with_proof(
     table: &mut Table,
     seat_index: u64,
     output_cards: vector<u8>,           // leave 后的牌组 (serialized ciphertexts, flat bytes)
@@ -948,7 +949,7 @@ public  fun leave_with_proof(
 
 // ========== 玩家离开（带密码学验证） ==========
 // 玩家洗过牌
-public  fun leave_with_proof_verified(
+public fun leave_with_proof_verified(
     table: &mut Table,
     seat_index: u64,
     output_cards: vector<u8>,           // leave 后的牌组 (serialized ciphertexts, flat bytes)
@@ -986,10 +987,10 @@ public  fun leave_with_proof_verified(
     table_events::emit_player_left(object::id(table), seat_index, player)
 }
 
-public  fun join_table(
+public fun join_table(
     table: &mut Table,
     seat_index: u64,
-    buy_in_coin: Coin<SUI>,             // 玩家存入的 SUI 代币，按 1:10000 兑换成 stack
+    buy_in_coin: Coin<SUI>,             // 玩家存入的 SUI 代币，按 1:100000 兑换成 stack
     pk: vector<u8>,                     // 玩家 ElGamal 公钥 (G1 compressed bytes)
     pk_ownership_proof: vector<u8>,    // PK ownership Schnorr proof (serialized, 80 bytes: 48 commitment + 32 response)
     ctx: &mut TxContext,
@@ -1025,7 +1026,7 @@ public  fun join_table(
 }
 
 // ========== 简单离开 ==========
-public  fun leave_table(
+public fun leave_table(
     table: &mut Table,
     seat_index: u64,
     ctx: &mut TxContext,
@@ -1057,7 +1058,7 @@ public  fun leave_table(
 }
 
 // ========== 开始新一手 ==========
-public  fun start_hand(table: &mut Table, _ctx: &mut TxContext) {
+public fun start_hand(table: &mut Table, _ctx: &mut TxContext) {
     do_start_hand(table);
 }
 
@@ -1419,24 +1420,6 @@ fun on_reveal_timeout(table: &mut Table, clock: &Clock, ctx: &mut TxContext) {
             end_without_showdown(table);
             return
         };
-        // // clear_reveal_timeout_player 内部 kick 可能触发 reset_for_next_hand
-        // if (table.round_state == table_constants::round_waiting()) {
-        //     return
-        // };
-        // refund_all_bets(table);
-        // // 清理上一轮 reveal 残留状态（保留 encrypted 牌组用于重新洗牌）
-        // table.reveal_token_state = empty_reveal_token_state();
-        // table.deck_state.cards_dealt = 0;
-        // table.deck_state.decrypted_cards = vector[];
-        // // 重新洗牌：基于现有 encrypted 牌组重新 shuffle（不清空牌组）
-        // table.shuffle_state = ShuffleState {
-        //     phase: table_constants::shuffle_phase_before_preflop(),
-        //     current_shuffler: option::none(),
-        //     pending_players: get_active_seat_indices(&table.seats),
-        //     completed_players: vector[],
-        // };
-        // advance_shuffle(table);
-        // //发个事件，通知玩家重新洗牌
         // 再退还未被踢的玩家的筹码
         refund_all_bets(table, ctx);
         // 踢人后 aggregated_pk 已变，现有牌组无效，必须 reset 让玩家重新 join_and_shuffle
@@ -1574,7 +1557,7 @@ fun on_betting_timeout(table: &mut Table) {
 //   - 调用者需支付 gas 但无法获取筹码优势，因此无经济激励滥用；
 //   - 如未来需要限制调用频率，可基于 table.timestamps.last_tick_at 添加最小间隔检查。
 // 当前实现接受 permissionless 模型，依赖链下 relayer 竞争调用。
-public  fun tick(table: &mut Table, clock: &Clock, ctx: &mut TxContext) {
+public fun tick(table: &mut Table, clock: &Clock, ctx: &mut TxContext) {
     let now = clock.timestamp_ms();
 
     // ===== 优先处理 interrupt（reconstruct） =====
@@ -1687,7 +1670,7 @@ public  fun tick(table: &mut Table, clock: &Clock, ctx: &mut TxContext) {
 
 // ========== Phase 3: auto_fold / force_fold / kick_player ==========
 
-public  fun auto_fold(table: &mut Table, seat_index: u64, clock: &Clock) {
+public fun auto_fold(table: &mut Table, seat_index: u64, clock: &Clock) {
     assert!(is_betting_round(table), EInvalidRoundState);
     assert!(is_player_turn(table, seat_index), ENotPlayerTurn);
     assert!(table.timestamps.betting_started_at > 0, ENotTimedOut);
@@ -1697,7 +1680,7 @@ public  fun auto_fold(table: &mut Table, seat_index: u64, clock: &Clock) {
     do_fold(table, seat_index);
 }
 
-public  fun force_fold(table: &mut Table, _admin_cap: &AdminCap, seat_index: u64) {
+public fun force_fold(table: &mut Table, _admin_cap: &AdminCap, seat_index: u64) {
     assert!(seat_index < table.max_players, EInvalidSeatIndex);
     assert!(is_betting_round(table), EInvalidRoundState);
     // M11 修复：校验目标玩家为当前行动玩家，防止破坏行动顺序
@@ -1710,13 +1693,13 @@ public  fun force_fold(table: &mut Table, _admin_cap: &AdminCap, seat_index: u64
     do_fold(table, seat_index);
 }
 
-public  fun kick_player(table: &mut Table, _admin_cap: &AdminCap, seat_index: u64, ctx: &mut TxContext) {
+public fun kick_player(table: &mut Table, _admin_cap: &AdminCap, seat_index: u64, ctx: &mut TxContext) {
     assert!(seat_index < table.max_players, EInvalidSeatIndex);
     kick_player_internal(table, seat_index, table_events::kick_reason_admin(), ctx);
 }
 
 // ========== 提交洗牌结果（ZK Proof 验证） ==========
-public  fun submit_shuffle(
+public fun submit_shuffle(
     table: &mut Table,
     output_cards: vector<u8>,           // 序列化的 ElGamalCiphertext 数组 (flat bytes)
     shuffle_proof_bytes: vector<u8>,    // 序列化的 ShuffleProof
@@ -1761,7 +1744,7 @@ public  fun submit_shuffle(
 }
 
 // ========== 提交洗牌结果（ZK Proof 验证） ==========
-public  fun submit_shuffle_verified(
+public fun submit_shuffle_verified(
     table: &mut Table,
     output_cards: vector<u8>,           // 序列化的 ElGamalCiphertext 数组 (flat bytes)
     _shuffle_proof_bytes: vector<u8>,    // 序列化的 ShuffleProof
@@ -1803,7 +1786,7 @@ public  fun submit_shuffle_verified(
 // ========== 批量提交 Reveal Token ==========
 /// 玩家一次性提交当前 phase 下所有需要揭牌的 reveal tokens
 /// 对应 Rust 端 submit_player_reveal_tokens
-public  fun submit_player_reveal_tokens(
+public fun submit_player_reveal_tokens(
     table: &mut Table,
     assignment_indices: vector<u64>,    // 该玩家需要提交的 assignment 索引列表
     reveal_tokens: vector<vector<u8>>,  // 对应每个 assignment 的 c1 * sk (G1 compressed bytes)
@@ -1841,7 +1824,7 @@ public  fun submit_player_reveal_tokens(
         let owner_seat_index = if (current_phase == table_constants::reveal_phase_preflop()) {
             find_hand_card_owner(table, card_index)
         } else {
-            0xFFFFFFFFFFFFFFFF
+            table_constants::community_card_owner()
         };
 
         let reveal_token = reveal_tokens[idx];
@@ -1879,13 +1862,7 @@ public  fun submit_player_reveal_tokens(
                 // ========== PREFLOP: 部分解密 ==========
                 let encrypted_card = &table.deck_state.encrypted[card_index];
                 let c1_bytes = bls_elgamal::c1_bytes(encrypted_card);
-                let mut result = *bls_elgamal::c2(encrypted_card);
-                let mut t = 0;
-                while (t < assignment.reveal_tokens.length()) {
-                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
-                    result = bls12381::g1_sub(&result, &token_point);
-                    t = t + 1;
-                };
+                let result = partial_decrypt_c2(*bls_elgamal::c2(encrypted_card), &assignment.reveal_tokens);
                 let mut ct_bytes = c1_bytes;
                 let result_bytes = bls_scalar::g1_to_bytes(&result);
                 let mut r = 0;
@@ -1904,26 +1881,14 @@ public  fun submit_player_reveal_tokens(
                 // ========== SHOWDOWN: 从部分解密密文得到明文 ==========
                 let partial_ct_bytes = find_partial_ciphertext(&table.deck_state.decrypted_cards, card_index);
                 let partial_ct = bls_elgamal::ciphertext_from_bytes(&partial_ct_bytes);
-                let mut result = *bls_elgamal::c2(&partial_ct);
-                let mut t = 0;
-                while (t < assignment.reveal_tokens.length()) {
-                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
-                    result = bls12381::g1_sub(&result, &token_point);
-                    t = t + 1;
-                };
+                let result = partial_decrypt_c2(*bls_elgamal::c2(&partial_ct), &assignment.reveal_tokens);
                 let plaintext_bytes = bls_scalar::g1_to_bytes(&result);
                 update_decrypted_card_to_plaintext(&mut table.deck_state.decrypted_cards, card_index, plaintext_bytes);
                 assignment.decrypted = true;
             } else {
                 // ========== COMMUNITY / REDEAL: 全部解密 ==========
                 let encrypted_card = &table.deck_state.encrypted[card_index];
-                let mut result = *bls_elgamal::c2(encrypted_card);
-                let mut t = 0;
-                while (t < assignment.reveal_tokens.length()) {
-                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
-                    result = bls12381::g1_sub(&result, &token_point);
-                    t = t + 1;
-                };
+                let result = partial_decrypt_c2(*bls_elgamal::c2(encrypted_card), &assignment.reveal_tokens);
                 if (bls_scalar::g1_is_identity(&result)) {
                     assignment.decrypted = true;
                     identity_card_indices.push_back(card_index);
@@ -1938,7 +1903,7 @@ public  fun submit_player_reveal_tokens(
                     let plaintext_bytes = bls_scalar::g1_to_bytes(&result);
                     table.deck_state.decrypted_cards.push_back(DecryptedCard {
                         encrypted_card_index: card_index,
-                        owner_seat_index: 0xFFFFFFFFFFFFFFFF,
+                        owner_seat_index: table_constants::community_card_owner(),
                         ciphertext_bytes: vector[],
                         plaintext_bytes,
                     });
@@ -1990,7 +1955,7 @@ public  fun submit_player_reveal_tokens(
 // ========== 批量提交 Reveal Token ==========
 /// 玩家一次性提交当前 phase 下所有需要揭牌的 reveal tokens
 /// 对应 Rust 端 submit_player_reveal_tokens
-public  fun submit_player_reveal_tokens_verified(
+public fun submit_player_reveal_tokens_verified(
     table: &mut Table,
     assignment_indices: vector<u64>,    // 该玩家需要提交的 assignment 索引列表
     reveal_tokens: vector<vector<u8>>,  // 对应每个 assignment 的 c1 * sk (G1 compressed bytes)
@@ -2028,7 +1993,7 @@ public  fun submit_player_reveal_tokens_verified(
         let owner_seat_index = if (current_phase == table_constants::reveal_phase_preflop()) {
             find_hand_card_owner(table, card_index)
         } else {
-            0xFFFFFFFFFFFFFFFF
+            table_constants::community_card_owner()
         };
 
         let reveal_token = reveal_tokens[idx];
@@ -2048,13 +2013,7 @@ public  fun submit_player_reveal_tokens_verified(
                 // ========== PREFLOP: 部分解密 ==========
                 let encrypted_card = &table.deck_state.encrypted[card_index];
                 let c1_bytes = bls_elgamal::c1_bytes(encrypted_card);
-                let mut result = *bls_elgamal::c2(encrypted_card);
-                let mut t = 0;
-                while (t < assignment.reveal_tokens.length()) {
-                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
-                    result = bls12381::g1_sub(&result, &token_point);
-                    t = t + 1;
-                };
+                let result = partial_decrypt_c2(*bls_elgamal::c2(encrypted_card), &assignment.reveal_tokens);
                 let mut ct_bytes = c1_bytes;
                 let result_bytes = bls_scalar::g1_to_bytes(&result);
                 let mut r = 0;
@@ -2073,26 +2032,14 @@ public  fun submit_player_reveal_tokens_verified(
                 // ========== SHOWDOWN: 从部分解密密文得到明文 ==========
                 let partial_ct_bytes = find_partial_ciphertext(&table.deck_state.decrypted_cards, card_index);
                 let partial_ct = bls_elgamal::ciphertext_from_bytes(&partial_ct_bytes);
-                let mut result = *bls_elgamal::c2(&partial_ct);
-                let mut t = 0;
-                while (t < assignment.reveal_tokens.length()) {
-                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
-                    result = bls12381::g1_sub(&result, &token_point);
-                    t = t + 1;
-                };
+                let result = partial_decrypt_c2(*bls_elgamal::c2(&partial_ct), &assignment.reveal_tokens);
                 let plaintext_bytes = bls_scalar::g1_to_bytes(&result);
                 update_decrypted_card_to_plaintext(&mut table.deck_state.decrypted_cards, card_index, plaintext_bytes);
                 assignment.decrypted = true;
             } else {
                 // ========== COMMUNITY / REDEAL: 全部解密 ==========
                 let encrypted_card = &table.deck_state.encrypted[card_index];
-                let mut result = *bls_elgamal::c2(encrypted_card);
-                let mut t = 0;
-                while (t < assignment.reveal_tokens.length()) {
-                    let token_point = bls12381::g1_from_bytes(&assignment.reveal_tokens[t].token);
-                    result = bls12381::g1_sub(&result, &token_point);
-                    t = t + 1;
-                };
+                let result = partial_decrypt_c2(*bls_elgamal::c2(encrypted_card), &assignment.reveal_tokens);
                 if (bls_scalar::g1_is_identity(&result)) {
                     assignment.decrypted = true;
                     identity_card_indices.push_back(card_index);
@@ -2107,7 +2054,7 @@ public  fun submit_player_reveal_tokens_verified(
                     let plaintext_bytes = bls_scalar::g1_to_bytes(&result);
                     table.deck_state.decrypted_cards.push_back(DecryptedCard {
                         encrypted_card_index: card_index,
-                        owner_seat_index: 0xFFFFFFFFFFFFFFFF,
+                        owner_seat_index: table_constants::community_card_owner(),
                         ciphertext_bytes: vector[],
                         plaintext_bytes,
                     });
@@ -2157,7 +2104,7 @@ public  fun submit_player_reveal_tokens_verified(
 }
 
 // ========== 提交 Reconstruct Deck ==========
-public  fun submit_reconstruct_deck(
+public fun submit_reconstruct_deck(
     table: &mut Table,
     output_cards: vector<u8>,           // 重建后的牌组 (serialized ciphertexts, flat bytes)
     swap_cards: vector<u8>,             // swap-out 牌 (serialized ciphertexts, flat bytes)
@@ -2218,7 +2165,7 @@ public  fun submit_reconstruct_deck(
 
 
 // ========== 提交 Reconstruct Deck ==========
-public  fun submit_reconstruct_deck_verified(
+public fun submit_reconstruct_deck_verified(
     table: &mut Table,
     output_cards: vector<u8>,           // 重建后的牌组 (serialized ciphertexts, flat bytes)
     _swap_cards: vector<u8>,             // swap-out 牌 (serialized ciphertexts, flat bytes)
@@ -2262,7 +2209,7 @@ public  fun submit_reconstruct_deck_verified(
 }
 
 // ========== 下注操作 ==========
-public  fun fold(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
+public fun fold(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     assert!(is_betting_round(table), EInvalidRoundState);
     assert!(is_player_turn(table, seat_index), ENotPlayerTurn);
 
@@ -2289,7 +2236,7 @@ public  fun fold(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     }
 }
 
-public  fun check(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
+public fun check(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     assert!(is_betting_round(table), EInvalidRoundState);
     assert!(is_player_turn(table, seat_index), ENotPlayerTurn);
 
@@ -2313,7 +2260,7 @@ public  fun check(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     advance_turn(table);
 }
 
-public  fun call(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
+public fun call(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     assert!(is_betting_round(table), EInvalidRoundState);
     assert!(is_player_turn(table, seat_index), ENotPlayerTurn);
 
@@ -2345,7 +2292,7 @@ public  fun call(table: &mut Table, seat_index: u64, ctx: &mut TxContext) {
     advance_turn(table);
 }
 
-public  fun raise(table: &mut Table, seat_index: u64, total_bet: u64, ctx: &mut TxContext) {
+public fun raise(table: &mut Table, seat_index: u64, total_bet: u64, ctx: &mut TxContext) {
     assert!(is_betting_round(table), EInvalidRoundState);
     assert!(is_player_turn(table, seat_index), ENotPlayerTurn);
 
@@ -2501,6 +2448,21 @@ fun find_partial_ciphertext(decrypted_cards: &vector<DecryptedCard>, card_index:
         i = i + 1;
     };
     vector[]
+}
+
+/// 从 c2 中减去所有 reveal token 对应的 G1 点（部分解密）
+fun partial_decrypt_c2(
+    c2_value: group_ops::Element<bls12381::G1>,
+    tokens: &vector<RevealTokenData>,
+): group_ops::Element<bls12381::G1> {
+    let mut result = c2_value;
+    let mut t = 0;
+    while (t < tokens.length()) {
+        let token_point = bls12381::g1_from_bytes(&tokens[t].token);
+        result = bls12381::g1_sub(&result, &token_point);
+        t = t + 1;
+    };
+    result
 }
 
 /// 将 decrypted_card 从部分解密密文更新为完全解密明文
@@ -2818,7 +2780,7 @@ fun end_without_showdown(table: &mut Table) {
     collect_bets_to_pot(table);
 
     // 使用 MAX_U64 作为无效标记，避免默认 seat 0 错误分配底池
-    let mut winner_idx = 0xFFFFFFFFFFFFFFFF;
+    let mut winner_idx = table_constants::community_card_owner();
     let mut i = 0;
     while (i < table.seats.length()) {
         if (is_seat_occupied(&table.seats[i]) && !table.seats[i].folded && !table.seats[i].is_waiting) {
@@ -2827,7 +2789,7 @@ fun end_without_showdown(table: &mut Table) {
         };
         i = i + 1;
     };
-    assert!(winner_idx != 0xFFFFFFFFFFFFFFFF, ENotEnoughPlayers);
+    assert!(winner_idx != table_constants::community_card_owner(), ENotEnoughPlayers);
 
     let pot = table.pot;
     let winner_player = table.seats[winner_idx].player;
@@ -3091,7 +3053,7 @@ fun count_pending_community_cards(table: &Table): u64 {
     let mut i = 0;
     while (i < table.deck_state.decrypted_cards.length()) {
         let dc = &table.deck_state.decrypted_cards[i];
-        if (dc.plaintext_bytes.length() > 0 && dc.owner_seat_index == 0xFFFFFFFFFFFFFFFF) {
+        if (dc.plaintext_bytes.length() > 0 && dc.owner_seat_index == table_constants::community_card_owner()) {
             count = count + 1;
         };
         i = i + 1;
@@ -3110,7 +3072,7 @@ fun write_decrypted_cards_to_community(table: &mut Table) {
     while (i < table.deck_state.decrypted_cards.length()) {
         let dc = &table.deck_state.decrypted_cards[i];
         // 只处理完全解密的公共牌（owner_seat_index 为 MAX_U64 且有 plaintext_bytes）
-        if (dc.plaintext_bytes.length() > 0 && dc.owner_seat_index == 0xFFFFFFFFFFFFFFFF) {
+        if (dc.plaintext_bytes.length() > 0 && dc.owner_seat_index == table_constants::community_card_owner()) {
             let playing_card = plaintext_to_playing_card(&table.deck_state.plaintext, &dc.plaintext_bytes);
             let card = card::new(playing_card_suit_to_card_suit(card_suit(&playing_card)), card_rank(&playing_card));
             table.community_cards.push_back(card);
@@ -3728,7 +3690,7 @@ public fun hand_complete_at(table: &Table): u64 { table.timestamps.hand_complete
 // m2 修复：校验超时参数不为 0，防止 0 超时导致玩家无法行动
 const MIN_TIMEOUT_MS: u64 = 1000;
 
-public  fun set_timeout_config(
+public fun set_timeout_config(
     table: &mut Table,
     _admin_cap: &AdminCap,
     shuffle_timeout_ms: u64,
@@ -3910,10 +3872,10 @@ public fun complete_reveal_phase_for_test(table: &mut Table) {
                 if (assignment.pending_players.length() > 0) {
                     *assignment.pending_players.borrow(0)
                 } else {
-                    0xFFFFFFFFFFFFFFFF
+                    table_constants::community_card_owner()
                 }
             } else {
-                0xFFFFFFFFFFFFFFFF
+                table_constants::community_card_owner()
             };
 
             // 获取明文（先读取再 push，避免借用冲突）

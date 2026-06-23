@@ -5,7 +5,7 @@ import {
   Award, TrendingUp, Globe, Clock, Sparkles, CheckCircle2, Wallet, Gamepad2
 } from 'lucide-react'
 import { motion, useInView, useScroll, useTransform } from 'framer-motion'
-import { useRef, useState, useEffect, useCallback } from 'react'
+import { useRef, useState, useEffect, useCallback, useMemo } from 'react'
 import { useContentContext } from '../context/content/contentContext'
 
 function FadeIn({ children, delay = 0, direction = 'up' }: { children: React.ReactNode; delay?: number; direction?: 'up' | 'down' | 'left' | 'right' }) {
@@ -120,19 +120,32 @@ export default function SecretPokerHomePage() {
     sectionRefs.current[index] = el
   }, [])
 
+  // Particle positions are randomized once on mount; without useMemo they
+  // would be re-randomized on every render, causing the particles to jump.
+  const particles = useMemo(() => (
+    Array.from({ length: 12 }).map((_, i) => ({
+      key: i,
+      left: `${15 + Math.random() * 70}%`,
+      top: `${15 + Math.random() * 70}%`,
+      animationDelay: `${Math.random() * 15}s`,
+      animationDuration: `${12 + Math.random() * 16}s`,
+      opacity: 0.15 + Math.random() * 0.2,
+    }))
+  ), [])
+
   return (
     <S.Home>
       {/* Subtle ambient particles */}
       <S.Particles>
-        {Array.from({ length: 12 }).map((_, i) => (
+        {particles.map((p) => (
           <S.Particle
-            key={i}
+            key={p.key}
             style={{
-              left: `${15 + Math.random() * 70}%`,
-              top: `${15 + Math.random() * 70}%`,
-              animationDelay: `${Math.random() * 15}s`,
-              animationDuration: `${12 + Math.random() * 16}s`,
-              opacity: 0.15 + Math.random() * 0.2,
+              left: p.left,
+              top: p.top,
+              animationDelay: p.animationDelay,
+              animationDuration: p.animationDuration,
+              opacity: p.opacity,
             }}
           />
         ))}

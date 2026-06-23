@@ -12,6 +12,7 @@ import {
 import globalContext from '../global/globalContext';
 import config from '../../clientConfig';
 import { getToken } from '../../helpers/getToken';
+import { logger } from '../../helpers/logger';
 
 interface ReceiveLobbyInfoPayload {
   tables: unknown[];
@@ -39,7 +40,6 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       socketRef.current.close();
       socketRef.current = null;
     }
-    window.socket = undefined;
     setSocket(null);
     setSocketId(null);
     setIsConnected(false);
@@ -57,11 +57,11 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   useEffect(() => {
     const isAuthenticated = isLoggedIn || !!walletAddress;
-    console.log('[WebSocketProvider] isAuthenticated:', isAuthenticated, 'isLoggedIn:', isLoggedIn, 'walletAddress:', walletAddress);
+    logger.log('[WebSocketProvider] isAuthenticated:', isAuthenticated, 'isLoggedIn:', isLoggedIn, 'walletAddress:', walletAddress);
 
     if (isAuthenticated) {
       if (!socketRef.current) {
-        console.log('[WebSocketProvider] Creating new socket to:', config.socketURI);
+        logger.log('[WebSocketProvider] Creating new socket to:', config.socketURI);
         const newSocket = io(config.socketURI, {
           transports: ['websocket'],
           upgrade: false,
@@ -72,19 +72,19 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         });
 
         newSocket.on(RECEIVE_LOBBY_INFO, ({ tables, players, socketId }: ReceiveLobbyInfoPayload) => {
-          console.log(RECEIVE_LOBBY_INFO, tables, players, socketId);
+          logger.log(RECEIVE_LOBBY_INFO, tables, players, socketId);
           setSocketId(socketId);
           setTables(tables);
           setPlayers(players);
         });
 
         newSocket.on(PLAYERS_UPDATED, (players: unknown[]) => {
-          console.log(PLAYERS_UPDATED, players);
+          logger.log(PLAYERS_UPDATED, players);
           setPlayers(players);
         });
 
         newSocket.on(TABLES_UPDATED, (tables: unknown[]) => {
-          console.log(TABLES_UPDATED, tables);
+          logger.log(TABLES_UPDATED, tables);
           setTables(tables);
         });
 
@@ -92,34 +92,33 @@ const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         // Note: FETCH_LOBBY_INFO is now emitted in the 'connect' handler above,
         // which covers both initial connect and reconnects.
         newSocket.io.on('reconnect', () => {
-          console.log('[Socket] Reconnected');
+          logger.log('[Socket] Reconnected');
         });
 
         newSocket.on('connect', () => {
-          console.log('[Socket] Connected');
+          logger.log('[Socket] Connected');
           setIsConnected(true);
           // Emit FETCH_LOBBY_INFO on every successful connection (initial + reconnects)
           const token = getToken();
-          console.log('[Socket] connect event, token exists:', !!token);
+          logger.log('[Socket] connect event, token exists:', !!token);
           if (token) {
-            console.log('[Socket] Emitting FETCH_LOBBY_INFO on connect');
+            logger.log('[Socket] Emitting FETCH_LOBBY_INFO on connect');
             newSocket.emit(FETCH_LOBBY_INFO, token);
           } else {
-            console.warn('[Socket] No token found in localStorage, cannot emit FETCH_LOBBY_INFO');
+            logger.warn('[Socket] No token found in localStorage, cannot emit FETCH_LOBBY_INFO');
           }
         });
 
         newSocket.on('connect_error', (err) => {
-          console.error('[Socket] Connect error:', err.message);
+          logger.error('[Socket] Connect error:', err.message);
         });
 
         newSocket.on('disconnect', (reason) => {
-          console.log('[Socket] Disconnected:', reason);
+          logger.log('[Socket] Disconnected:', reason);
           setIsConnected(false);
         });
 
         socketRef.current = newSocket;
-        window.socket = newSocket;
         setSocket(newSocket);
         // Note: FETCH_LOBBY_INFO is emitted in the 'connect' handler above,
         // ensuring it's only sent after the connection is fully established.

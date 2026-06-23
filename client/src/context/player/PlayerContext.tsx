@@ -3,6 +3,8 @@ import { PlayerContextType, PkProofData } from '../../types/player';
 import init, { WasmClientPlayer } from '@linqining/client-wasm';
 import wasmUrl from '@linqining/client-wasm/client_wasm_bg.wasm?url';
 import authContext from '../auth/authContext';
+import { logger } from '../../helpers/logger';
+import { PlayerStorage } from './playerStorage';
 
 const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
 
@@ -53,7 +55,7 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
         }
       }
     }).catch((e: unknown) => {
-      console.error('[PlayerContext] Failed to initialize WASM:', e);
+      logger.error('[PlayerContext] Failed to initialize WASM:', e);
     });
   }, []);
 
@@ -61,9 +63,9 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
     const pk = keys.get_pk_hex();
     const sk = keys.get_sk_hex();
 
-    console.log('[PlayerContext] Storing player keys');
-    console.log('[PlayerContext]   - Game ID:', gid);
-    console.log('[PlayerContext]   - Player name:', name);
+    logger.log('[PlayerContext] Storing player keys');
+    logger.log('[PlayerContext]   - Game ID:', gid);
+    logger.log('[PlayerContext]   - Player name:', name);
 
     keysRef.current = keys;
     setPlayerKeysState(keys);
@@ -73,17 +75,14 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
     setGameId(gid);
     setPlayerName(name);
 
-    localStorage.setItem('sk', sk);
-    localStorage.setItem('pk', pk);
-    localStorage.setItem('player_name', name);
-    localStorage.setItem('last_game_id', gid);
+    PlayerStorage.setSk(sk);
+    PlayerStorage.setPk(pk);
+    PlayerStorage.setPlayerName(name);
+    PlayerStorage.setLastGameId(gid);
   }, []);
 
   const clearPlayerKeys = useCallback(() => {
-    localStorage.removeItem('sk');
-    localStorage.removeItem('pk');
-    localStorage.removeItem('player_name');
-    localStorage.removeItem('last_game_id');
+    PlayerStorage.clearAll();
 
     keysRef.current = null;
     setPlayerKeysState(null);
@@ -93,7 +92,7 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
     setGameId(null);
     setPlayerName(null);
 
-    console.log('[PlayerContext] Cleared all player data');
+    logger.log('[PlayerContext] Cleared all player data');
   }, []);
 
   const getPlayerKeys = useCallback((): WasmClientPlayer | null => {
@@ -102,47 +101,47 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
     }
 
     if (!wasmInitialized) {
-      console.error('[PlayerContext] WASM not initialized');
+      logger.error('[PlayerContext] WASM not initialized');
       return null;
     }
 
-    const storedSk = localStorage.getItem('sk');
+    const storedSk = PlayerStorage.getSk();
     if (!storedSk) {
-      console.warn('[PlayerContext] No SK found in storage, generating new keys from wallet address');
+      logger.warn('[PlayerContext] No SK found in storage, generating new keys from wallet address');
       if (!walletAddress) {
-        console.error('[PlayerContext] No wallet address available, cannot generate keys');
+        logger.error('[PlayerContext] No wallet address available, cannot generate keys');
         return null;
       }
       const newKeys = WasmClientPlayer.new_with_wallet_address(walletAddress);
       const sk = newKeys.get_sk_hex();
       const pk = newKeys.get_pk_hex();
-      localStorage.setItem('sk', sk);
-      localStorage.setItem('pk', pk);
+      PlayerStorage.setSk(sk);
+      PlayerStorage.setPk(pk);
       const restoredProof = parsePkProof(newKeys.generate_pk_proof());
       setPlayerKeys(newKeys, restoredProof, "", pk);
       return newKeys;
     }
 
     try {
-      console.log('[PlayerContext] Reconstructing player keys from SK...', storedSk);
+      logger.log('[PlayerContext] Reconstructing player keys from SK...', storedSk);
       const reconstructedKeys = WasmClientPlayer.from_sk(storedSk);
       const restoredProof = parsePkProof(reconstructedKeys.generate_pk_proof());
       const pk = reconstructedKeys.get_pk_hex();
-      const savedName = localStorage.getItem('player_name') || '';
-      const savedGameId = localStorage.getItem('last_game_id') || '';
+      const savedName = PlayerStorage.getPlayerName() || '';
+      const savedGameId = PlayerStorage.getLastGameId() || '';
       setPlayerKeys(reconstructedKeys, restoredProof, savedGameId, savedName);
-      console.log('[PlayerContext] Successfully reconstructed player keys');
+      logger.log('[PlayerContext] Successfully reconstructed player keys');
       return reconstructedKeys;
     } catch (e) {
-      console.error('[PlayerContext] Failed to reconstruct player keys:', e);
+      logger.error('[PlayerContext] Failed to reconstruct player keys:', e);
       return null;
     }
   }, [setPlayerKeys]);
 
   const restoreSession = useCallback((): boolean => {
-    const savedGameId = localStorage.getItem('last_game_id');
-    const savedSk = localStorage.getItem('sk');
-    const savedName = localStorage.getItem('player_name');
+    const savedGameId = PlayerStorage.getLastGameId();
+    const savedSk = PlayerStorage.getSk();
+    const savedName = PlayerStorage.getPlayerName();
 
     if (!savedSk) {
       return false;
@@ -151,27 +150,29 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
     if (keysRef.current) return true;
 
     if (!wasmInitialized) {
-      console.error('[PlayerContext] WASM not initialized');
+      logger.error('[PlayerContext] WASM not initialized');
       return false;
     }
 
     try {
-      console.log('[PlayerContext] Restoring player session from storage...');
+      logger.log('[PlayerContext] Restoring player session from storage...');
       const restoredKeys = WasmClientPlayer.from_sk(savedSk);
       const restoredProof = parsePkProof(restoredKeys.generate_pk_proof());
 
       setPlayerKeys(restoredKeys, restoredProof, savedGameId || '', savedName || '');
-      console.log('[PlayerContext] Player session restored successfully!');
+      logger.log('[PlayerContext] Player session restored successfully!');
       return true;
     } catch (e) {
-      console.error('[PlayerContext] Failed to restore player session:', e);
-      localStorage.removeItem('last_game_id');
+      logger.error('[PlayerContext] Failed to restore player session:', e);
+      PlayerStorage.clearLastGameId();
       return false;
     }
   }, [setPlayerKeys]);
 
-  restoreSessionRef.current = restoreSession;
-  getPlayerKeysRef.current = getPlayerKeys;
+  useEffect(() => {
+    restoreSessionRef.current = restoreSession;
+    getPlayerKeysRef.current = getPlayerKeys;
+  }, [restoreSession, getPlayerKeys]);
 
   // 钱包地址变化时，重新生成密钥（与钱包一一对应）
   useEffect(() => {
@@ -183,20 +184,20 @@ const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =
 
     // 非首次切换钱包：清除旧密钥，用新钱包地址生成
     if (prevWallet !== null) {
-      console.log('[PlayerContext] Wallet address changed, regenerating keys');
+      logger.log('[PlayerContext] Wallet address changed, regenerating keys');
       clearPlayerKeys();
       const newKeys = WasmClientPlayer.new_with_wallet_address(walletAddress);
       const sk = newKeys.get_sk_hex();
       const pk = newKeys.get_pk_hex();
-      localStorage.setItem('sk', sk);
-      localStorage.setItem('pk', pk);
+      PlayerStorage.setSk(sk);
+      PlayerStorage.setPk(pk);
       const proof = parsePkProof(newKeys.generate_pk_proof());
       setPlayerKeys(newKeys, proof, "", pk);
     }
   }, [walletAddress, wasmReady, clearPlayerKeys, setPlayerKeys]);
 
   useEffect(() => {
-    console.log('[PlayerContext] Context updated:', {
+    logger.log('[PlayerContext] Context updated:', {
       hasKeys: !!playerKeys,
       gameId,
       playerName,

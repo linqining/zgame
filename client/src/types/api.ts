@@ -1,6 +1,5 @@
 // API 请求/响应类型
 
-import { AxiosResponse } from 'axios';
 import { Card, Table } from './game';
 
 export interface JoinGameRequest {
@@ -57,45 +56,3 @@ export interface AuthWalletResponse {
 export interface FreeChipsResponse {
   chipsAmount: number;
 }
-
-export const gameApi = {
-  joinGame: (
-    gameId: string,
-    data: JoinGameRequest,
-  ): Promise<AxiosResponse<JoinGameResponse>> =>
-    import('axios').then(({ default: axios }) =>
-      axios.post(`/api/games/${gameId}/join`, data),
-    ),
-
-  shuffle: (
-    gameId: string,
-    data: ShuffleRequest,
-  ): Promise<AxiosResponse<void>> =>
-    import('axios').then(({ default: axios }) =>
-      axios.post(`/api/games/${gameId}/shuffle`, data),
-    ),
-
-  joinAndShuffle: (
-    gameId: string,
-    data: JoinAndShuffleRequest,
-  ): Promise<AxiosResponse<void>> =>
-    import('axios').then(({ default: axios }) =>
-      axios.post(`/api/tables/${gameId}/join-and-shuffle`, data),
-    ),
-
-  playerAction: (
-    gameId: string,
-    data: PlayerActionRequest,
-  ): Promise<AxiosResponse<void>> =>
-    import('axios').then(({ default: axios }) =>
-      axios.post(`/api/games/${gameId}/action`, data),
-    ),
-
-  submitRevealToken: (
-    gameId: string,
-    data: RevealTokenRequest,
-  ): Promise<AxiosResponse<void>> =>
-    import('axios').then(({ default: axios }) =>
-      axios.post(`/api/games/${gameId}/reveal-token`, data),
-    ),
-};

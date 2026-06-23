@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import OfflineContext from './offlineContext';
 import useServiceWorker from '../../hooks/useServiceWorker';
 import { useModalContext } from '../modal/modalContext';
@@ -13,18 +13,27 @@ const OfflineProvider: React.FC<OfflineProviderProps> = ({ children }) => {
   const { openModal } = useModalContext();
   const { getLocalizedString } = useContentContext();
 
-  const [updateServiceWorker] = useServiceWorker(() => onUpdateServiceWorker());
+  // Hold the latest `updateServiceWorker` in a ref so the callback below can be
+  // defined (as a useCallback) before `useServiceWorker` is called, breaking
+  // the previous use-before-define cycle.
+  const updateServiceWorkerRef = useRef<(() => void) | null>(null);
 
-  const onUpdateServiceWorker = () => {
+  const onUpdateServiceWorker = useCallback(() => {
     openModal(
       () => (
         <Text>{getLocalizedString('service_worker-update_available')}</Text>
       ),
       getLocalizedString('service_worker-update_headline'),
       getLocalizedString('service_worker-update_confirm_btn_txt'),
-      updateServiceWorker,
+      () => updateServiceWorkerRef.current?.(),
     );
-  };
+  }, [openModal, getLocalizedString]);
+
+  const [updateServiceWorker] = useServiceWorker(onUpdateServiceWorker);
+
+  useEffect(() => {
+    updateServiceWorkerRef.current = updateServiceWorker;
+  }, [updateServiceWorker]);
 
   return <OfflineContext.Provider value={{}}>{children}</OfflineContext.Provider>;
 };

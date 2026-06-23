@@ -27,19 +27,7 @@ use sui_sdk_types::TransactionKind;
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Parse a hex-encoded Sui [`Address`], returning an error on invalid input.
-///
-/// Callers are expected to pass valid hex addresses (e.g. `"0x6"` for the Clock,
-/// or a 64-char hex string for a package/table object id).
-fn parse_address(s: &str) -> Result<Address, String> {
-    s.parse::<Address>()
-        .map_err(|e| format!("invalid address '{}': {}", s, e))
-}
-
-/// BCS-encode a serializable value into a `Vec<u8>` suitable for [`Input::Pure`].
-fn bcs_encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {
-    bcs::to_bytes(value).map_err(|e| format!("BCS serialization failed: {}", e))
-}
+use crate::relayer::util::{bcs_encode, parse_address};
 
 /// Build a shared-object [`Input`].
 ///
@@ -495,7 +483,7 @@ async fn fetch_initial_shared_version(
     object_id: &Address,
 ) -> Result<u64, String> {
     let id_str = object_id.to_string();
-    let resp = crate::sponsor::sui_jsonrpc(
+    let resp = crate::relayer::util::sui_jsonrpc(
         http,
         rpc_url,
         "sui_getObject",
@@ -573,7 +561,7 @@ async fn fetch_owned_object_version_and_digest(
     object_id: &Address,
 ) -> Result<(u64, Digest), String> {
     let id_str = object_id.to_string();
-    let resp = crate::sponsor::sui_jsonrpc(
+    let resp = crate::relayer::util::sui_jsonrpc(
         http,
         rpc_url,
         "sui_getObject",

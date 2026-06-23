@@ -4,7 +4,7 @@ use crate::crypto::{
 };
 use crate::z_poker::convert::{hex_to_ecpoint};
 use crate::zk_shuffle::error::VerificationError;
-use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use crate::zk_shuffle::reveal_token_proof::{RevealTokenProof, REVEAL_TOKEN_PROOF_LABEL};
 // 兼容 Move 合约：生产代码使用 FiatShamirTranscript（SHA3-256），
 // 而非 FiatShamirTranscript（STROBE），因为 Move 合约使用 SHA3-256 状态机。
 use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
@@ -274,7 +274,8 @@ impl MentalPokerGame {
         if !valid {
             return Err(VerificationError::InvalidRevealToken);
         }
-        let pk_point = hex_to_ecpoint(player_pk).unwrap();
+        let pk_point = hex_to_ecpoint(player_pk)
+            .map_err(|_| VerificationError::InvalidPublicKey)?;
         for (_pk, state) in self.players.iter_mut() {
             for card in state.hand_encrypted.iter_mut() {
                 if card.reveal_state.pending_players.is_empty() {
@@ -334,7 +335,7 @@ impl MentalPokerGame {
             &token.encrypted_card,
             &token.reveal_token,
             &token.user_public_key,
-            &mut FiatShamirTranscript::new(b"reveal_token_proof_v3"),
+            &mut FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL),
         ).map(|_| true).map_err(|_| VerificationError::ProofVerificationFailed)
     }
 
@@ -373,7 +374,7 @@ impl MentalPokerGame {
             &token.encrypted_card,
             &token.reveal_token,
             &token.user_public_key,
-            &mut FiatShamirTranscript::new(b"reveal_token_proof_v3"),
+            &mut FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL),
         ).map(|_| true).map_err(|_| VerificationError::ProofVerificationFailed)
     }
 
@@ -387,45 +388,7 @@ impl MentalPokerGame {
         hand_index: usize,
         current_pt: Plaintext,
     ) -> Result<ElGamalCiphertext, VerificationError> {
-        let player = self.players.get(player_pk)
-            .ok_or(VerificationError::EntryNotFound)?;
-
-        if hand_index >= player.hand_encrypted.len() {
-            return Err(VerificationError::LengthMismatch);
-        }
-
-        if self.is_valid_deck_plaintext(&current_pt) {
-            return Err(VerificationError::ProofVerificationFailed);
-        }
-        // todo reconstruct deck后dealindex 需要重置
-        let deal_num = Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted);
-        if deal_num >= self.deck_encrypted.len() {
-            return Err(VerificationError::TooManyCardsReplaced);
-        }
-
-        let redeal_ct = self.deck_encrypted[deal_num].clone();
-
-        // 维护 deal_num：记录新的发牌结果
-        self.deal_results.push(DealResult {
-            player_pk: player_pk.to_string(),
-            encrypted_cards: vec![redeal_ct.clone()],
-        });
-
-        // 替换玩家手牌中失败的牌
-        let pending_players: Vec<EcPoint> = self.players.values().map(|p| p.pk).collect();
-        if let Some(player) = self.players.get_mut(player_pk) {
-            player.hand_encrypted[hand_index] = PlayerEncryptedCard {
-                card_index: deal_num as u32,
-                encrypted_card: redeal_ct.clone(),
-                reveal_state: RevealState {
-                    pending_players,
-                    reveal_tokens: Vec::new(),
-                },
-                playing_card: None,
-            };
-        }
-
-        Ok(redeal_ct)
+        self.redeal_inner(player_pk, hand_index, Some(current_pt), true, VerificationError::EntryNotFound)
     }
 
     /// 重新发牌（不验证 plaintext），用于客户端报告解密失败的场景
@@ -434,13 +397,40 @@ impl MentalPokerGame {
         player_pk: &str,
         hand_index: usize,
     ) -> Result<ElGamalCiphertext, VerificationError> {
+        self.redeal_inner(player_pk, hand_index, None, false, VerificationError::PlayerNotFound)
+    }
+
+    /// Unified redeal implementation shared by `redeal_to_player` and
+    /// `redeal_to_player_unchecked`.
+    ///
+    /// - `current_pt`: when `Some`, the plaintext to validate (safe variant).
+    ///   `None` skips the plaintext validation gate (unchecked variant).
+    /// - `validate`: when `true`, runs the `is_valid_deck_plaintext` gate.
+    /// - `not_found_err`: error variant returned when `player_pk` is absent
+    ///   (preserves the per-caller error variant).
+    fn redeal_inner(
+        &mut self,
+        player_pk: &str,
+        hand_index: usize,
+        current_pt: Option<Plaintext>,
+        validate: bool,
+        not_found_err: VerificationError,
+    ) -> Result<ElGamalCiphertext, VerificationError> {
         let player = self.players.get(player_pk)
-            .ok_or(VerificationError::PlayerNotFound)?;
+            .ok_or(not_found_err)?;
 
         if hand_index >= player.hand_encrypted.len() {
             return Err(VerificationError::LengthMismatch);
         }
 
+        if validate {
+            if let Some(pt) = &current_pt {
+                if self.is_valid_deck_plaintext(pt) {
+                    return Err(VerificationError::ProofVerificationFailed);
+                }
+            }
+        }
+        // todo reconstruct deck后 deal index 需要重置
         let deal_num = Self::get_current_deal_num(&self.deal_results, &self.community_cards_encrypted);
         if deal_num >= self.deck_encrypted.len() {
             return Err(VerificationError::TooManyCardsReplaced);
@@ -448,7 +438,7 @@ impl MentalPokerGame {
 
         let redeal_ct = self.deck_encrypted[deal_num].clone();
 
-        // 维护 deal_num
+        // 维护 deal_num：记录新的发牌结果
         self.deal_results.push(DealResult {
             player_pk: player_pk.to_string(),
             encrypted_cards: vec![redeal_ct.clone()],
@@ -551,7 +541,7 @@ impl MentalPokerGame {
 
         let player_card = hand[card_index].clone();
         let reveal_token = player_card.encrypted_card.gen_reveal_token(&sk);
-        let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
+        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         let proof = RevealTokenProof::<DefaultCurve>::prove(&sk, &player.pk, &player_card.encrypted_card, &reveal_token, &mut OsRng, &mut transcript);
 
         Ok(RevealToken {
@@ -572,7 +562,7 @@ impl MentalPokerGame {
 
         let ct_for_self = ElGamalCiphertext::encrypt(&comm_plaintext, &player.pk, &Scalar::random(&mut OsRng));
         let reveal_token = ct_for_self.gen_reveal_token(&sk);
-        let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
+        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         let proof = RevealTokenProof::<DefaultCurve>::prove(&sk, &player.pk, &ct_for_self, &reveal_token, &mut OsRng, &mut transcript);
 
         Ok(RevealToken {
@@ -792,7 +782,7 @@ impl MentalPokerGame {
                     let sk = &self.entrusted_sk[pk];
                     let pk_val = &self.players[pk].pk;
                     let reveal_token = card_ct.gen_reveal_token(sk);
-                    let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
+                    let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
                     let proof = RevealTokenProof::<DefaultCurve>::prove(sk, pk_val, card_ct, &reveal_token, &mut OsRng, &mut transcript);
                     Some(RevealToken {
                         user_public_key: *pk_val,
@@ -832,5 +822,65 @@ impl MentalPokerGame {
 
     pub fn compute_aggregate_key_from_pks(pks: &[EcPoint]) -> EcPoint {
         pks.iter().fold(EcPoint::identity(), |agg, pk| agg + pk)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::{Scalar, ElGamalCiphertext, DefaultCurve};
+    use crate::z_poker::protocol::ClientPlayer;
+    use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
+    use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+    use rand_core::OsRng;
+
+    /// Verify that `submit_reveal_token` returns `InvalidPublicKey` error
+    /// instead of panicking when `player_pk` is a malformed hex string.
+    #[test]
+    fn test_submit_reveal_token_malformed_pk_returns_error() {
+        let mut game = MentalPokerGame::new(GameConfig::default());
+        let player = ClientPlayer::new();
+
+        // Insert a player whose map key (pk_hex) is a malformed hex string.
+        // The pk field holds a valid EcPoint so that verify_reveal_token passes,
+        // but hex_to_ecpoint(player_pk) will fail on the malformed string.
+        let malformed_pk_hex = "not_a_valid_hex_string".to_string();
+        let state = PlayerState {
+            pk_hex: malformed_pk_hex.clone(),
+            pk: player.pk,
+            hand_encrypted: vec![],
+        };
+        game.players.insert(malformed_pk_hex.clone(), state);
+
+        // Build a valid encrypted card, reveal token, and proof.
+        let pt = new_plain_text()[0];
+        let r = Scalar::random(&mut OsRng);
+        let encrypted_card = ElGamalCiphertext::encrypt(&pt, &player.pk, &r);
+        let reveal_token = encrypted_card.gen_reveal_token(&player.sk);
+
+        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
+        let proof = RevealTokenProof::<DefaultCurve>::prove(
+            &player.sk,
+            &player.pk,
+            &encrypted_card,
+            &reveal_token,
+            &mut OsRng,
+            &mut transcript,
+        );
+
+        let token = RevealToken {
+            encrypted_card,
+            proof,
+            reveal_token,
+            user_public_key: player.pk,
+        };
+
+        // Should return Err(InvalidPublicKey) instead of panicking.
+        let result = game.submit_reveal_token(token, &malformed_pk_hex);
+        assert!(
+            matches!(result, Err(VerificationError::InvalidPublicKey)),
+            "Expected Err(InvalidPublicKey), got {:?}",
+            result
+        );
     }
 }

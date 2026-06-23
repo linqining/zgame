@@ -70,6 +70,7 @@ impl AppState {
         }
         // 容量控制：超过上限时清空（简单策略，避免无界增长）
         if processed.len() >= MAX_PROCESSED_ACTIONS {
+            tracing::warn!("dedup cache overflow, clearing all entries");
             processed.clear();
         }
         processed.insert(key);
@@ -91,6 +92,7 @@ impl AppState {
             return false;
         }
         if processed.len() >= MAX_PROCESSED_ACTIONS {
+            tracing::warn!("dedup cache overflow, clearing all entries");
             processed.clear();
         }
         processed.insert(key);
@@ -301,17 +303,24 @@ pub async fn join_game(
             return err_resp(StatusCode::UNAUTHORIZED, "User not found");
         }
     };
-    // let user_pk = crate::pokergame::player::GamePkHex::new(user.address.clone());
-    // let req_pk = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
-    // if user_pk != req_pk {
-    //     tracing::warn!(
-    //         "[join_game] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
-    //         claims.user.id,
-    //         user_pk,
-    //         req_pk
-    //     );
-    //     return err_resp(StatusCode::FORBIDDEN, "pk_hex does not belong to authenticated user");
-    // }
+    // A2 修复：在本地（非上链）模式下，校验 pk_hex 归属，防止用户冒用他人 pk_hex 入座。
+    // 上链模式下 pk_hex 是 Mental Poker G1 公钥（与钱包地址不同），归属由链上逻辑校验，跳过此检查。
+    if !state.config.sui_on_chain_enabled {
+        let normalize = |s: &str| -> String {
+            s.strip_prefix("0x").unwrap_or(s).to_lowercase()
+        };
+        let user_pk = normalize(&user.address);
+        let req_pk = normalize(&body.pk_hex);
+        if user_pk != req_pk {
+            tracing::warn!(
+                "[join_game] pk_hex ownership mismatch: user_id={}, user_pk={}, req_pk={}",
+                claims.user.id,
+                user_pk,
+                req_pk
+            );
+            return err_resp(StatusCode::FORBIDDEN, "pk_hex does not match authenticated wallet");
+        }
+    }
 
     let pk_hex = crate::pokergame::player::GamePkHex::new(body.pk_hex.clone());
 

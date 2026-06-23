@@ -7,7 +7,7 @@ use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 
 use crate::config::Config;
 use crate::handlers::AppState;
-use crate::sui_events::{parse_chain_event, SuiChainEvent};
+use crate::sui_events::parse_chain_event;
 
 /// gRPC 订阅检查点流，过滤特定合约事件
 pub async fn subscribe_checkpoints(
@@ -142,7 +142,13 @@ pub async fn subscribe_checkpoints(
                                 chain_event
                             );
                             let tx_digest = tx.digest.as_deref().filter(|s| !s.is_empty());
-                            handle_grpc_event(chain_event, &state, tx_digest).await;
+                            crate::relayer::dispatch::handle_parsed_chain_event(
+                                &state,
+                                &chain_event,
+                                tx_digest,
+                                "sui_grpc",
+                            )
+                            .await;
                         }
                     }
                 }
@@ -272,35 +278,6 @@ pub async fn subscribe_with_reconnect(config: Config, state: Arc<AppState>) {
         tokio::time::sleep(retry_delay).await;
         retry_delay = (retry_delay * 2).min(max_retry_delay);
     }
-}
-
-async fn handle_grpc_event(event: SuiChainEvent, state: &Arc<AppState>, tx_digest: Option<&str>) {
-    match &event {
-        SuiChainEvent::PlayerJoined { table_id, player, buy_in, .. } => {
-            tracing::info!(
-                "[sui_grpc] PlayerJoined: table={}, player={}, buy_in={}",
-                table_id, player, buy_in
-            );
-        }
-        SuiChainEvent::PlayerLeft { table_id, player, .. } => {
-            tracing::info!(
-                "[sui_grpc] PlayerLeft: table={}, player={}",
-                table_id, player
-            );
-        }
-        SuiChainEvent::HandSettled { table_id, pot, .. } => {
-            tracing::info!(
-                "[sui_grpc] HandSettled: table={}, pot={}",
-                table_id, pot
-            );
-        }
-        _ => {
-            tracing::debug!("[sui_grpc] event: {:?}", event);
-        }
-    }
-
-    let summary = crate::relayer::process_event(&state.config.fullnode_url, &state.config.sui_package_id, &event).await;
-    crate::relayer::apply_event_to_socket(state, &event, summary.as_ref(), tx_digest).await;
 }
 
 #[cfg(test)]

@@ -35,7 +35,9 @@ use poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 use poker_protocol::z_poker::protocol::new_plain_text;
 use rand::rngs::OsRng;
-use sui_sdk_types::{Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction, TransactionKind};
+use sui_sdk_types::{Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction, TransactionKind};
+
+use crate::relayer::util::{bcs_encode, parse_address};
 
 // ============================================================================
 // 常量
@@ -208,15 +210,6 @@ fn serialize_reconstruct_proof(proof: &ReconstructProof<DefaultCurve>) -> Vec<u8
 // PTB 构建辅助函数
 // ============================================================================
 
-fn parse_address(s: &str) -> Result<Address, String> {
-    s.parse::<Address>()
-        .map_err(|e| format!("invalid address '{}': {}", s, e))
-}
-
-fn bcs_encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {
-    bcs::to_bytes(value).map_err(|e| format!("BCS serialization failed: {}", e))
-}
-
 /// 创建 Pure 输入（BCS 编码的 vector<u8>）
 fn pure_bytes(bytes: Vec<u8>) -> Input {
     Input::Pure(bcs_encode(&bytes).expect("BCS encode vector<u8> should not fail"))
@@ -290,7 +283,7 @@ async fn dev_inspect_verify(pt: ProgrammableTransaction) -> Result<bool, String>
         ]
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::sponsor::shared_http_client();
     let resp: serde_json::Value = client
         .post(TESTNET_RPC)
         .json(&body)

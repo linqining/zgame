@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import authContext from '../context/auth/authContext';
 import contentContext from '../context/content/contentContext';
 import styled from 'styled-components';
+import { logger } from '../helpers/logger';
 
 const CallbackWrapper = styled.div`
   min-height: 100vh;
@@ -97,16 +98,16 @@ const ZkLoginCallback: React.FC = () => {
         if (!jwt && window.location.hash) {
           const hashParams = new URLSearchParams(window.location.hash.slice(1));
           jwt = hashParams.get('id_token');
-          if (jwt) console.log('[ZkLoginCallback] Found id_token in URL hash');
+          if (jwt) logger.log('[ZkLoginCallback] Found id_token in URL hash');
         }
 
         if (!jwt && window.location.search) {
           const searchParams = new URLSearchParams(window.location.search);
           jwt = searchParams.get('id_token');
-          if (jwt) console.log('[ZkLoginCallback] Found id_token in URL search params');
+          if (jwt) logger.log('[ZkLoginCallback] Found id_token in URL search params');
         }
 
-        console.log('[ZkLoginCallback] processCallback started, jwt exists:', !!jwt);
+        logger.log('[ZkLoginCallback] processCallback started, jwt exists:', !!jwt);
 
         // Check for OAuth error
         const oauthError = sessionStorage.getItem('oauth_error')
@@ -137,14 +138,14 @@ const ZkLoginCallback: React.FC = () => {
         setTimeout(() => navigate('/', { replace: true }), 500);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Unknown error';
-        console.error('[ZkLoginCallback] Error:', msg);
+        logger.error('[ZkLoginCallback] Error:', msg);
         setError(msg);
         setStatus(t('zklogin_failed'));
         callbackProcessed = false; // Allow retry on error
       }
     };
 
-    console.log('[ZkLoginCallback] useEffect fired, isLoggedIn:', isLoggedIn);
+    logger.log('[ZkLoginCallback] useEffect fired, isLoggedIn:', isLoggedIn);
     if (!isLoggedIn) {
       processCallback();
     } else {

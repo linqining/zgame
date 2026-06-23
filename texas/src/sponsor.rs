@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::auth;
 use crate::config::Config;
 use crate::handlers::{err_resp, get_token_from_headers, AppState};
+use crate::relayer::util::{base64_decode, base64_encode, sui_jsonrpc};
 use crate::wallet_auth;
 
 // ============================================================
@@ -396,11 +397,14 @@ pub async fn sponsor_transaction(
     }
 
     // Enforce gas budget cap if provided
+    // 允许 reveal 交易使用更高的 gas budget（sponsor_reveal_gas_budget），
+    // 因为最后一次 reveal 会触发 settle_hand 等重计算。
     if let Some(budget) = req.gas_budget {
-        if budget > state.config.sponsor_gas_budget {
+        let max_allowed = state.config.sponsor_reveal_gas_budget.max(state.config.sponsor_gas_budget);
+        if budget > max_allowed {
             tracing::warn!(
-                "[sponsor_transaction] gas budget too high: {} > {}",
-                budget, state.config.sponsor_gas_budget
+                "[sponsor_transaction] gas budget too high: {} > {} (normal={}, reveal={})",
+                budget, max_allowed, state.config.sponsor_gas_budget, state.config.sponsor_reveal_gas_budget
             );
             return err_resp(StatusCode::FORBIDDEN, "Gas budget too high");
         }
@@ -669,51 +673,6 @@ pub(crate) fn parse_sponsor_private_key(private_key: &str) -> Result<sui_crypto:
     };
 
     Ok(sui_crypto::ed25519::Ed25519PrivateKey::new(pk_bytes))
-}
-
-pub(crate) async fn sui_jsonrpc(
-    client: &reqwest::Client,
-    url: &str,
-    method: &str,
-    params: Vec<serde_json::Value>,
-) -> Result<serde_json::Value, String> {
-    let resp = client.post(url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-    let result: serde_json::Value = resp.json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-    if let Some(error) = result.get("error") {
-        return Err(format!("JSON-RPC error: {}", error));
-    }
-
-    result.get("result").cloned().ok_or("Missing result in JSON-RPC response".to_string())
-}
-
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine;
-    let std = base64::engine::general_purpose::STANDARD;
-    // Sui keys/transactions may use base64url (- and _ instead of + and /),
-    // so fall back to URL_SAFE_NO_PAD if STANDARD fails.
-    std.decode(input)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(input))
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(input))
-        .map_err(|e| format!("Base64 decode error: {}", e))
-}
-
-fn base64_encode(input: &[u8]) -> String {
-    use base64::Engine;
-    let engine = base64::engine::general_purpose::STANDARD;
-    engine.encode(input)
 }
 
 fn verify_auth(headers: &HeaderMap, jwt_secret: &str) -> Result<crate::auth::Claims, Response> {

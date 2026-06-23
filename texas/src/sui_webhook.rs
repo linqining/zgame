@@ -154,7 +154,13 @@ pub async fn inodra_webhook(
     mark_webhook_processed(&state, &payload.id).await;
 
     // 处理链上事件
-    handle_chain_event(chain_event, &state, if payload.transaction_digest.is_empty() { None } else { Some(payload.transaction_digest.as_str()) }).await;
+    crate::relayer::dispatch::handle_parsed_chain_event(
+        &state,
+        &chain_event,
+        if payload.transaction_digest.is_empty() { None } else { Some(payload.transaction_digest.as_str()) },
+        "sui_webhook",
+    )
+    .await;
 
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response()
 }
@@ -166,38 +172,4 @@ async fn mark_webhook_processed(state: &Arc<AppState>, event_id: &str) {
         processed.clear();
     }
     processed.insert(event_id.to_string());
-}
-
-/// 处理解析后的链上事件
-/// 当前仅记录日志，后续可根据事件类型触发游戏逻辑
-async fn handle_chain_event(event: crate::sui_events::SuiChainEvent, state: &Arc<AppState>, tx_digest: Option<&str>) {
-    match &event {
-        crate::sui_events::SuiChainEvent::PlayerJoined { table_id, player, buy_in, .. } => {
-            tracing::info!(
-                "[sui_webhook] PlayerJoined: table={}, player={}, buy_in={}",
-                table_id, player, buy_in
-            );
-            // TODO: 同步链上玩家入座到游戏状态
-        }
-        crate::sui_events::SuiChainEvent::PlayerLeft { table_id, player, .. } => {
-            tracing::info!(
-                "[sui_webhook] PlayerLeft: table={}, player={}",
-                table_id, player
-            );
-            // TODO: 同步链上玩家离座到游戏状态
-        }
-        crate::sui_events::SuiChainEvent::HandSettled { table_id, pot, .. } => {
-            tracing::info!(
-                "[sui_webhook] HandSettled: table={}, pot={}",
-                table_id, pot
-            );
-            // TODO: 同步链上结算结果到游戏状态
-        }
-        _ => {
-            tracing::debug!("[sui_webhook] unhandled event: {:?}", event);
-        }
-    }
-
-    let summary = crate::relayer::process_event(&state.config.fullnode_url, &state.config.sui_package_id, &event).await;
-    crate::relayer::apply_event_to_socket(state, &event, summary.as_ref(), tx_digest).await;
 }

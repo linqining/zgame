@@ -3,15 +3,22 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import logoWithText from './assets/img/logo_with_text.svg';
 import Providers from './context/Providers';
+import { logger } from './helpers/logger';
+import { initSuiServices } from './sui/config';
+
+// Initialize zkLogin session manager + sponsored transaction service before
+// React renders. These services must be ready before any wallet connects or
+// any zkLogin callback is processed (e.g. /auth/callback).
+initSuiServices();
 
 // Capture OAuth id_token from URL hash BEFORE React renders.
 // Google OAuth implicit flow returns id_token in hash fragment (#id_token=xxx).
 // Some browsers/routers may strip the hash before React components can read it.
 (function captureOAuthCallback() {
-  console.log('[OAuth] Page loaded, full URL:', window.location.href);
-  console.log('[OAuth] Hash:', window.location.hash);
-  console.log('[OAuth] Search:', window.location.search);
-  console.log('[OAuth] Pathname:', window.location.pathname);
+  logger.log('[OAuth] Page loaded, full URL:', window.location.href);
+  logger.log('[OAuth] Hash:', window.location.hash);
+  logger.log('[OAuth] Search:', window.location.search);
+  logger.log('[OAuth] Pathname:', window.location.pathname);
 
   const hash = window.location.hash;
   if (hash) {
@@ -20,9 +27,9 @@ import Providers from './context/Providers';
     const error = params.get('error');
     if (idToken) {
       sessionStorage.setItem('oauth_id_token', idToken);
-      console.log('[OAuth] Captured id_token from hash');
+      logger.log('[OAuth] Captured id_token from hash');
     } else {
-      console.log('[OAuth] Hash exists but no id_token found. Hash params:', Object.fromEntries(params));
+      logger.log('[OAuth] Hash exists but no id_token found. Hash params:', Object.fromEntries(params));
     }
     if (error) {
       sessionStorage.setItem('oauth_error', error);
@@ -30,7 +37,7 @@ import Providers from './context/Providers';
       if (errorDesc) sessionStorage.setItem('oauth_error_desc', errorDesc);
     }
   } else {
-    console.log('[OAuth] No hash fragment in URL');
+    logger.log('[OAuth] No hash fragment in URL');
   }
   // Also check search params (some providers use query string)
   const search = window.location.search;
@@ -39,7 +46,7 @@ import Providers from './context/Providers';
     const idToken = params.get('id_token');
     if (idToken && !sessionStorage.getItem('oauth_id_token')) {
       sessionStorage.setItem('oauth_id_token', idToken);
-      console.log('[OAuth] Captured id_token from search params');
+      logger.log('[OAuth] Captured id_token from search params');
     }
   }
 })();

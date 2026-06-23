@@ -1,4 +1,5 @@
 use crate::sui_events::{TableSummaryV2, TableSummaryV2Chain};
+use crate::relayer::util::parse_address;
 use base64::Engine;
 
 /// 通过 `suix_getBalance` 查询指定地址的 SUI 余额（MIST）。
@@ -17,7 +18,7 @@ pub async fn fetch_sui_balance(rpc_url: &str, address: &str) -> Result<u64, Stri
         "params": [address, "0x2::sui::SUI"]
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::sponsor::shared_http_client();
     let resp: serde_json::Value = client
         .post(rpc_url)
         .json(&body)
@@ -129,7 +130,7 @@ pub async fn fetch_table_summary_via_dev_inspect(
     });
 
     // 4. 发送请求
-    let client = reqwest::Client::new();
+    let client = crate::sponsor::shared_http_client();
     let resp: serde_json::Value = client
         .post(rpc_url)
         .json(&body)
@@ -230,12 +231,7 @@ fn build_get_table_summary_ptb(
     package_id: &str,
     table_object_id: &str,
 ) -> Result<sui_sdk_types::ProgrammableTransaction, String> {
-    use sui_sdk_types::{Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction, SharedInput};
-
-    let parse_address = |s: &str| -> Result<Address, String> {
-        s.parse::<Address>()
-            .map_err(|e| format!("invalid address '{}': {}", s, e))
-    };
+    use sui_sdk_types::{Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction, SharedInput};
 
     let table_id = parse_address(table_object_id)?;
     let package = parse_address(package_id)?;
@@ -313,13 +309,8 @@ fn build_reveal_assignments_ptb(
     table_object_id: &str,
 ) -> Result<sui_sdk_types::ProgrammableTransaction, String> {
     use sui_sdk_types::{
-        Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
+        Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
         SharedInput, StructTag, TypeTag,
-    };
-
-    let parse_address = |s: &str| -> Result<Address, String> {
-        s.parse::<Address>()
-            .map_err(|e| format!("invalid address '{}': {}", s, e))
     };
 
     let table_id = parse_address(table_object_id)?;
@@ -401,7 +392,7 @@ pub async fn fetch_reveal_assignments(
         ]
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::sponsor::shared_http_client();
     let resp: serde_json::Value = client
         .post(rpc_url)
         .json(&body)
@@ -581,13 +572,8 @@ fn build_decrypted_cards_info_ptb(
     table_object_id: &str,
 ) -> Result<sui_sdk_types::ProgrammableTransaction, String> {
     use sui_sdk_types::{
-        Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
+        Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
         SharedInput, StructTag, TypeTag,
-    };
-
-    let parse_address = |s: &str| -> Result<Address, String> {
-        s.parse::<Address>()
-            .map_err(|e| format!("invalid address '{}': {}", s, e))
     };
 
     let table_id = parse_address(table_object_id)?;
@@ -666,7 +652,7 @@ pub async fn fetch_decrypted_cards_info(
         ]
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::sponsor::shared_http_client();
     let resp: serde_json::Value = client
         .post(rpc_url)
         .json(&body)
@@ -750,13 +736,8 @@ fn build_community_cards_ptb(
     table_object_id: &str,
 ) -> Result<sui_sdk_types::ProgrammableTransaction, String> {
     use sui_sdk_types::{
-        Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
+        Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
         SharedInput, StructTag, TypeTag,
-    };
-
-    let parse_address = |s: &str| -> Result<Address, String> {
-        s.parse::<Address>()
-            .map_err(|e| format!("invalid address '{}': {}", s, e))
     };
 
     let table_id = parse_address(table_object_id)?;
@@ -836,7 +817,7 @@ pub async fn fetch_community_cards(
         ]
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::sponsor::shared_http_client();
     let resp: serde_json::Value = client
         .post(rpc_url)
         .json(&body)
@@ -918,13 +899,8 @@ fn build_seat_hands_ptb(
     num_seats: usize,
 ) -> Result<sui_sdk_types::ProgrammableTransaction, String> {
     use sui_sdk_types::{
-        Address, Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
+        Argument, Command, Identifier, Input, MoveCall, ProgrammableTransaction,
         SharedInput, StructTag, TypeTag,
-    };
-
-    let parse_address = |s: &str| -> Result<Address, String> {
-        s.parse::<Address>()
-            .map_err(|e| format!("invalid address '{}': {}", s, e))
     };
 
     let table_id = parse_address(table_object_id)?;
@@ -1011,7 +987,7 @@ pub async fn fetch_seat_hands(
         ]
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::sponsor::shared_http_client();
     let resp: serde_json::Value = client
         .post(rpc_url)
         .json(&body)

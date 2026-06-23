@@ -4,6 +4,7 @@ import Button from '../buttons/Button';
 import { BetSlider } from './BetSlider';
 import { UIWrapper } from './UIWrapper';
 import { Table } from '../../types/game';
+import { logger } from '../../helpers/logger';
 
 interface GameUIProps {
   currentTable: Table;
@@ -43,7 +44,7 @@ export const GameUI: React.FC<GameUIProps> = ({
       <Button small disabled={isActionLoading} onClick={() => raise(bet + currentTable.seats[seatId].bet)}>
         {getLocalizedString('game_ui_bet')} {bet}
       </Button>
-      <Button small secondary disabled={isActionLoading} onClick={() => { standUp().catch(e => console.error('[GameUI] standUp failed:', e)); }}>
+      <Button small secondary disabled={isActionLoading} onClick={() => { standUp().catch(e => logger.error('[GameUI] standUp failed:', e)); }}>
         {getLocalizedString('game_ui_stand-up')}
       </Button>
       <Button small secondary disabled={isActionLoading} onClick={fold}>

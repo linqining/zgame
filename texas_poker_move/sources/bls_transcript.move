@@ -5,6 +5,7 @@ use sui::bls12381::Scalar;
 use sui::group_ops;
 use std::hash;
 use texas_poker::bls_scalar;
+use texas_poker::bls_elgamal::{Self, ElGamalCiphertext};
 
 // ========== Transcript 结构体 ==========
 
@@ -28,6 +29,31 @@ public fun new(protocol_name: &vector<u8>): Transcript {
 public fun append_point(t: &mut Transcript, label: &vector<u8>, point: &group_ops::Element<bls12381::G1>) {
     let point_bytes = *group_ops::bytes(point);
     append_message(t, label, &point_bytes);
+}
+
+/// 批量追加 G1 点向量，所有点使用同一 label
+public fun append_points(t: &mut Transcript, label: &vector<u8>, points: &vector<group_ops::Element<bls12381::G1>>) {
+    let mut i = 0;
+    while (i < points.length()) {
+        append_point(t, label, vector::borrow(points, i));
+        i = i + 1;
+    };
+}
+
+/// 批量追加密文向量，每个密文的 c1 用 c1_label、c2 用 c2_label
+public fun append_ciphertexts(
+    t: &mut Transcript,
+    c1_label: &vector<u8>,
+    c2_label: &vector<u8>,
+    cts: &vector<ElGamalCiphertext>,
+) {
+    let mut i = 0;
+    while (i < cts.length()) {
+        let ct = vector::borrow(cts, i);
+        append_point(t, c1_label, bls_elgamal::c1(ct));
+        append_point(t, c2_label, bls_elgamal::c2(ct));
+        i = i + 1;
+    };
 }
 
 /// 追加标量

@@ -24,49 +24,49 @@ const ContentProvider: React.FC<ContentProviderProps> = ({ children }) => {
   useEffect(() => {
     setIsLoading(true);
 
-    fetchContent();
-
-    setIsLoading(false);
+    fetchContent().finally(() => {
+      setIsLoading(false);
+    });
     // eslint-disable-next-line
   }, [lang]);
 
-  const fetchContent = () => {
+  const fetchContent = (): Promise<void> => {
     if (!contentfulClient) {
-      setIsLoading(false);
-      return;
+      return Promise.resolve();
     }
 
-    contentfulClient
-      .getEntries({ content_type: 'key', locale: lang })
-      .then((res) => {
-        const localizedStrings: Record<string, string> = {};
+    return Promise.all([
+      contentfulClient
+        .getEntries({ content_type: 'key', locale: lang })
+        .then((res) => {
+          const localizedStrings: Record<string, string> = {};
 
-        res.items.forEach(
-          (item) =>
-            (localizedStrings[(item.fields as { keyName: string }).keyName] =
-              (item.fields as { value: { fields: { value: string } } }).value.fields.value),
-        );
+          res.items.forEach(
+            (item) =>
+              (localizedStrings[(item.fields as { keyName: string }).keyName] =
+                (item.fields as { value: { fields: { value: string } } }).value.fields.value),
+          );
 
-        setLocalizedStrings(localizedStrings);
-      })
-      .catch(() => {
-        setLocalizedStrings({});
-      });
-
-    contentfulClient
-      .getEntries({ content_type: 'staticPage', locale: lang })
-      .then((res) => {
-        setStaticPages(
-          res.items.map((item) => {
-            const fields = item.fields as { slug: string; title: string; content: { fields: { value: string } } };
-            return {
-              slug: fields.slug,
-              title: fields.title,
-              content: fields.content.fields.value,
-            };
-          }),
-        );
-      });
+          setLocalizedStrings(localizedStrings);
+        })
+        .catch(() => {
+          setLocalizedStrings({});
+        }),
+      contentfulClient
+        .getEntries({ content_type: 'staticPage', locale: lang })
+        .then((res) => {
+          setStaticPages(
+            res.items.map((item) => {
+              const fields = item.fields as { slug: string; title: string; content: { fields: { value: string } } };
+              return {
+                slug: fields.slug,
+                title: fields.title,
+                content: fields.content.fields.value,
+              };
+            }),
+          );
+        }),
+    ]).then(() => undefined);
   };
 
   const getLocalizedString = (key: string): string => {

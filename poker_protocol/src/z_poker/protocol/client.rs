@@ -4,7 +4,7 @@ use crate::crypto::{
 use crate::z_poker::convert::{hex_to_scalar, scalar_to_hex, ecpoint_to_hex};
 use crate::zk_shuffle::error::VerificationError;
 use crate::zk_shuffle::reconstruction::{reconstruct_deck, ReconstructProof};
-use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use crate::zk_shuffle::reveal_token_proof::{RevealTokenProof, REVEAL_TOKEN_PROOF_LABEL};
 // 兼容 Move 合约：生产代码使用 FiatShamirTranscript（SHA3-256），
 // 而非 FiatShamirTranscript（STROBE），因为 Move 合约使用 SHA3-256 状态机。
 use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
@@ -80,7 +80,7 @@ impl ClientPlayer {
 
     pub fn peek_card(&self, ct: &ElGamalCiphertext, tokens: &[RevealToken], plain_cards: &[Plaintext]) -> Result<(Plaintext, ElGamalCiphertext), VerificationError> {
         for token in tokens {
-            let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
+            let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
             token.proof.verify(&token.encrypted_card, &token.reveal_token, &token.user_public_key, &mut transcript).map_err(|_| VerificationError::InvalidRevealToken)?;
         }
         let self_token = ct.gen_reveal_token(&self.sk);
@@ -96,7 +96,7 @@ impl ClientPlayer {
     }
 
     pub fn verify_and_reveal_from_token(token: &RevealToken) -> Result<Plaintext, VerificationError> {
-        let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
+        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         token.proof.verify(&token.encrypted_card, &token.reveal_token, &token.user_public_key, &mut transcript)
             .map_err(|_| VerificationError::InvalidRevealToken)?;
         Ok(token.encrypted_card.c2 - token.reveal_token)
@@ -104,7 +104,7 @@ impl ClientPlayer {
 
     pub fn generate_reveal_token(&self, ct: &ElGamalCiphertext) -> RevealToken {
         let reveal_token = ct.gen_reveal_token(&self.sk);
-        let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
+        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         let proof = RevealTokenProof::<DefaultCurve>::prove(&self.sk, &self.pk, ct, &reveal_token, &mut OsRng, &mut transcript);
         RevealToken {
             user_public_key: self.pk,
@@ -156,7 +156,7 @@ impl ClientPlayer {
 
         let encrypted_card = hand_encrypted[hand_index].clone();
         let reveal_token = encrypted_card.gen_reveal_token(&self.sk);
-        let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
+        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         let proof = RevealTokenProof::<DefaultCurve>::prove(&self.sk, &self.pk, &encrypted_card, &reveal_token, &mut OsRng, &mut transcript);
 
         Ok(RevealToken {
@@ -173,7 +173,7 @@ impl ClientPlayer {
     ) -> RevealToken {
         let ct_for_self = ElGamalCiphertext::encrypt(&comm_plaintext, &self.pk, &Scalar::random(&mut OsRng));
         let reveal_token = ct_for_self.gen_reveal_token(&self.sk);
-        let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
+        let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         let proof = RevealTokenProof::<DefaultCurve>::prove(&self.sk, &self.pk, &ct_for_self, &reveal_token, &mut OsRng, &mut transcript);
 
         RevealToken {
@@ -205,7 +205,7 @@ impl ClientPlayer {
         tokens: &[RevealToken],
     ) -> Result<Plaintext, VerificationError> {
         for token in tokens {
-            let mut transcript = FiatShamirTranscript::new(b"reveal_token_proof_v3");
+            let mut transcript = FiatShamirTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
             token.proof.verify(&token.encrypted_card, &token.reveal_token, &token.user_public_key, &mut transcript)
                 .map_err(|_| VerificationError::InvalidRevealToken)?;
         }

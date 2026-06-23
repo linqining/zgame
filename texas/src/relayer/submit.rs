@@ -7,7 +7,6 @@
 //! 两个函数都会构建完整的 [`Transaction`]（即 Sui 的 `TransactionData`），
 //! 由 sponsor 签名后通过 JSON-RPC `sui_executeTransactionBlock` 提交到 Sui 网络。
 
-use base64::Engine;
 use sui_sdk_types::Address;
 use sui_sdk_types::Digest;
 use sui_sdk_types::GasPayment;
@@ -18,23 +17,12 @@ use sui_sdk_types::TransactionKind;
 
 use crate::config::Config;
 use crate::relayer::ptb;
+use crate::relayer::util::{base64_decode, base64_encode};
 use crate::sponsor;
 
 // ---------------------------------------------------------------------------
 // 内部辅助函数
 // ---------------------------------------------------------------------------
-
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    let engine = base64::engine::general_purpose::STANDARD;
-    engine
-        .decode(input)
-        .map_err(|e| format!("Base64 decode error: {}", e))
-}
-
-fn base64_encode(input: &[u8]) -> String {
-    let engine = base64::engine::general_purpose::STANDARD;
-    engine.encode(input)
-}
 
 /// G9 修复：复用 sponsor 模块的全局 reqwest::Client，避免每次调用都创建新实例。
 fn shared_http_client() -> &'static reqwest::Client {
@@ -50,7 +38,7 @@ async fn get_current_epoch(config: &Config) -> Result<u64, String> {
     let http = shared_http_client();
 
     // 尝试 sui_getLatestSuiSystemState
-    match sponsor::sui_jsonrpc(http, &config.fullnode_url, "sui_getLatestSuiSystemState", vec![]).await {
+    match crate::relayer::util::sui_jsonrpc(http, &config.fullnode_url, "sui_getLatestSuiSystemState", vec![]).await {
         Ok(result) => {
             let epoch = result
                 .get("epoch")
@@ -66,7 +54,7 @@ async fn get_current_epoch(config: &Config) -> Result<u64, String> {
     }
 
     // 回退：sui_getCheckpoints（取最新 checkpoint 的 epoch）
-    let result = sponsor::sui_jsonrpc(
+    let result = crate::relayer::util::sui_jsonrpc(
         http,
         &config.fullnode_url,
         "sui_getCheckpoints",
@@ -149,7 +137,7 @@ async fn execute_tx(
         .map(serde_json::Value::String)
         .collect();
 
-    let result = sponsor::sui_jsonrpc(
+    let result = crate::relayer::util::sui_jsonrpc(
         &http,
         &config.fullnode_url,
         "sui_executeTransactionBlock",

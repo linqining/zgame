@@ -4,6 +4,9 @@ use std::time::Duration;
 use crate::handlers::AppState;
 use crate::relayer::submit;
 
+/// sui_tick_interval_ms 为 0 时的兜底间隔（毫秒）。
+const TICK_FALLBACK_INTERVAL_MS: u64 = 50000;
+
 /// 定时 tick 循环：周期性遍历所有缓存的 table，根据 `sui_on_chain_enabled` 分发到
 /// 链上模式（调用 `submit_tick_tx`）或本地模式（调用 `process_tick`）。
 pub async fn run_tick_loop(state: Arc<AppState>) {
@@ -12,7 +15,7 @@ pub async fn run_tick_loop(state: Arc<AppState>) {
         tracing::warn!(
             "[relayer::tick] sui_tick_interval_ms=0 would cause busy loop, falling back to 5000ms"
         );
-        50000 //todo 先这样好调试
+        TICK_FALLBACK_INTERVAL_MS //todo 先这样好调试
     } else {
         state.config.sui_tick_interval_ms
     };

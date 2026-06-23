@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::Config;
 use crate::handlers::AppState;
-use crate::sui_events::{parse_chain_event, SuiChainEvent};
+use crate::sui_events::parse_chain_event;
 
 /// GraphQL WebSocket 子协议标识符
 const GRAPHQL_WS_PROTOCOL: &str = "graphql-transport-ws";
@@ -437,46 +437,13 @@ async fn handle_subscription_payload(data: &Value, state: &Arc<AppState>) {
         }
     };
 
-    handle_graphql_event(chain_event, state, if tx_digest.is_empty() { None } else { Some(tx_digest) }).await;
-}
-
-/// 处理解析后的链上事件（与 sui_grpc::handle_grpc_event 等价）
-async fn handle_graphql_event(event: SuiChainEvent, state: &Arc<AppState>, tx_digest: Option<&str>) {
-    match &event {
-        SuiChainEvent::PlayerJoined { table_id, player, buy_in, .. } => {
-            tracing::info!(
-                "[sui_graphql_sub] PlayerJoined: table={}, player={}, buy_in={}",
-                table_id,
-                player,
-                buy_in
-            );
-        }
-        SuiChainEvent::PlayerLeft { table_id, player, .. } => {
-            tracing::info!(
-                "[sui_graphql_sub] PlayerLeft: table={}, player={}",
-                table_id,
-                player
-            );
-        }
-        SuiChainEvent::HandSettled { table_id, pot, .. } => {
-            tracing::info!(
-                "[sui_graphql_sub] HandSettled: table={}, pot={}",
-                table_id,
-                pot
-            );
-        }
-        _ => {
-            tracing::debug!("[sui_graphql_sub] event: {:?}", event);
-        }
-    }
-
-    let summary = crate::relayer::process_event(
-        &state.config.fullnode_url,
-        &state.config.sui_package_id,
-        &event,
+    crate::relayer::dispatch::handle_parsed_chain_event(
+        state,
+        &chain_event,
+        if tx_digest.is_empty() { None } else { Some(tx_digest) },
+        "sui_graphql_sub",
     )
     .await;
-    crate::relayer::apply_event_to_socket(state, &event, summary.as_ref(), tx_digest).await;
 }
 
 /// 从 wss:// URL 提取 Host 头

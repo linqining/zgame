@@ -29,6 +29,7 @@ import authContext from '../../context/auth/authContext';
 import { EmptySeat } from './seatStyles';
 import { defaultClient } from '../../sui/config';
 import { requestSuiFromFaucetV2, getFaucetHost } from '@mysten/sui/faucet';
+import { logger } from '../../helpers/logger';
 
 const StyledSeat = styled.div`
   width: 200px;
@@ -155,7 +156,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
           setSuiBalanceMist(Number(res.balance.balance) || 0);
         }
       } catch (err) {
-        console.error('[Seat] fetch SUI balance failed:', err);
+        logger.error('[Seat] fetch SUI balance failed:', err);
       }
     };
     fetchBalance();
@@ -228,7 +229,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
 
   // Debug: log hand cards for the current player's seat
   if (seat && seatId !== null && seat.id === seatId) {
-    console.log('[Seat] seatNumber:', seatNumber, 'seatId:', seatId, 'hand:', seat.hand);
+    logger.log('[Seat] seatNumber:', seatNumber, 'seatId:', seatId, 'hand:', seat.hand);
   }
 
   useEffect(() => {
@@ -241,7 +242,7 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
       seat.sittingOut
     ) {
       if (availableChips <= minBuyIn || availableChips === 0) {
-        standUp().catch(e => console.error('[Seat] standUp failed:', e));
+        standUp().catch(e => logger.error('[Seat] standUp failed:', e));
       } else {
         openModal(
           () => (
@@ -315,11 +316,11 @@ export const Seat: React.FC<SeatProps> = ({ currentTable, seatNumber, isPlayerSe
           getLocalizedString('game_rebuy-modal_header'),
           getLocalizedString('game_rebuy-modal_cancel'),
           () => {
-            standUp().catch(e => console.error('[Seat] standUp failed:', e));
+            standUp().catch(e => logger.error('[Seat] standUp failed:', e));
             closeModal();
           },
           () => {
-            standUp().catch(e => console.error('[Seat] standUp failed:', e));
+            standUp().catch(e => logger.error('[Seat] standUp failed:', e));
             closeModal();
           },
         );

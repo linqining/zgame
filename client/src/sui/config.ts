@@ -51,18 +51,31 @@ export const PACKAGE_ID = import.meta.env.VITE_PACKAGE_ID || '';
 // If not set, falls back to PACKAGE_ID (compatible with first publish).
 export const ORIGIN_PACKAGE_ID = import.meta.env.VITE_ORIGIN_PACKAGE_ID || PACKAGE_ID;
 
-// Eagerly create a client for the default network and initialize the zkLogin
-// session manager + sponsored tx service at module load. These services must
-// be available before any wallet connects — e.g. on the OAuth callback page
-// (/auth/callback) the user arrives from an OAuth redirect with no wallet
-// connected, so dApp Kit's lazy `createClient` callback below has not run yet.
+// Eagerly create a client for the default network. The zkLogin session
+// manager + sponsored tx service must be available before any wallet
+// connects — e.g. on the OAuth callback page (/auth/callback) the user
+// arrives from an OAuth redirect with no wallet connected, so dApp Kit's
+// lazy `createClient` callback below has not run yet.
 const defaultNetwork = networks[0]; // testnet — 与后端一致，避免 zkLogin prover 网络不匹配
 export const defaultClient = new SuiGrpcClient({
   network: defaultNetwork,
   baseUrl: networkUrls[defaultNetwork] || networkUrls.testnet,
 });
-initZkLoginSessionManager(defaultClient, defaultNetwork, SPONSOR_CONFIG.saltServiceUrl, SPONSOR_CONFIG.proverServiceUrl);
-initSponsoredTransactionService(defaultClient, SPONSOR_CONFIG.apiUrl);
+
+let suiServicesInitialized = false;
+
+/**
+ * Initialize the zkLogin session manager and sponsored transaction service
+ * against the default client. Must run before any wallet connects or any
+ * zkLogin/sponsored-tx call is made. Called explicitly from main.tsx so the
+ * side effects are not triggered merely by importing this module.
+ */
+export function initSuiServices(): void {
+  if (suiServicesInitialized) return;
+  suiServicesInitialized = true;
+  initZkLoginSessionManager(defaultClient, defaultNetwork, SPONSOR_CONFIG.saltServiceUrl, SPONSOR_CONFIG.proverServiceUrl);
+  initSponsoredTransactionService(defaultClient, SPONSOR_CONFIG.apiUrl);
+}
 
 export const dAppKit = createDAppKit({
   networks: [...networks],

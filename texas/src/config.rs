@@ -1,5 +1,8 @@
 use zeroize::Zeroizing;
 
+/// JWT 默认过期时间（毫秒）= 24 小时。
+const JWT_DEFAULT_EXPIRES_IN_MS: u64 = 24 * 60 * 60 * 1000;
+
 #[derive(Clone)]
 pub struct Config {
     pub port: u16,
@@ -13,6 +16,10 @@ pub struct Config {
     // Sponsored transaction config
     pub sponsor_private_key: Zeroizing<String>,
     pub sponsor_gas_budget: u64,
+    /// Reveal（最后一次揭牌触发 settle_hand）专用 gas budget 上限。
+    /// showdown 最后一次 reveal 会触发手牌评估、底池分配等重计算，
+    /// 需要比普通交易更高的 gas budget。
+    pub sponsor_reveal_gas_budget: u64,
     pub fullnode_url: String,
     /// gRPC 订阅专用端点（与 fullnode_url 分离，因为 gRPC 流式订阅需要支持 SubscriptionService 的节点）。
     /// 若未设置，回退到 fullnode_url。
@@ -39,6 +46,9 @@ pub struct Config {
     pub sui_clock_object_id: String,
     // 是否上链模式（true=上链，false=本地模式）
     pub sui_on_chain_enabled: bool,
+    /// 初始 Table 1 使用的链上 table object ID（环境相关，按部署环境配置）。
+    /// 若未设置，回退到内置测试网默认值以兼容现有部署。
+    pub default_chain_table_id: String,
 }
 
 impl Config {
@@ -64,7 +74,7 @@ impl Config {
         Self {
             port: std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(9001),
             jwt_secret,
-            jwt_token_expires_in: 86400000,
+            jwt_token_expires_in: JWT_DEFAULT_EXPIRES_IN_MS,
             betting_timeout_secs: std::env::var("BETTING_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(30),
             showdown_display_secs: std::env::var("SHOWDOWN_DISPLAY_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3),
             hand_complete_wait_secs: std::env::var("HAND_COMPLETE_WAIT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(5),
@@ -72,6 +82,7 @@ impl Config {
             max_players_per_table: std::env::var("MAX_PLAYERS_PER_TABLE").ok().and_then(|s| s.parse().ok()).unwrap_or(5),
             sponsor_private_key: Zeroizing::new(std::env::var("SPONSOR_PRIVATE_KEY").unwrap_or_else(|_| "".to_string())),
             sponsor_gas_budget: std::env::var("SPONSOR_GAS_BUDGET").ok().and_then(|s| s.parse().ok()).unwrap_or(100_000_000),
+            sponsor_reveal_gas_budget: std::env::var("SPONSOR_REVEAL_GAS_BUDGET").ok().and_then(|s| s.parse().ok()).unwrap_or(1_000_000_000),
             fullnode_url: std::env::var("FULLNODE_URL").unwrap_or_else(|_| "https://fullnode.testnet.sui.io:443".to_string()),
             grpc_url: std::env::var("GRPC_URL").unwrap_or_else(|_| std::env::var("FULLNODE_URL").unwrap_or_else(|_| "https://fullnode.testnet.sui.io:443".to_string())),
             grpc_token: std::env::var("GRPC_TOKEN").unwrap_or_default(),
@@ -92,6 +103,7 @@ impl Config {
             sui_tick_interval_ms: std::env::var("SUI_TICK_INTERVAL_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(5000),
             sui_clock_object_id: std::env::var("SUI_CLOCK_OBJECT_ID").unwrap_or_else(|_| "0x6".to_string()),
             sui_on_chain_enabled: std::env::var("SUI_ON_CHAIN_ENABLED").ok().and_then(|s| s.parse().ok()).unwrap_or(false),
+            default_chain_table_id: std::env::var("DEFAULT_CHAIN_TABLE_ID").unwrap_or_else(|_| "0xe5736dc65ee19df22daa13c8218ad42c28c31cb5b1f174e73740858371664b33".to_string()),
         }
     }
 }

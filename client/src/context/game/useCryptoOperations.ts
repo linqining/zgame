@@ -25,7 +25,10 @@ import {
   ReconstructSubmitPayload,
   ReconstructResult,
   wrapCryptoOp,
+  parseWasmResult,
 } from './gameInternal';
+import { logger } from '../../helpers/logger';
+import { PlayerStorage } from '../player/playerStorage';
 
 export interface UseCryptoOperationsParams {
   socket: Socket | null;
@@ -68,23 +71,29 @@ export const useCryptoOperations = (
     revealLoadingRef,
   } = params;
 
+  // Resolves the current player keys from state or storage. Returns null when
+  // no keys are available — callers keep their existing early-return behavior.
+  const getRequiredKeys = useCallback((): WasmClientPlayer | null => {
+    return playerKeys || getPlayerKeys();
+  }, [playerKeys, getPlayerKeys]);
+
   const handleShuffleNotice = useCallback(async (data: ShuffleNoticeData): Promise<ShuffleHandleResult | null> => {
-    console.log(SHUFFLE_NOTICE, data);
+    logger.log(SHUFFLE_NOTICE, data);
     const { tableId, shuffleState } = data;
 
-    const keys = playerKeys || getPlayerKeys();
+    const keys = getRequiredKeys();
     if (!keys) {
-      console.warn('[Shuffle] No player keys available');
+      logger.warn('[Shuffle] No player keys available');
       return null;
     }
-    console.log('[SHUFFLE_NOTICE] Current player:', pkHex, keys);
+    logger.log('[SHUFFLE_NOTICE] Current player:', pkHex, keys);
     if (shuffleState.current_player_pk !== pkHex) {
-      console.log('[Shuffle] Not my turn, waiting...');
+      logger.log('[Shuffle] Not my turn, waiting...');
       return null;
     }
 
     if (shuffleLoadingRef.current) {
-      console.log('[Shuffle] Already processing a shuffle');
+      logger.log('[Shuffle] Already processing a shuffle');
       return null;
     }
 
@@ -92,11 +101,11 @@ export const useCryptoOperations = (
     const aggregatePk = shuffleState.aggregate_pk;
 
     if (!deckEncrypted || deckEncrypted.length === 0) {
-      console.warn('[Shuffle] No deck_encrypted in shuffle state');
+      logger.warn('[Shuffle] No deck_encrypted in shuffle state');
       return null;
     }
     if (!aggregatePk) {
-      console.warn('[Shuffle] No aggregate_pk');
+      logger.warn('[Shuffle] No aggregate_pk');
       return null;
     }
 
@@ -108,15 +117,15 @@ export const useCryptoOperations = (
       const shuffleResult = wrapCryptoOp(() => {
         const result = keys.shuffle(deckJson, aggregatePk);
         if (!result) throw new Error('Shuffle returned null');
-        return typeof result === 'string' ? JSON.parse(result) : result;
-      }, 'shuffle') as ShuffleResult;
+        return parseWasmResult<ShuffleResult>(result);
+      }, 'shuffle');
 
       if (!shuffleResult.output_cards || !Array.isArray(shuffleResult.output_cards)) {
         throw new Error('Invalid shuffle result: missing output_cards');
       }
 
       const gameId = String(tableId);
-      console.log(SHUFFLE_SUBMIT, { gameId, pkHex, cardCount: shuffleResult.output_cards.length });
+      logger.log(SHUFFLE_SUBMIT, { gameId, pkHex, cardCount: shuffleResult.output_cards.length });
 
       return {
         tableId,
@@ -126,44 +135,44 @@ export const useCryptoOperations = (
       };
     } catch (e) {
       const err = e as Error;
-      console.error('[Shuffle] Failed:', e);
+      logger.error('[Shuffle] Failed:', e);
       addMessage(`Shuffle failed: ${err.message || e}`);
       return null;
     } finally {
       shuffleLoadingRef.current = false;
       setShuffleLoading(false);
     }
-  }, [playerKeys, pkHex, getPlayerKeys, addMessage]);
+  }, [getRequiredKeys, pkHex, addMessage]);
 
   const handleRevealNotice = useCallback(async (data: RevealNoticeData): Promise<void> => {
-    console.log(REVEAL_NOTICE, data);
+    logger.log(REVEAL_NOTICE, data);
     const { table_id, phase, pending_players, player_assignments } = data;
 
-    const keys = playerKeys || getPlayerKeys();
+    const keys = getRequiredKeys();
     if (!keys) {
-      console.warn('[Reveal] No player keys available');
+      logger.warn('[Reveal] No player keys available');
       return;
     }
 
     if (!pending_players || !pending_players.includes(pkHex!)) {
-      console.log('[Reveal] Not my turn for reveal');
+      logger.log('[Reveal] Not my turn for reveal');
       return;
     }
 
     if (revealLoadingRef.current) {
-      console.log('[Reveal] Already processing reveal tokens');
+      logger.log('[Reveal] Already processing reveal tokens');
       return;
     }
 
     const assignments = player_assignments || currentTableRef.current?.revealTokenState?.player_assignments;
     if (!assignments) {
-      console.warn('[Reveal] No player assignments available');
+      logger.warn('[Reveal] No player assignments available');
       return;
     }
 
     const myAssignment = assignments[pkHex!];
     if (!myAssignment) {
-      console.warn('[Reveal] No assignment found for my pk');
+      logger.warn('[Reveal] No assignment found for my pk');
       return;
     }
 
@@ -182,7 +191,7 @@ export const useCryptoOperations = (
     }
 
     if (cardsForPhase.length === 0) {
-      console.warn('[Reveal] No cards assigned');
+      logger.warn('[Reveal] No cards assigned');
       return;
     }
 
@@ -194,12 +203,7 @@ export const useCryptoOperations = (
       const tokens = wrapCryptoOp(() => {
         const tokensRaw = keys.batch_generate_reveal_token(cardJson);
         if (!tokensRaw) throw new Error('batch_generate_reveal_token returned null');
-        let parsed: unknown[];
-        if (typeof tokensRaw === 'string') {
-          parsed = JSON.parse(tokensRaw);
-        } else {
-          parsed = tokensRaw;
-        }
+        const parsed = parseWasmResult<unknown[]>(tokensRaw);
         if (!Array.isArray(parsed) || parsed.length === 0) {
           throw new Error('Invalid or empty tokens returned');
         }
@@ -211,37 +215,37 @@ export const useCryptoOperations = (
         pkHex: pkHex!,
         revealTokens: tokens as SubmitRevealToken[],
       });
-      console.log('[Reveal] Submitted tokens:', { gameId: table_id, pkHex, tokens });
+      logger.log('[Reveal] Submitted tokens:', { gameId: table_id, pkHex, tokens });
 
       addMessage(`Reveal ${phase}: ${tokens.length} tokens submitted`);
     } catch (e) {
       const err = e as Error;
-      console.error('[Reveal] Failed:', e);
+      logger.error('[Reveal] Failed:', e);
       addMessage(`Reveal token failed: ${err.message || e}`);
     } finally {
       revealLoadingRef.current = false;
       setRevealLoading(false);
     }
-  }, [socket, playerKeys, pkHex, getPlayerKeys, addMessage]);
+  }, [socket, getRequiredKeys, pkHex, addMessage]);
 
   const handleHandRevealResult = useCallback((data: HandRevealResultData): HandRevealReturn | null => {
-    console.log(HAND_REVEAL_RESULT, data);
+    logger.log(HAND_REVEAL_RESULT, data);
     const { tableId, playerPk, readableCards, deckPlaintext } = data;
 
     if (!readableCards || !Array.isArray(readableCards) || readableCards.length === 0) {
-      console.warn('[HandReveal] No readable cards in payload');
+      logger.warn('[HandReveal] No readable cards in payload');
       return null;
     }
 
-    const keys = playerKeys || getPlayerKeys();
+    const keys = getRequiredKeys();
     if (!keys) {
-      console.warn('[HandReveal] No player keys available for decryption');
+      logger.warn('[HandReveal] No player keys available for decryption');
       return null;
     }
 
-    const currentPkHex = pkHex || localStorage.getItem('pk');
+    const currentPkHex = pkHex || PlayerStorage.getPk();
     if (playerPk !== currentPkHex) {
-      console.warn('[HandReveal] playerPk mismatch, ignoring:', { playerPk, currentPkHex });
+      logger.warn('[HandReveal] playerPk mismatch, ignoring:', { playerPk, currentPkHex });
       return null;
     }
     const decFailedCards: unknown[] = [];
@@ -252,17 +256,17 @@ export const useCryptoOperations = (
       const deckPlaintextJson = JSON.stringify(deckPlaintext);
       try {
         const result = wrapCryptoOp(() => {
-          console.log('[HandReveal] Decrypting card:', ctJson);
+          logger.log('[HandReveal] Decrypting card:', ctJson);
           const decryptedStr = keys.decrypt_readable_card(ctJson, deckPlaintextJson);
           if (!decryptedStr) throw new Error('decrypt_readable_card returned null');
           return decryptedStr;
         }, 'decrypt_readable_card');
-        console.log('[HandReveal] Decrypted card:', result);
+        logger.log('[HandReveal] Decrypted card:', result);
         decrypted.push(result);
       } catch (e) {
         decFailedCards.push(card);
         const err = e as Error;
-        console.error('[HandReveal] Decryption failed:', e);
+        logger.error('[HandReveal] Decryption failed:', e);
         addMessage(`Hand reveal decryption failed: ${err.message || e}`);
         continue;
       }
@@ -275,14 +279,14 @@ export const useCryptoOperations = (
       addMessage(`Hand revealed: ${decrypted.length} cards decrypted`);
       return null;
     }
-  }, [playerKeys, getPlayerKeys, pkHex, addMessage]);
+  }, [getRequiredKeys, pkHex, addMessage]);
 
   const handleCommunityRevealResult = useCallback((data: CommunityRevealResultData): void => {
-    console.log(COMMUNITY_REVEAL_RESULT, data);
+    logger.log(COMMUNITY_REVEAL_RESULT, data);
     const { tableId, communityCards: cards } = data;
 
     if (!cards || !Array.isArray(cards) || cards.length === 0) {
-      console.warn('[CommunityReveal] No community cards in payload');
+      logger.warn('[CommunityReveal] No community cards in payload');
       return;
     }
 
@@ -291,22 +295,22 @@ export const useCryptoOperations = (
   }, [addMessage]);
 
   const handleReconstructNotice = useCallback(async (data: ReconstructNoticeData): Promise<ReconstructSubmitPayload | void> => {
-    console.log(RECONSTRUCT_NOTICE, data);
+    logger.log(RECONSTRUCT_NOTICE, data);
     const { table_id, completed_players, pending_players, cards, coefficient_hex, player_readable_cards } = data;
-    const keys = playerKeys || getPlayerKeys();
+    const keys = getRequiredKeys();
     if (!keys) {
-      console.warn('[Reconstruct] No player keys available for decryption');
+      logger.warn('[Reconstruct] No player keys available for decryption');
       return;
     }
 
     if (!pending_players || !pending_players.includes(pkHex!)) {
-      console.log('[Reconstruct] Not my turn for reconstruct');
+      logger.log('[Reconstruct] Not my turn for reconstruct');
       return;
     }
 
     const myReadableCards = player_readable_cards?.[pkHex!];
     if (!myReadableCards || !myReadableCards.readable_cards || myReadableCards.readable_cards.length === 0) {
-      console.warn('[Reconstruct] No readable cards assigned for my pk');
+      logger.warn('[Reconstruct] No readable cards assigned for my pk');
       return;
     }
 
@@ -317,17 +321,11 @@ export const useCryptoOperations = (
       const result = wrapCryptoOp(() => {
         const resultRaw = keys.reconstruct(originCardsJson, userReadableCardsJson, coefficient_hex);
         if (!resultRaw) throw new Error('reconstruct returned null');
-        let parsed: ReconstructResult;
-        if (typeof resultRaw === 'string') {
-          parsed = JSON.parse(resultRaw);
-        } else {
-          parsed = resultRaw;
-        }
-        return parsed;
+        return parseWasmResult<ReconstructResult>(resultRaw);
       }, 'reconstruct');
 
-      console.log('RECONSTRUCT_NOTICE shuffle proof', result);
-      console.log('[Reconstruct] Result:', result);
+      logger.log('RECONSTRUCT_NOTICE shuffle proof', result);
+      logger.log('[Reconstruct] Result:', result);
       addMessage(`Reconstruct submitted`);
       return {
         table_id,
@@ -338,10 +336,10 @@ export const useCryptoOperations = (
       } as ReconstructSubmitPayload;
     } catch (e) {
       const err = e as Error;
-      console.error('[Reconstruct] Failed:', e);
+      logger.error('[Reconstruct] Failed:', e);
       addMessage(`Reconstruct failed: ${err.message || e}`);
     }
-  }, [playerKeys, pkHex, getPlayerKeys, addMessage]);
+  }, [getRequiredKeys, pkHex, addMessage]);
 
   return {
     handleShuffleNotice,

@@ -1,4 +1,5 @@
 import type { Card, ShuffleState, Table } from '../../types/game';
+import { logger } from '../../helpers/logger';
 
 export interface ShuffleNoticeData {
   tableId: string;
@@ -104,7 +105,16 @@ export function wrapCryptoOp<T>(op: () => T, name: string): T {
   try {
     return op();
   } catch (e) {
-    console.error(`[Crypto] ${name} failed:`, e);
+    logger.error(`[Crypto] ${name} failed:`, e);
     throw e;
   }
+}
+
+/**
+ * Parse a WASM result that may be returned as a JSON string or as an
+ * already-deserialized object. Centralizes the
+ * `typeof result === 'string' ? JSON.parse(result) : result` pattern.
+ */
+export function parseWasmResult<T>(result: string | T): T {
+  return typeof result === 'string' ? JSON.parse(result) : result;
 }

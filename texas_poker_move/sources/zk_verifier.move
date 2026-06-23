@@ -332,11 +332,7 @@ public fun verify_pk_ownership(pk: &group_ops::Element<G1>, proof_bytes: &vector
     let challenge = bls_scalar::hash_to_scalar(&hash_input);
 
     // 验证: G * response == commitment + pk * challenge
-    let lhs = bls12381::g1_mul(&response, &g);
-    let pk_c = bls12381::g1_mul(&challenge, pk);
-    let rhs = bls12381::g1_add(&commitment, &pk_c);
-
-    bls_scalar::g1_equal(&lhs, &rhs)
+    bls_scalar::verify_dleq(&g, pk, &commitment, &response, &challenge)
 }
 
 /// 验证 PK 所有权证明（断言版本）

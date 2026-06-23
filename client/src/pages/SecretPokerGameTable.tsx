@@ -11,6 +11,7 @@ import CryptoEventStream from '../components/crypto/CryptoEventStream'
 import { OnchainVerificationBadge } from '../components/crypto/OnchainVerificationBadge'
 import EncryptedCard from '../components/crypto/EncryptedCard'
 import ShuffleProofVisualizer from '../components/crypto/ShuffleProofVisualizer'
+import { logger } from '../helpers/logger'
 import {
   CenteredMessageContainer,
   Spinner,
@@ -103,7 +104,7 @@ export default function GameTable() {
       },
       onCryptoEvent: (ev) => {
         setCryptoEvents(prev => [...prev.slice(-99), ev])
-        console.log('[CryptoEvent]', ev)
+        logger.log('[CryptoEvent]', ev)
       },
       onError: () => addLog('[WS] Connection error'),
       onClose: () => addLog('[WS] Disconnected, reconnecting...'),

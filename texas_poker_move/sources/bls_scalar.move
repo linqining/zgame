@@ -194,6 +194,22 @@ public fun g1_equal(a: &group_ops::Element<bls12381::G1>, b: &group_ops::Element
     group_ops::equal(a, b)
 }
 
+/// DLEq 验证：检查 s * g == commitment + c * pk
+/// 用于 Schnorr/Chaum-Pedersen 风格证明的统一验证等式。
+/// g: 基点, pk: 公钥点, commitment: 承诺点, s: 响应标量, c: 挑战标量
+public fun verify_dleq(
+    g: &group_ops::Element<bls12381::G1>,
+    pk: &group_ops::Element<bls12381::G1>,
+    commitment: &group_ops::Element<bls12381::G1>,
+    s: &group_ops::Element<Scalar>,
+    c: &group_ops::Element<Scalar>,
+): bool {
+    let lhs = bls12381::g1_mul(s, g);
+    let pk_c = bls12381::g1_mul(c, pk);
+    let rhs = bls12381::g1_add(commitment, &pk_c);
+    g1_equal(&lhs, &rhs)
+}
+
 /// 判断 G1 点是否为单位元
 public fun g1_is_identity(p: &group_ops::Element<bls12381::G1>): bool {
     group_ops::equal(p, &bls12381::g1_identity())

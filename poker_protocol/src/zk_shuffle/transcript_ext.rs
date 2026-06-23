@@ -1,5 +1,28 @@
 use crate::crypto::curve::{Curve, CurvePoint, CurveScalar};
 use sha3::Digest;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+// ========== Label interning cache ==========
+//
+// `merlin::Transcript` 要求 label 为 `&'static [u8]`，而我们对外暴露的
+// `CryptoTranscript` trait 接受 `&[u8]`。直接 `Box::leak` 会在每次调用时
+// 泄漏内存（长跑服务下持续增长）。这里用一个全局缓存把每个唯一的 label
+// 只 leak 一次，后续相同 label 复用同一份 `&'static [u8]`。
+lazy_static::lazy_static! {
+    static ref LABEL_CACHE: Mutex<HashMap<Vec<u8>, &'static [u8]>> = Mutex::new(HashMap::new());
+}
+
+/// 将任意 `&[u8]` label 转为 `&'static [u8]`，相同内容只 leak 一次。
+fn intern_label(label: &[u8]) -> &'static [u8] {
+    let mut cache = LABEL_CACHE.lock().expect("LABEL_CACHE poisoned");
+    if let Some(static_label) = cache.get(label) {
+        return *static_label;
+    }
+    let static_label: &'static [u8] = Box::leak(label.to_vec().into_boxed_slice());
+    cache.insert(label.to_vec(), static_label);
+    static_label
+}
 
 // ========== CryptoTranscript trait ==========
 
@@ -75,38 +98,39 @@ impl std::fmt::Debug for MerlinTranscript {
 
 impl CryptoTranscript for MerlinTranscript {
     fn new(protocol_name: &[u8]) -> Self {
-        // merlin::Transcript::new 要求 &'static [u8]，这里通过 leak 转换。
-        // MerlinTranscript 仅用于测试，内存泄漏可接受。
-        let static_name: &'static [u8] = Box::leak(protocol_name.to_vec().into_boxed_slice());
+        // merlin::Transcript::new 要求 &'static [u8]；通过 intern_label 复用，
+        // 相同 protocol_name 只 leak 一次，避免长跑服务内存持续增长。
+        let static_name: &'static [u8] = intern_label(protocol_name);
         MerlinTranscript {
             inner: merlin::Transcript::new(static_name),
         }
     }
 
     fn append_message(&mut self, label: &[u8], message: &[u8]) {
-        // merlin::Transcript::append_message 要求 &'static [u8] label，通过 leak 转换。
-        let static_label: &'static [u8] = Box::leak(label.to_vec().into_boxed_slice());
+        // merlin::Transcript::append_message 要求 &'static [u8] label；
+        // 通过 intern_label 复用，相同 label 只 leak 一次。
+        let static_label: &'static [u8] = intern_label(label);
         self.inner.append_message(static_label, message);
     }
 
     fn challenge_bytes(&mut self, label: &[u8], dest: &mut [u8]) {
-        let static_label: &'static [u8] = Box::leak(label.to_vec().into_boxed_slice());
+        let static_label: &'static [u8] = intern_label(label);
         self.inner.challenge_bytes(static_label, dest);
     }
 
     fn append_point<C: Curve>(&mut self, label: &[u8], point: &C::Point) {
-        let static_label: &'static [u8] = Box::leak(label.to_vec().into_boxed_slice());
+        let static_label: &'static [u8] = intern_label(label);
         self.inner.append_message(static_label, point.compress().as_ref());
     }
 
     fn append_scalar<C: Curve>(&mut self, label: &[u8], scalar: &C::Scalar) {
-        let static_label: &'static [u8] = Box::leak(label.to_vec().into_boxed_slice());
+        let static_label: &'static [u8] = intern_label(label);
         self.inner.append_message(static_label, &scalar.as_bytes());
     }
 
     fn challenge<C: Curve>(&mut self, label: &[u8]) -> Challenge<C> {
         let mut buf = [0u8; 64];
-        let static_label: &'static [u8] = Box::leak(label.to_vec().into_boxed_slice());
+        let static_label: &'static [u8] = intern_label(label);
         self.inner.challenge_bytes(static_label, &mut buf);
         let scalar = C::Scalar::from_bytes_mod_order_wide(&buf);
         Challenge { scalar }

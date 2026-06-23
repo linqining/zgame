@@ -17,3 +17,17 @@ const config: Config = {
 };
 
 export default config;
+
+// ========== 游戏相关命名常量 ==========
+// 1 chip = 100_000 MIST（1 SUI = 10^9 MIST，1 SUI = 10_000 chips → 1 chip = 10^5 MIST）
+export const MIST_PER_CHIP = 100_000n;
+// StandUp（离开牌桌）等待服务器响应的超时时间
+export const STAND_UP_TIMEOUT_MS = 60_000;
+// 进入 /play 后若 currentTable 一直为空，重试 join 的最大次数
+export const MAX_JOIN_RETRIES = 3;
+// 玩家操作（raise/call/fold/check/all-in）loading overlay 的超时兜底时间
+export const ACTION_LOADING_TIMEOUT_MS = 30_000;
+// join 重试之间的延迟
+export const JOIN_RETRY_DELAY_MS = 1500;
+// 踢出通知自动消失时间
+export const KICK_NOTIFICATION_DISMISS_MS = 5000;

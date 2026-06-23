@@ -168,10 +168,7 @@ pub async fn backfill_historical_events(
         origin_package_id
     );
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    let client = crate::sponsor::shared_http_client();
     let mut total_events = 0u64;
     let mut cursor: Option<String> = start_cursor;
     let mut last_cursor: Option<String> = None;
@@ -334,16 +331,7 @@ pub async fn poll_events_loop(config: Config, state: Arc<AppState>) {
     };
 
     let poll_interval = std::time::Duration::from_millis(config.sui_tick_interval_ms.max(2000));
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("[sui_graphql_poll] failed to build HTTP client for GraphQL polling: {}", e);
-            return;
-        }
-    };
+    let client = crate::sponsor::shared_http_client();
 
     // 从上次保存的 cursor 继续
     let mut cursor = load_last_cursor();
@@ -563,10 +551,7 @@ pub async fn backfill_from_checkpoint(
         origin_package_id
     );
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    let client = crate::sponsor::shared_http_client();
     let mut total_events = 0u64;
     let mut cursor: Option<String> = None;
 
@@ -722,10 +707,7 @@ async fn backfill_historical_events_fallback(
 
     let _package_id = &config.sui_package_id;
     let origin_package_id = &config.sui_origin_package_id;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    let client = crate::sponsor::shared_http_client();
 
     let mut total_events = 0u64;
     let mut cursor: Option<String> = None;

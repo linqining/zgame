@@ -11,6 +11,7 @@ import {
 } from '@mysten/sui/zklogin';
 import { Transaction } from '@mysten/sui/transactions';
 import { toB64, fromB64 } from './utils';
+import { logger } from '../helpers/logger';
 
 // zkLogin session state
 export interface ZkLoginSession {
@@ -154,10 +155,10 @@ export class ZkLoginSessionManager {
     }
 
     const url = `${providerConfig.authUrl}?${params}`;
-    console.log('[zkLogin] OAuth URL:', url);
-    console.log('[zkLogin] redirect_uri:', providerConfig.redirectUrl);
-    console.log('[zkLogin] client_id:', providerConfig.clientId);
-    console.log('[zkLogin] nonce:', nonce);
+    logger.log('[zkLogin] OAuth URL:', url);
+    logger.log('[zkLogin] redirect_uri:', providerConfig.redirectUrl);
+    logger.log('[zkLogin] client_id:', providerConfig.clientId);
+    logger.log('[zkLogin] nonce:', nonce);
     return { url, nonce };
   }
 
@@ -205,7 +206,7 @@ export class ZkLoginSessionManager {
     const previousSub = localStorage.getItem('zklogin_last_sub');
     if (previousAddress && previousSub) {
       if (previousAddress !== address) {
-        console.warn(
+        logger.warn(
           '[zkLogin] Address changed across logins!',
           '\n  previous address:', previousAddress,
           '\n  previous sub:', previousSub,
@@ -217,7 +218,7 @@ export class ZkLoginSessionManager {
           '\nCoins deposited to the previous address will be inaccessible.',
         );
       } else {
-        console.log('[zkLogin] Address stable across logins:', address);
+        logger.log('[zkLogin] Address stable across logins:', address);
       }
     }
     localStorage.setItem('zklogin_last_address', address);
@@ -390,7 +391,7 @@ export class ZkLoginSessionManager {
       keyClaimName: params.keyClaimName,
     };
 
-    console.log('[zkLogin] Fetching ZK proof via backend proxy:', this.proverServiceUrl);
+    logger.log('[zkLogin] Fetching ZK proof via backend proxy:', this.proverServiceUrl);
 
     const response = await fetch(this.proverServiceUrl, {
       method: 'POST',
@@ -400,7 +401,7 @@ export class ZkLoginSessionManager {
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');
-      console.error('[zkLogin] Prover error:', response.status, errorText);
+      logger.error('[zkLogin] Prover error:', response.status, errorText);
       throw new Error(`Failed to fetch ZK proof: ${response.statusText} ${errorText}`);
     }
 
@@ -443,7 +444,7 @@ export class ZkLoginSessionManager {
         decodedJwt: serialized.decodedJwt,
       };
     } catch (e) {
-      console.error('[ZkLoginSession] Failed to load session:', e);
+      logger.error('[ZkLoginSession] Failed to load session:', e);
       localStorage.removeItem(SESSION_STORAGE_KEY);
     }
   }

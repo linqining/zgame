@@ -3,6 +3,7 @@ import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { getZkLoginSessionManager } from './zkLoginSession';
 import { fromB64, toB64 } from './utils';
 import httpClient from '../helpers/httpClient';
+import { logger } from '../helpers/logger';
 
 // Sponsored transaction flow (Shinami Gas Station):
 // 1. Frontend builds a gasless transaction (TransactionKind + sender, no gas info)
@@ -150,11 +151,13 @@ export class SponsoredTransactionService {
    *
    * @param txKindB64 base64 编码的 BCS 序列化 TransactionKind 字节
    * @param verbose 是否输出详细诊断日志（zkLogin 地址验证等）
+   * @param gasBudget 可选 gas budget（MIST），用于需要更高 gas 的交易（如最后一次 reveal）
    * @returns 交易结果
    */
   private async _buildSignSubmitWithRetry(
     txKindB64: string,
     verbose: boolean = false,
+    gasBudget?: number,
   ): Promise<SponsoredTransactionResult> {
     const zkLoginManager = getZkLoginSessionManager();
     const session = zkLoginManager.getSession();
@@ -170,6 +173,7 @@ export class SponsoredTransactionService {
       const sponsorResponse = await this.requestSponsorSignature({
         tx_kind: txKindB64,
         sender: session.address,
+        gas_budget: gasBudget,
       });
 
       if (!sponsorResponse.signature || !sponsorResponse.tx_bytes) {
@@ -206,7 +210,7 @@ export class SponsoredTransactionService {
           session.decodedJwt.iss,
           false,
         );
-        console.log('[SigningRequest] zkLogin diagnostic:', {
+        logger.log('[SigningRequest] zkLogin diagnostic:', {
           sessionAddress: session.address,
           computedAddressFromSeed: computedAddress,
           addressMatch: session.address === computedAddress,
@@ -233,11 +237,11 @@ export class SponsoredTransactionService {
             intentScope: 'TransactionData',
             address: session.address,
           });
-          console.log('[SigningRequest] zkLogin signature verify result:', verifyResult);
+          logger.log('[SigningRequest] zkLogin signature verify result:', verifyResult);
           if (!verifyResult.success) {
             const errs = verifyResult.errors || [];
             if (errs.some((e) => e.includes('Groth16') || e.includes('proof'))) {
-              console.warn('[SigningRequest] ZK proof invalid (pre-verify), clearing session. Please re-login.');
+              logger.warn('[SigningRequest] ZK proof invalid (pre-verify), clearing session. Please re-login.');
               zkLoginManager.clearSession();
               return {
                 digest: '',
@@ -245,16 +249,16 @@ export class SponsoredTransactionService {
                 error: 'zkLogin session invalid (ZK proof rejected). Please re-login.',
               };
             }
-            console.error('[SigningRequest] zkLogin signature verification FAILED:', errs);
+            logger.error('[SigningRequest] zkLogin signature verification FAILED:', errs);
           }
         } catch (verifyErr) {
-          console.error('[SigningRequest] zkLogin signature verify call threw:', verifyErr);
+          logger.error('[SigningRequest] zkLogin signature verify call threw:', verifyErr);
         }
       }
 
       // Step 3: Submit dual-signed transaction
       if (verbose) {
-        console.log('[SigningRequest] Submitting tx with signatures:', {
+        logger.log('[SigningRequest] Submitting tx with signatures:', {
           zkLoginSigLength: zkLoginSignature.length,
           sponsorSigLength: sponsorResponse.signature.length,
           txBytesLength: txBytes.length,
@@ -276,7 +280,7 @@ export class SponsoredTransactionService {
           const failedTx = result.FailedTransaction!;
           const failedMsg = failedTx.effects?.status?.error?.message || 'Transaction failed';
           if (isZkLoginProofError(failedMsg)) {
-            console.warn('[SigningRequest] ZK proof invalid (FailedTransaction), clearing session. Please re-login.');
+            logger.warn('[SigningRequest] ZK proof invalid (FailedTransaction), clearing session. Please re-login.');
             zkLoginManager.clearSession();
             return {
               digest: failedTx.digest ?? '',
@@ -297,7 +301,7 @@ export class SponsoredTransactionService {
 
         // If the zkLogin proof failed on-chain, the session is irrecoverably invalid.
         if (!success && errorMsg && isZkLoginProofError(errorMsg)) {
-          console.warn('[SigningRequest] ZK proof invalid, clearing session. Please re-login.');
+          logger.warn('[SigningRequest] ZK proof invalid, clearing session. Please re-login.');
           zkLoginManager.clearSession();
           return {
             digest: tx.digest ?? '',
@@ -316,7 +320,7 @@ export class SponsoredTransactionService {
 
         // Groth16 errors are not retryable — session is invalid
         if (isZkLoginProofError(msg)) {
-          console.warn('[SigningRequest] ZK proof invalid (catch), clearing session. Please re-login.');
+          logger.warn('[SigningRequest] ZK proof invalid (catch), clearing session. Please re-login.');
           zkLoginManager.clearSession();
           return { digest: '', success: false, error: 'zkLogin session invalid (ZK proof rejected). Please re-login.' };
         }
@@ -326,7 +330,7 @@ export class SponsoredTransactionService {
         // Retryable: stale gas coin ("Could not find the referenced object") or timeout.
         // Re-request sponsorship on the next attempt — Shinami will select fresh gas coins.
         if (isRetryableError(msg) && attempt < MAX_GAS_RETRY_ATTEMPTS) {
-          console.warn(
+          logger.warn(
             `[SponsoredTx] Attempt ${attempt}/${MAX_GAS_RETRY_ATTEMPTS} failed (retryable), ` +
             `re-requesting sponsorship: ${msg}`,
           );
@@ -335,7 +339,7 @@ export class SponsoredTransactionService {
           continue;
         }
 
-        console.error('[SponsoredTx] Failed:', msg);
+        logger.error('[SponsoredTx] Failed:', msg);
         return { digest: '', success: false, error: msg };
       }
     }
@@ -371,7 +375,7 @@ export class SponsoredTransactionService {
       return this._buildSignSubmitWithRetry(txKindB64);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[SponsoredAction] Failed:', msg);
+      logger.error('[SponsoredAction] Failed:', msg);
       if (isZkLoginProofError(msg)) {
         zkLoginManager.clearSession();
         return { digest: '', success: false, error: 'zkLogin session invalid (ZK proof rejected). Please re-login.' };
@@ -386,9 +390,13 @@ export class SponsoredTransactionService {
    * 使用 Shinami Gas Station 进行 gas 赞助，在 gas coin 过期时自动重试。
    *
    * @param txKindB64 base64 编码的 BCS 序列化 TransactionKind 字节
+   * @param gasBudget 可选 gas budget（MIST），用于需要更高 gas 的交易（如最后一次 reveal 触发 settle_hand）
    * @returns 交易结果
    */
-  async executeFromSigningRequest(txKindB64: string): Promise<SponsoredTransactionResult> {
+  async executeFromSigningRequest(
+    txKindB64: string,
+    gasBudget?: number,
+  ): Promise<SponsoredTransactionResult> {
     const zkLoginManager = getZkLoginSessionManager();
     const session = zkLoginManager.getSession();
 
@@ -402,10 +410,10 @@ export class SponsoredTransactionService {
       await zkLoginManager.ensureSessionValid();
 
       // Build, sign, and submit with automatic retry on stale gas coins
-      return this._buildSignSubmitWithRetry(txKindB64, true);
+      return this._buildSignSubmitWithRetry(txKindB64, true, gasBudget);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[SigningRequest] Failed:', msg);
+      logger.error('[SigningRequest] Failed:', msg);
       if (isZkLoginProofError(msg)) {
         zkLoginManager.clearSession();
         return { digest: '', success: false, error: 'zkLogin session invalid (ZK proof rejected). Please re-login.' };
@@ -444,7 +452,7 @@ export class SponsoredTransactionService {
       return this._buildSignSubmitWithRetry(txKind);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[SponsoredTx] Failed:', msg);
+      logger.error('[SponsoredTx] Failed:', msg);
       if (isZkLoginProofError(msg)) {
         zkLoginManager.clearSession();
         return { digest: '', success: false, error: 'zkLogin session invalid (ZK proof rejected). Please re-login.' };

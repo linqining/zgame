@@ -94,16 +94,10 @@ public fun verify(
     let c = bls_transcript::challenge(&mut t, &b"challenge");
 
     // 7. 验证第一组 DLEq: G * s == T1 + pk * c
-    let lhs1 = bls12381::g1_mul(&s, &bls12381::g1_generator());
-    let pk_c = bls12381::g1_mul(&c, expected_pk);
-    let rhs1 = bls12381::g1_add(&t1, &pk_c);
-    if (!bls_scalar::g1_equal(&lhs1, &rhs1)) {
+    if (!bls_scalar::verify_dleq(&bls12381::g1_generator(), expected_pk, &t1, &s, &c)) {
         return false
     };
 
     // 8. 验证第二组 DLEq: c1 * s == T2 + reveal_token * c
-    let lhs2 = bls12381::g1_mul(&s, bls_elgamal::c1(encrypted_card));
-    let token_c = bls12381::g1_mul(&c, reveal_token);
-    let rhs2 = bls12381::g1_add(&t2, &token_c);
-    bls_scalar::g1_equal(&lhs2, &rhs2)
+    bls_scalar::verify_dleq(bls_elgamal::c1(encrypted_card), reveal_token, &t2, &s, &c)
 }

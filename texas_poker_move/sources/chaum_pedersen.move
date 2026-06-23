@@ -81,16 +81,10 @@ public fun verify(
     let c = bls_transcript::challenge(t, &b"cp_challenge");
 
     // 5. 验证第一组 DLEq: g1 * s == comm_a + p1 * c
-    let lhs1 = bls12381::g1_mul(&s, g1);
-    let p1_c = bls12381::g1_mul(&c, p1);
-    let rhs1 = bls12381::g1_add(&comm_a, &p1_c);
-    if (!bls_scalar::g1_equal(&lhs1, &rhs1)) {
+    if (!bls_scalar::verify_dleq(g1, p1, &comm_a, &s, &c)) {
         return false
     };
 
     // 6. 验证第二组 DLEq: g2 * s == comm_b + p2 * c
-    let lhs2 = bls12381::g1_mul(&s, g2);
-    let p2_c = bls12381::g1_mul(&c, p2);
-    let rhs2 = bls12381::g1_add(&comm_b, &p2_c);
-    bls_scalar::g1_equal(&lhs2, &rhs2)
+    bls_scalar::verify_dleq(g2, p2, &comm_b, &s, &c)
 }

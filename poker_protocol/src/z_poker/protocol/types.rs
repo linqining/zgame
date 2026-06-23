@@ -2,7 +2,7 @@ use crate::crypto::{
     ElGamalCiphertext, EcPoint, PublicKey,
     DefaultCurve,
 };
-use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use crate::zk_shuffle::reveal_token_proof::{RevealTokenProof, REVEAL_TOKEN_PROOF_LABEL};
 use crate::zk_shuffle::reconstruction::ReconstructProof;
 use crate::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 use crate::z_poker::card::PlayingCard;
@@ -71,7 +71,7 @@ pub struct RevealToken {
 
 impl RevealToken {
     pub(crate) fn is_ok(&self) -> bool {
-        let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
+        let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         self.proof.verify(&self.encrypted_card, &self.reveal_token, &self.user_public_key, &mut transcript).is_ok()
     }
 }

@@ -24,6 +24,8 @@ import { JoinAndShuffleResult, TableUpdatedPayload, wrapCryptoOp } from './gameI
 import { defaultClient } from '../../sui/config';
 import { submitLeave } from '../../sui/suiGameActions';
 import authContext from '../../context/auth/authContext';
+import { logger } from '../../helpers/logger';
+import { MIST_PER_CHIP, STAND_UP_TIMEOUT_MS } from '../../clientConfig';
 
 export interface UseGameActionsParams {
   socket: Socket | null;
@@ -75,23 +77,23 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
    */
   const findSuiCoinForBuyin = async (chipsAmount: number): Promise<string | null> => {
     if (!walletAddress) return null;
-    const requiredMist = BigInt(chipsAmount) * 100_000n; // MIST_PER_CHIP
+    const requiredMist = BigInt(chipsAmount) * MIST_PER_CHIP; // MIST_PER_CHIP
     try {
       const resp = await defaultClient.listCoins({ owner: walletAddress, limit: 50 });
       // 找到余额足够的单个 coin
       const coin = resp.objects.find(c => BigInt(c.balance) >= requiredMist);
       if (coin) return coin.objectId;
       // 如果没有单个 coin 足够，可能需要合并 — 暂不支持，返回 null
-      console.warn('[findSuiCoinForBuyin] no single coin has enough balance, required MIST:', requiredMist.toString());
+      logger.warn('[findSuiCoinForBuyin] no single coin has enough balance, required MIST:', requiredMist.toString());
       return null;
     } catch (err) {
-      console.error('[findSuiCoinForBuyin] listCoins failed:', err);
+      logger.error('[findSuiCoinForBuyin] listCoins failed:', err);
       return null;
     }
   };
 
   const joinTable = (tableId: number, pkHex: string) => {
-    console.log(JOIN_TABLE, { tableId, pkHex });
+    logger.log(JOIN_TABLE, { tableId, pkHex });
     socket?.emit(JOIN_TABLE, { tableId, pkHex });
   };
 
@@ -99,13 +101,13 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     if (isPlayerSeated) {
       if (fireAndForget) {
         // 页面卸载/组件卸载场景：无法等待异步签名流程，直接触发
-        standUp().catch(e => console.error('[leaveTable] standUp failed (fire-and-forget):', e));
+        standUp().catch(e => logger.error('[leaveTable] standUp failed (fire-and-forget):', e));
       } else {
         try {
           await standUp();
         } catch (e) {
           const err = e as Error;
-          console.error('[leaveTable] standUp failed:', e);
+          logger.error('[leaveTable] standUp failed:', e);
           addMessage(`Failed to leave table: ${err.message || e}`);
           return;
         }
@@ -121,33 +123,33 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
   const sitDown = async (tableId: string, seatId: number, amount: number) => {
     const keys = playerKeys || getPlayerKeys();
     if (!keys) {
-      console.error('[SitDown] No player keys available');
+      logger.error('[SitDown] No player keys available');
       addMessage('Cannot sit down: no player keys');
       return;
     }
     if (!pkHex) {
-      console.error('[SitDown] No pkHex available');
+      logger.error('[SitDown] No pkHex available');
       addMessage('Cannot sit down: no public key');
       return;
     }
 
     const table = currentTableRef.current;
     if (!table) {
-      console.error('[SitDown] No current table');
+      logger.error('[SitDown] No current table');
       addMessage('Cannot sit down: no table data');
       return;
     }
 
     const deckEncrypted = table.shuffleState?.deck_encrypted || table.deck?.cards;
     if (!deckEncrypted || deckEncrypted.length === 0) {
-      console.error('[SitDown] No deck_encrypted available');
+      logger.error('[SitDown] No deck_encrypted available');
       addMessage('Cannot sit down: no encrypted deck');
       return;
     }
     try {
       const token = getToken();
       if (!token) {
-        console.error('[SitDown] No auth token available');
+        logger.error('[SitDown] No auth token available');
         addMessage('Cannot sit down: please connect your wallet first');
         return;
       }
@@ -155,11 +157,11 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
       // 查找买入用的 SUI Coin 对象（合约已改为接收 Coin<SUI>）
       const coinObjectId = await findSuiCoinForBuyin(amount);
       if (!coinObjectId) {
-        console.error('[SitDown] No suitable SUI coin found for buy-in');
+        logger.error('[SitDown] No suitable SUI coin found for buy-in');
         addMessage('Cannot sit down: no SUI coin with enough balance. Try merging coins or requesting faucet SUI.');
         return;
       }
-      console.log('[SitDown] using coin object:', coinObjectId, 'for buy-in amount:', amount);
+      logger.log('[SitDown] using coin object:', coinObjectId, 'for buy-in amount:', amount);
 
       const pkHexes = (Object.values(table.seats) || [])
         .filter((p: Seat) => p.player && p.player.pkHex && p.player.pkHex !== pkHex).map((p: Seat) => p.player!.pkHex);
@@ -167,7 +169,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
       const aggPkHex = compute_aggregate_key(pkHexesJson);
 
       const deckEncryptedJson = JSON.stringify(deckEncrypted);
-      console.log('SIT_DOWN_V2', tableId, seatId, amount, pkHex, aggPkHex);
+      logger.log('SIT_DOWN_V2', tableId, seatId, amount, pkHex, aggPkHex);
       const joinResultRaw = wrapCryptoOp(() => {
         const result = keys.join_game_and_shuffle(deckEncryptedJson, aggPkHex);
         if (!result) throw new Error('join_game_and_shuffle returned null');
@@ -182,12 +184,12 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
         shuffle_proof: joinResult.mask_and_shuffle_round.shuffle_proof,
       };
       const pkProof = joinResult.pk_ownership_proof;
-      console.log('SIT_DOWN_V2', tableId, seatId, amount, pkHex, pkProof, maskAndShuffleRound, keys.get_pk_hex(), getToken());
+      logger.log('SIT_DOWN_V2', tableId, seatId, amount, pkHex, pkProof, maskAndShuffleRound, keys.get_pk_hex(), getToken());
       socket?.emit(SIT_DOWN_V2, { token, tableId, seatId, amount, pkHex, pkProof, maskAndShuffleRound, coinObjectId });
       addMessage('Joined table and shuffled successfully');
     } catch (e) {
       const err = e as Error;
-      console.error('[SitDown] join_and_shuffle failed:', e);
+      logger.error('[SitDown] join_and_shuffle failed:', e);
       addMessage(`Sit down failed: ${err.message || e}`);
     }
   };
@@ -202,7 +204,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
 
     const keys = playerKeys || getPlayerKeys();
     if (!keys) {
-      console.error('[StandUp] No player keys available');
+      logger.error('[StandUp] No player keys available');
       return;
     }
 
@@ -220,23 +222,23 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
     if (table.suiTableId && seatId != null) {
       if (!hasShuffled) {
         // 未洗牌玩家直接走 leave_table，无需生成 leave proof
-        console.log('[StandUp] on-chain mode: submitting leave_table (player has not shuffled)');
+        logger.log('[StandUp] on-chain mode: submitting leave_table (player has not shuffled)');
         const result = await submitLeave(table.suiTableId, seatId, '', '', false);
         if (!result.success) {
           throw new Error(result.error || 'On-chain leave_table tx failed');
         }
-        console.log('[StandUp] On-chain leave_table tx executed:', result.digest);
+        logger.log('[StandUp] On-chain leave_table tx executed:', result.digest);
         socket?.emit(STAND_UP, { tableId: table.id, pkHex, leaveRound: null });
         return;
       }
 
       // 已洗牌玩家：需要 deck_encrypted 来生成 leave proof
       if (!deckEncrypted || deckEncrypted.length === 0) {
-        console.warn('[StandUp] hasShuffled=true but no deck_encrypted, cannot generate leave proof');
+        logger.warn('[StandUp] hasShuffled=true but no deck_encrypted, cannot generate leave proof');
         throw new Error('Cannot generate leave proof: deck_encrypted is empty');
       }
 
-      console.log('[StandUp] on-chain mode: submitting leave_with_proof_verified');
+      logger.log('[StandUp] on-chain mode: submitting leave_with_proof_verified');
       let outputCardsJson: string;
       let leaveProofJson: string;
       try {
@@ -250,7 +252,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
         outputCardsJson = JSON.stringify(leaveResult.output_cards);
         leaveProofJson = JSON.stringify(leaveResult.leave_proof);
       } catch (e) {
-        console.error('[StandUp] leave_game failed:', e);
+        logger.error('[StandUp] leave_game failed:', e);
         throw e;
       }
 
@@ -258,14 +260,14 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
       if (!result.success) {
         throw new Error(result.error || 'On-chain leave_with_proof_verified tx failed');
       }
-      console.log('[StandUp] On-chain leave_with_proof_verified tx executed:', result.digest);
+      logger.log('[StandUp] On-chain leave_with_proof_verified tx executed:', result.digest);
       socket?.emit(STAND_UP, { tableId: table.id, pkHex, leaveRound: null });
       return;
     }
 
     // 离链模式：通过 socket 提交 leave 证明，等待后端验证并广播 TABLE_UPDATED
     if (!deckEncrypted || deckEncrypted.length === 0) {
-      console.warn('[StandUp] No deck_encrypted, falling back to simple stand up');
+      logger.warn('[StandUp] No deck_encrypted, falling back to simple stand up');
       return;
     }
 
@@ -285,12 +287,11 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
       leaveProofJson = JSON.stringify(leaveResult.leave_proof);
     } catch (e) {
       const err = e as Error;
-      console.error('[StandUp] leave_game failed:', e);
+      logger.error('[StandUp] leave_game failed:', e);
       throw err;
     }
 
     await new Promise<void>((resolve, reject) => {
-      const STAND_UP_TIMEOUT_MS = 60_000;
       let settled = false;
 
       const cleanup = () => {
@@ -303,7 +304,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
         if (settled) return;
         settled = true;
         cleanup();
-        console.warn('[StandUp] Timed out waiting for server response');
+        logger.warn('[StandUp] Timed out waiting for server response');
         reject(new Error('Stand up timed out waiting for server response'));
       }, STAND_UP_TIMEOUT_MS);
 
@@ -320,7 +321,7 @@ export const useGameActions = (params: UseGameActionsParams): UseGameActionsRetu
           if (settled) return;
           settled = true;
           cleanup();
-          console.log('[StandUp] Off-chain leave confirmed via TABLE_UPDATED');
+          logger.log('[StandUp] Off-chain leave confirmed via TABLE_UPDATED');
           resolve();
         }
       };

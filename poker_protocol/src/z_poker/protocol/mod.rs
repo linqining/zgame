@@ -22,7 +22,7 @@ pub use game::new_plain_text;
 mod tests {
     use super::*;
     use crate::crypto::{BASE_G, Scalar, EcPoint, ElGamalCiphertext, DefaultCurve, N_CARDS};
-    use crate::zk_shuffle::reveal_token_proof::{RevealTokenAndProof, ExpelHandState};
+    use crate::zk_shuffle::reveal_token_proof::{RevealTokenAndProof, ExpelHandState, REVEAL_TOKEN_PROOF_LABEL};
     use crate::zk_shuffle::reveal_token_proof::RevealTokenProof;
     use crate::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript, MerlinTranscript};
     use crate::crypto::curve::{Curve, CurveScalar, CurvePoint};
@@ -43,7 +43,7 @@ mod tests {
             let encrypted_card = ElGamalCiphertext::encrypt(&pt, agg_pk, &r);
 
             let reveal_token = encrypted_card.gen_reveal_token(&player.sk);
-            let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
+            let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
             let proof = RevealTokenProof::<DefaultCurve>::prove(&player.sk, &player.pk, &encrypted_card, &reveal_token, &mut OsRng, &mut transcript);
 
             let token_and_proof = RevealTokenAndProof::<DefaultCurve> {
@@ -68,10 +68,10 @@ mod tests {
         let encrypted_card = ElGamalCiphertext::encrypt(&pt, &agg_pk, &r);
 
         let reveal_token = encrypted_card.gen_reveal_token(&player.sk);
-        let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
+        let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         let proof = RevealTokenProof::<DefaultCurve>::prove(&player.sk, &player.pk, &encrypted_card, &reveal_token, &mut OsRng, &mut transcript);
 
-        let mut transcript = MerlinTranscript::new(b"reveal_token_proof_v3");
+        let mut transcript = MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL);
         let verify_result = proof.verify(&encrypted_card, &reveal_token, &player.pk, &mut transcript);
         assert!(verify_result.is_ok(), "Proof should verify: {:?}", verify_result);
 

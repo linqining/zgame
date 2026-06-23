@@ -14,6 +14,7 @@ import {
 import { useCryptoOperations } from './useCryptoOperations';
 import { useGameActions } from './useGameActions';
 import { useGameSocket } from './useGameSocket';
+import { logger } from '../../helpers/logger';
 
 const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const navigate = useNavigate();
@@ -57,7 +58,7 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
   const displayTable = useMemo(() => {
     if (!currentTable || decryptedHandCards.length === 0 || seatId === null) {
-      console.log('[displayTable] Skipping hand injection:', {
+      logger.log('[displayTable] Skipping hand injection:', {
         hasTable: !!currentTable,
         decryptedCount: decryptedHandCards.length,
         seatId,
@@ -66,14 +67,14 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     }
     const seat = currentTable.seats[seatId];
     if (!seat) {
-      console.log('[displayTable] Seat not found for seatId:', seatId, 'available keys:', Object.keys(currentTable.seats));
+      logger.log('[displayTable] Seat not found for seatId:', seatId, 'available keys:', Object.keys(currentTable.seats));
       return currentTable;
     }
     const handCards: Card[] = decryptedHandCards.map((cardStr) => ({
       suit: cardStr.slice(0, 1),
       rank: cardStr.slice(1),
     }));
-    console.log('[displayTable] Injecting decrypted hand cards:', handCards, 'for seatId:', seatId);
+    logger.log('[displayTable] Injecting decrypted hand cards:', handCards, 'for seatId:', seatId);
     return {
       ...currentTable,
       seats: {
@@ -98,7 +99,7 @@ const GameState: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
   const addMessage = useCallback((message: string) => {
     setMessages((prevMessages) => [...prevMessages, { text: message, timestamp: Date.now() }]);
-    console.log(message);
+    logger.log(message);
   }, []);
 
   const clearKickNotification = useCallback(() => {

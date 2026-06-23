@@ -1,5 +1,6 @@
 import { GameState } from './secretPokerClient'
 import { CryptoEvent } from '../types/game'
+import { logger } from '../helpers/logger'
 
 // WS 消息联合类型：GameState（无顶层 type 字段）或 CryptoEvent（type === 'crypto_event'）
 export type CryptoMessage = GameState | CryptoEvent
@@ -50,7 +51,7 @@ export class GameWsClient {
     this.ws = new WebSocket(url)
 
     this.ws.onopen = () => {
-      console.log(`[WS] Connected to game ${gameId}`)
+      logger.log(`[WS] Connected to game ${gameId}`)
     }
 
     this.ws.onmessage = (event) => {
@@ -62,7 +63,7 @@ export class GameWsClient {
             this.onCryptoEvent(parsed)
           } else {
             // 未注册 crypto handler 时仅打印日志，保持向后兼容
-            console.log('[WS] Crypto event (no handler):', parsed)
+            logger.log('[WS] Crypto event (no handler):', parsed)
           }
         } else {
           // 默认当作 GameState 处理
@@ -71,7 +72,7 @@ export class GameWsClient {
           }
         }
       } catch (e) {
-        console.error(`[WS] Failed to parse message:`, e)
+        logger.error(`[WS] Failed to parse message:`, e)
       }
     }
 

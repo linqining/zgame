@@ -24,6 +24,8 @@ use sui_sdk_types::{
     TransactionKind,
 };
 
+use crate::relayer::util::{bcs_encode, parse_address, sui_jsonrpc};
+
 // ============================================================================
 // 常量
 // ============================================================================
@@ -148,40 +150,8 @@ fn serialize_remask_proof(
 }
 
 // ============================================================================
-// Sui JSON-RPC 辅助函数
+// Sui JSON-RPC 辅助函数（使用 crate::relayer::util::sui_jsonrpc）
 // ============================================================================
-
-async fn sui_jsonrpc(
-    client: &reqwest::Client,
-    method: &str,
-    params: Vec<serde_json::Value>,
-) -> Result<serde_json::Value, String> {
-    let resp = client
-        .post(TESTNET_RPC)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-    let result: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-    if let Some(error) = result.get("error") {
-        return Err(format!("JSON-RPC error: {}", error));
-    }
-
-    result
-        .get("result")
-        .cloned()
-        .ok_or_else(|| "Missing result in JSON-RPC response".to_string())
-}
 
 /// 从 JSON 数组中提取 Vec<u8>
 fn json_array_to_bytes(arr: &[serde_json::Value]) -> Vec<u8> {
@@ -278,10 +248,6 @@ fn parse_private_key(key_str: &str) -> Result<Ed25519PrivateKey, String> {
 // PTB 构建
 // ============================================================================
 
-fn bcs_encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {
-    bcs::to_bytes(value).map_err(|e| format!("BCS serialization failed: {}", e))
-}
-
 /// 构建 join_and_shuffle PTB（使用真实的 initial_shared_version）
 fn build_join_and_shuffle_ptb(
     package_id: &str,
@@ -296,12 +262,8 @@ fn build_join_and_shuffle_ptb(
     remask_proof_bytes: Vec<u8>,
     shuffle_proof_bytes: Vec<u8>,
 ) -> Result<ProgrammableTransaction, String> {
-    let table_addr: Address = table_id
-        .parse()
-        .map_err(|e| format!("invalid table_id '{}': {}", table_id, e))?;
-    let package: Address = package_id
-        .parse()
-        .map_err(|e| format!("invalid package_id '{}': {}", package_id, e))?;
+    let table_addr = parse_address(table_id)?;
+    let package = parse_address(package_id)?;
 
     let inputs = vec![
         // Input(0): &mut Table (shared, mutable, with real initial_shared_version)
@@ -357,6 +319,7 @@ async fn fetch_gas_coin(
 ) -> Result<GasCoinInfo, String> {
     let coins_resp = sui_jsonrpc(
         http,
+        TESTNET_RPC,
         "suix_getCoins",
         vec![serde_json::to_value(sender).map_err(|e| format!("{}", e))?],
     )
@@ -407,7 +370,7 @@ async fn fetch_gas_coin(
 
 /// 获取参考 gas price
 async fn fetch_reference_gas_price(http: &reqwest::Client) -> Result<u64, String> {
-    let resp = sui_jsonrpc(http, "suix_getReferenceGasPrice", vec![]).await?;
+    let resp = sui_jsonrpc(http, TESTNET_RPC, "suix_getReferenceGasPrice", vec![]).await?;
     resp.as_str()
         .and_then(|s| s.parse::<u64>().ok())
         .or_else(|| resp.as_u64())
@@ -422,6 +385,7 @@ async fn execute_tx(
 ) -> Result<serde_json::Value, String> {
     let result = sui_jsonrpc(
         http,
+        TESTNET_RPC,
         "sui_executeTransactionBlock",
         vec![
             serde_json::Value::String(tx_bytes_b64.to_string()),
@@ -476,6 +440,7 @@ async fn test_join_and_shuffle_on_testnet() {
     println!("Fetching table {} from testnet...", TABLE_ID);
     let table_data = sui_jsonrpc(
         &http,
+        TESTNET_RPC,
         "sui_getObject",
         vec![
             serde_json::Value::String(TABLE_ID.to_string()),
@@ -638,6 +603,7 @@ async fn test_join_and_shuffle_on_testnet() {
     println!("Dry-running transaction to validate...");
     let dry_run_result = sui_jsonrpc(
         &http,
+        TESTNET_RPC,
         "sui_dryRunTransactionBlock",
         vec![serde_json::Value::String(tx_bytes_b64.clone())],
     )

@@ -113,21 +113,8 @@ public fun verify(
     // 5. 构建 challenge：追加到 transcript
     bls_transcript::append_point(t, &b"leave_pk", player_pk);
 
-    i = 0;
-    while (i < n) {
-        let input_ct = vector::borrow(input_cts, i);
-        bls_transcript::append_point(t, &b"leave_input_c1", bls_elgamal::c1(input_ct));
-        bls_transcript::append_point(t, &b"leave_input_c2", bls_elgamal::c2(input_ct));
-        i = i + 1;
-    };
-
-    i = 0;
-    while (i < n) {
-        let output_ct = vector::borrow(output_cts, i);
-        bls_transcript::append_point(t, &b"leave_output_c1", bls_elgamal::c1(output_ct));
-        bls_transcript::append_point(t, &b"leave_output_c2", bls_elgamal::c2(output_ct));
-        i = i + 1;
-    };
+    bls_transcript::append_ciphertexts(t, &b"leave_input_c1", &b"leave_input_c2", input_cts);
+    bls_transcript::append_ciphertexts(t, &b"leave_output_c1", &b"leave_output_c2", output_cts);
 
     i = 0;
     while (i < n) {
@@ -138,12 +125,7 @@ public fun verify(
 
     bls_transcript::append_point(t, &b"leave_commitment_pk", &comm_pk);
 
-    i = 0;
-    while (i < n) {
-        let d2_ref = vector::borrow(&d2s, i);
-        bls_transcript::append_point(t, &b"leave_d2", d2_ref);
-        i = i + 1;
-    };
+    bls_transcript::append_points(t, &b"leave_d2", &d2s);
 
     bls_transcript::append_scalar(t, &b"leave_nonce", &nonce_scalar);
 
@@ -152,10 +134,7 @@ public fun verify(
 
     // 7. 验证 pk DLEq: G * s == commitment_pk + pk * c
     let g = bls12381::g1_generator();
-    let lhs_pk = bls12381::g1_mul(&s, &g);
-    let pk_c = bls12381::g1_mul(&c, player_pk);
-    let rhs_pk = bls12381::g1_add(&comm_pk, &pk_c);
-    if (!bls_scalar::g1_equal(&lhs_pk, &rhs_pk)) {
+    if (!bls_scalar::verify_dleq(&g, player_pk, &comm_pk, &s, &c)) {
         return false
     };
 
@@ -166,10 +145,7 @@ public fun verify(
         let comm_i = bls12381::g1_from_bytes(vector::borrow(&proof.per_card_commitments, i));
         let d2_i = vector::borrow(&d2s, i);
 
-        let lhs_i = bls12381::g1_mul(&s, bls_elgamal::c1(input_ct));
-        let d2_c = bls12381::g1_mul(&c, d2_i);
-        let rhs_i = bls12381::g1_add(&comm_i, &d2_c);
-        if (!bls_scalar::g1_equal(&lhs_i, &rhs_i)) {
+        if (!bls_scalar::verify_dleq(bls_elgamal::c1(input_ct), d2_i, &comm_i, &s, &c)) {
             return false
         };
         i = i + 1;

@@ -177,7 +177,9 @@ pub async fn fetch_jwk<'a>(iss: &'a str, kid: &'a str) -> Result<sui_sdk_types::
     // tracing::debug!("[fetch_jwk] fetching JWK from iss={}, kid={}, url={}", iss, kid, jwks_url);
 
     // Asynchronous HTTP request to fetch JWKS
-    let client = reqwest::Client::new();
+    // 复用全局共享 HTTP 客户端（连接池/TLS 上下文）；5s 超时通过 per-request
+    // `.timeout()` 覆盖共享客户端的 30s 默认值，行为与原先一致。
+    let client = crate::sponsor::shared_http_client();
     let response = client
         .get(&jwks_url)
         .timeout(std::time::Duration::from_secs(5))

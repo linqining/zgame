@@ -11,6 +11,7 @@ import {
 } from '../sui/zkLoginSession';
 import { getSponsoredTransactionService } from '../sui/sponsoredTx';
 import type { AuthMethod, ZkLoginState, SponsoredTxState } from '../types/sui';
+import { logger } from '../helpers/logger';
 
 interface UseAuthReturn {
   isLoggedIn: boolean;
@@ -177,7 +178,7 @@ const useAuth = (): UseAuthReturn => {
           // so disconnecting would also kill a native wallet the user is
           // actively trying to log in with. The zkLogin session itself is
           // cleared via manager.clearSession(), which is sufficient.
-          console.warn('[Auth] zkLogin session expired, clearing session');
+          logger.warn('[Auth] zkLogin session expired, clearing session');
           manager.clearSession();
           setAuthMethod(null);
           localStorage.removeItem('authMethod');
@@ -200,7 +201,7 @@ const useAuth = (): UseAuthReturn => {
 
   // zkLogin: Initiate OAuth flow
   const loginWithZkLogin = async (provider: string): Promise<void> => {
-    console.log('[Auth] loginWithZkLogin called, provider:', provider);
+    logger.log('[Auth] loginWithZkLogin called, provider:', provider);
     setIsLoading(true);
     try {
       const providerConfig = ZKLOGIN_CONFIG[provider as keyof typeof ZKLOGIN_CONFIG];
@@ -233,7 +234,7 @@ const useAuth = (): UseAuthReturn => {
       // Redirect to OAuth provider
       window.location.href = url;
     } catch (error) {
-      console.error('zkLogin initiation failed:', error);
+      logger.error('zkLogin initiation failed:', error);
       setIsLoading(false);
     }
   };
@@ -263,7 +264,7 @@ const useAuth = (): UseAuthReturn => {
 
       setSponsoredTxState(prev => ({ ...prev, isAvailable: true }));
     } catch (error) {
-      console.error('zkLogin callback failed:', error);
+      logger.error('zkLogin callback failed:', error);
       setZkLoginState(prev => ({
         ...prev,
         isLoggedIn: false,
@@ -301,7 +302,7 @@ const useAuth = (): UseAuthReturn => {
         await loadUser(backendToken);
       }
     } catch (error) {
-      console.error('zkLogin backend auth failed:', error);
+      logger.error('zkLogin backend auth failed:', error);
     }
   };
 
@@ -327,7 +328,7 @@ const useAuth = (): UseAuthReturn => {
         localStorage.setItem('authMethod', 'wallet');
       }
     } catch (error) {
-      console.error('[Auth] Wallet authentication failed:', error);
+      logger.error('[Auth] Wallet authentication failed:', error);
     }
     setIsLoading(false);
   };
@@ -349,7 +350,7 @@ const useAuth = (): UseAuthReturn => {
       setSuiBalance(suiBalance ?? 0);
     } catch (error) {
       localStorage.removeItem('token');
-      console.error('loadUser failed:', error);
+      logger.error('loadUser failed:', error);
     }
   };
 
@@ -392,7 +393,7 @@ const useAuth = (): UseAuthReturn => {
     const token = getToken();
     if (token) {
       httpClient.post('/auth/wallet/logout', {}).catch((err) => {
-        console.error('wallet_logout backend call failed:', err);
+        logger.error('wallet_logout backend call failed:', err);
       });
     }
     setWalletAddress(null);

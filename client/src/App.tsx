@@ -7,6 +7,7 @@ import Routes from './components/routing/Routes';
 import { useContentContext } from './context/content/contentContext';
 import config from './clientConfig';
 import GoogleAnalytics from './components/analytics/GoogleAnalytics';
+import { logger } from './helpers/logger';
 
 const AppInner: React.FC = () => {
   const { isLoading } = useGlobalContext();
@@ -19,7 +20,7 @@ const AppInner: React.FC = () => {
   const isCallbackRoute = location.pathname === '/auth/callback';
   const showLoading = (isLoading || contentIsLoading) && !isCallbackRoute;
 
-  console.log('[App] render:', { isLoading, contentIsLoading, isCallbackRoute, showLoading, pathname: location.pathname });
+  logger.log('[App] render:', { isLoading, contentIsLoading, isCallbackRoute, showLoading, pathname: location.pathname });
 
   return (
     <>

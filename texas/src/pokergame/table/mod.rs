@@ -22,12 +22,7 @@ const MIN_START_NUM: u32 = 2;
 
 /// 当前时间的毫秒时间戳，对齐 Move 合约 Clock.timestamp_ms() 语义。
 /// 用于 summary.state 中的各类 *_at 时间戳字段的设置与比较。
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+pub use crate::relayer::util::now_ms;
 
 pub mod shuffle;
 pub mod reveal;

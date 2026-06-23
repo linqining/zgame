@@ -34,6 +34,7 @@ import {
   HandRevealReturn,
   ShuffleHandleResult,
 } from './gameInternal';
+import { logger } from '../../helpers/logger';
 
 export interface UseGameSocketParams {
   socket: Socket | null;
@@ -103,20 +104,20 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
 
     if (socket) {
       socket.on(TABLE_UPDATED, ({ table, message, from }: TableUpdatedPayload) => {
-        console.log(TABLE_UPDATED, table, message, from);
+        logger.log(TABLE_UPDATED, table, message, from);
         setCurrentTable(table);
-        console.log("table updated:", table);
+        logger.log("table updated:", table);
         message && addMessage(message);
       });
 
       socket.on(TABLE_JOINED, ({ table, message, from }: TableJoinedPayload) => {
-        console.log(TABLE_JOINED, table, message, from);
-        console.log("table joined:", table);
+        logger.log(TABLE_JOINED, table, message, from);
+        logger.log("table joined:", table);
         setCurrentTable(table);
       });
 
       socket.on(TABLE_LEFT, ({ tables, tableId, reason }: TableLeftPayload) => {
-        console.log(TABLE_LEFT, tables, tableId, reason);
+        logger.log(TABLE_LEFT, tables, tableId, reason);
         setCurrentTable(null);
         // loadUser(localStorage.token);
         setMessages([]);
@@ -132,14 +133,14 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
         setCommunityCards([]);
         const result = await handleShuffleNotice(data);
         if (result) {
-          console.log('SHUFFLE_NOTICE shuffle proof', result.shuffleResult.shuffle_proof);
+          logger.log('SHUFFLE_NOTICE shuffle proof', result.shuffleResult.shuffle_proof);
           socket.emit(SHUFFLE_SUBMIT, {
             table_id: result.tableId,
             pk_hex: result.pkHex,
             output_cards: result.shuffleResult.output_cards,
             shuffle_proof: result.shuffleResult.shuffle_proof,
           });
-          console.log(SHUFFLE_SUBMIT, result);
+          logger.log(SHUFFLE_SUBMIT, result);
           addMessage(`Shuffle submitted (${result.shuffleResult.output_cards.length} cards)`);
         }
       });
@@ -156,7 +157,7 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       });
 
       socket.on(RECONSTRUCT_RESULT, (data: { expelled?: boolean }) => {
-        console.log(RECONSTRUCT_RESULT, data);
+        logger.log(RECONSTRUCT_RESULT, data);
         if (data?.expelled) {
           addMessage('Player expelled by vote');
         } else {
@@ -181,7 +182,7 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       });
 
       socket.on(REDEAL_NOTICE, (data: RevealNoticeData) => {
-        console.log(REDEAL_NOTICE, data);
+        logger.log(REDEAL_NOTICE, data);
         handleRevealNotice(data);
       });
 
@@ -196,7 +197,7 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
 
       // ZK 密码学事件：收集最近 100 条，供主牌桌可视化面板消费
       socket.on(CRYPTO_EVENT, (data: CryptoEvent) => {
-        console.log(CRYPTO_EVENT, data);
+        logger.log(CRYPTO_EVENT, data);
         setCryptoEvents((prev) => {
           const next = [...prev, data];
           // 仅保留最近 100 条，避免无界增长
@@ -205,27 +206,27 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       });
 
       // 后端在 on-chain 模式下推送的签名请求：直接用 tx_kind_b64 走 sponsored 签名流程
-      socket.on(ACTION_SIGNING_REQUEST, (data: { action?: string; tx_kind_b64?: string }) => {
-        console.log(ACTION_SIGNING_REQUEST, data);
+      socket.on(ACTION_SIGNING_REQUEST, (data: { action?: string; tx_kind_b64?: string; gas_budget?: number }) => {
+        logger.log(ACTION_SIGNING_REQUEST, data);
         // leave_with_proof_verified 由 standUp() 直接处理（等待签名完成后才离开）
         if (data?.action === 'leave_with_proof_verified') {
           return;
         }
         if (!data?.tx_kind_b64) {
-          console.error('[ActionSigningRequest] Missing tx_kind_b64 in payload', data);
+          logger.error('[ActionSigningRequest] Missing tx_kind_b64 in payload', data);
           return;
         }
         getSponsoredTransactionService()
-          .executeFromSigningRequest(data.tx_kind_b64)
+          .executeFromSigningRequest(data.tx_kind_b64, data.gas_budget)
           .then((result) => {
             if (result.success) {
-              console.log('[ActionSigningRequest] Tx executed:', result.digest);
+              logger.log('[ActionSigningRequest] Tx executed:', result.digest);
             } else {
-              console.error('[ActionSigningRequest] Tx failed:', result.error);
+              logger.error('[ActionSigningRequest] Tx failed:', result.error);
             }
           })
           .catch((err) => {
-            console.error('[ActionSigningRequest] Execution error:', err);
+            logger.error('[ActionSigningRequest] Execution error:', err);
           });
       });
     }

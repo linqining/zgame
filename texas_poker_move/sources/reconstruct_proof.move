@@ -224,11 +224,7 @@ public fun verify(
 
     // ===== Step 2: Generate rho_i random scalars =====
     // 追加所有 cards 到 transcript
-    i = 0;
-    while (i < cards.length()) {
-        bls_transcript::append_point(t, &b"reconstruct_card", vector::borrow(cards, i));
-        i = i + 1;
-    };
+    bls_transcript::append_points(t, &b"reconstruct_card", cards);
     // 追加所有 output_cards c1
     i = 0;
     while (i < output_cards.length()) {
@@ -314,10 +310,7 @@ public fun verify(
 
     // 4.8 验证: sum_point_in_total * response == commitment + sum_point_out_total * c
     let blind_s = bls12381::scalar_from_bytes(&proof.blind_dleq_proof.response);
-    let blind_lhs = bls12381::g1_mul(&blind_s, &sum_point_in_total);
-    let blind_rhs_part2 = bls12381::g1_mul(&blind_c, &sum_point_out_total);
-    let blind_rhs = bls12381::g1_add(&blind_commitment, &blind_rhs_part2);
-    if (!bls_scalar::g1_equal(&blind_lhs, &blind_rhs)) {
+    if (!bls_scalar::verify_dleq(&sum_point_in_total, &sum_point_out_total, &blind_commitment, &blind_s, &blind_c)) {
         return false
     };
 

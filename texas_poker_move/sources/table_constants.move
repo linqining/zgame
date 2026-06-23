@@ -9,12 +9,14 @@ const MAX_PLAYERS: u64 = 9;
 const CARDS_PER_PLAYER: u64 = 2;
 const N_CARDS: u64 = 52;
 
+// ========== 哨兵值常量 ==========
+// 公共牌 / 未归属牌的 owner_seat_index 哨兵值（= MAX_U64）。
+const COMMUNITY_CARD_OWNER: u64 = 0xFFFFFFFFFFFFFFFF;
+
 // ========== Round State 常量 ==========
 const ROUND_WAITING: u8 = 0;
-// M-P3: 值 1 为保留值（ROUND_RESERVED），用于未来可能的中间状态扩展。
+// M-P3: 值 1 为保留值，用于未来可能的中间状态扩展。
 // 当前跳过 1 直接使用 2..6，保持 enum 语义稳定，避免破坏已发布数据。
-#[allow(unused_const)]
-const ROUND_RESERVED: u8 = 1; // Reserved for future use
 const ROUND_PREFLOP: u8 = 2;
 const ROUND_FLOP: u8 = 3;
 const ROUND_TURN: u8 = 4;
@@ -48,6 +50,9 @@ public fun min_players_to_start(): u64 { MIN_PLAYERS_TO_START }
 public fun max_players(): u64 { MAX_PLAYERS }
 public fun cards_per_player(): u64 { CARDS_PER_PLAYER }
 public fun n_cards(): u64 { N_CARDS }
+
+// 哨兵值
+public fun community_card_owner(): u64 { COMMUNITY_CARD_OWNER }
 
 // Round State
 public fun round_waiting(): u8 { ROUND_WAITING }
