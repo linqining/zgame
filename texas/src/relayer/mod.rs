@@ -313,10 +313,10 @@ pub async fn apply_event_to_socket(
             apply_winner_awarded_to_socket(app_state, table_id, *seat_index, player, *amount, hand_rank.as_ref()).await;
         }
         SuiChainEvent::HandEndedWithoutShowdown { table_id, winner_seat, winner_player, pot } => {
-            apply_hand_ended_without_showdown_to_socket(app_state, table_id, *winner_seat, winner_player, *pot).await;
+            apply_hand_ended_without_showdown_to_socket(app_state, table_id, *winner_seat, winner_player, *pot, summary).await;
         }
         SuiChainEvent::HandSettled { table_id, .. } => {
-            apply_hand_settled_to_socket(app_state, table_id).await;
+            apply_hand_settled_to_socket(app_state, table_id, summary).await;
         }
         // Task 20: Reconstruct 事件
         SuiChainEvent::ReconstructDeckSubmitted { table_id, seat_index, .. } => {

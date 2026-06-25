@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::handlers::AppState;
 use crate::pokergame::deck::Card;
 use crate::socket::{broadcast, get_socket_io};
+use crate::sui_events::TableSummaryV2;
 
 use crate::relayer::locate_socket_table_by_chain_id;
 use crate::relayer::util::now_ms;
@@ -57,8 +58,19 @@ pub(crate) async fn apply_hand_started_to_socket(app_state: &Arc<AppState>, tabl
 
 /// Task 20: HandSettled 事件处理器。
 ///
-/// 广播 `TABLE_UPDATED`。
-pub(crate) async fn apply_hand_settled_to_socket(app_state: &Arc<AppState>, table_id: &str) {
+/// HandSettled 隐含 handreset 逻辑：Move 合约 `settle_hand` 内部已调用
+/// `reset_for_next_hand`，链上 `community_cards` / `deck_state.encrypted` /
+/// `shuffle_state` / `reveal_token_state` / `reconstruct_state` 等均已清空。
+/// 本地需镜像调用 `table.reset_for_next_hand()` 清空 `mental_poker_game`
+/// （旧公共牌、旧底牌、旧洗牌结果）、`seat.hand` 等，避免下一手开局时前端
+/// 仍展示上一手的牌。`WinnerAwarded` 事件先于 `HandSettled` 到达并写入
+/// `win_messages`，而 `reset_for_next_hand` 会 `clear_win_messages`，故先
+/// 取出再还原，确保玩家能看到本手结算结果。
+pub(crate) async fn apply_hand_settled_to_socket(
+    app_state: &Arc<AppState>,
+    table_id: &str,
+    summary: Option<&TableSummaryV2>,
+) {
     let io = match get_socket_io() {
         Some(io) => io,
         None => {
@@ -77,6 +89,32 @@ pub(crate) async fn apply_hand_settled_to_socket(app_state: &Arc<AppState>, tabl
             return;
         }
     };
+
+    // 用最新 summary 同步本地 summary.meta/state，确保 reset_for_next_hand 的
+    // broke_seats 检查（基于 self.seats()，读取 summary.meta.seat_stacks）能看到
+    // winner 已含 pot 的 stack，避免 all-in winner 被误判为破产而移除。
+    {
+        let mut gs = app_state.socket_state.state.write().await;
+        if let Some(table) = gs.tables.get_mut(&socket_table_id) {
+            if let Some(s) = summary {
+                if table.summary.meta != s.meta {
+                    table.summary.meta = s.meta.clone();
+                }
+                if table.summary.state != s.state {
+                    table.summary.state = s.state.clone();
+                }
+            }
+
+            let preserved_win_messages = std::mem::take(&mut table.summary.win_messages);
+            table.reset_for_next_hand();
+            table.summary.win_messages = preserved_win_messages;
+            tracing::info!(
+                "[bridge::settled] table {} reset for next hand (win_messages preserved={})",
+                socket_table_id,
+                table.summary.win_messages.len()
+            );
+        }
+    }
 
     broadcast::broadcast_to_table(
         &io,

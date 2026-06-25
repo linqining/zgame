@@ -10,6 +10,7 @@ use crate::handlers::AppState;
 use crate::pokergame::actions;
 use crate::pokergame::player::truncate_name;
 use crate::socket::{broadcast, get_socket_io, table_room_name};
+use crate::sui_events::TableSummaryV2;
 
 use crate::relayer::locate_socket_table_by_chain_id;
 
@@ -207,13 +208,28 @@ pub(crate) async fn apply_winner_awarded_to_socket(
 
 /// Task 20: HandEndedWithoutShowdown 事件处理器。
 ///
-/// 写入 `table.win_messages`，广播 `TABLE_UPDATED` 和 `WINNER`。
+/// HandEndedWithoutShowdown 隐含 handreset 逻辑：Move 合约 `end_without_showdown`
+/// 内部已调用 `reset_for_next_hand`，链上 `community_cards` / `deck_state.encrypted` /
+/// `shuffle_state` / `reveal_token_state` / `reconstruct_state` 等均已清空。
+/// 本地需镜像调用 `table.reset_for_next_hand()` 清空 `mental_poker_game`
+/// （旧公共牌、旧底牌、旧洗牌结果）、`seat.hand` 等，避免下一手开局时前端
+/// 仍展示上一手的牌。
+///
+/// 顺序要点：
+/// - 先用最新 `summary` 同步本地 `summary.meta/state`，确保 `reset_for_next_hand`
+///   的 broke_seats 检查（基于 `self.seats()`，读取 `summary.meta.seat_stacks`）
+///   能看到 winner 已含 pot 的 stack，避免 all-in winner 被误判为破产而移除；
+/// - `reset_for_next_hand` 会 `clear_win_messages`，故在 reset 之后再写本手
+///   的 `win_message`。
+///
+/// 最后广播 `TABLE_UPDATED` 和 `WINNER`。
 pub(crate) async fn apply_hand_ended_without_showdown_to_socket(
     app_state: &Arc<AppState>,
     table_id: &str,
     winner_seat: u64,
     winner_player: &str,
     pot: u64,
+    summary: Option<&TableSummaryV2>,
 ) {
     let io = match get_socket_io() {
         Some(io) => io,
@@ -234,13 +250,28 @@ pub(crate) async fn apply_hand_ended_without_showdown_to_socket(
         }
     };
 
-    // 1. 写入 table.win_messages
+    // 1. 同步最新 summary + reset_for_next_hand + 写入 table.win_messages
     let win_message = {
         let mut gs = app_state.socket_state.state.write().await;
         let table = match gs.tables.get_mut(&socket_table_id) {
             Some(t) => t,
             None => return,
         };
+
+        if let Some(s) = summary {
+            if table.summary.meta != s.meta {
+                table.summary.meta = s.meta.clone();
+            }
+            if table.summary.state != s.state {
+                table.summary.state = s.state.clone();
+            }
+        }
+
+        table.reset_for_next_hand();
+        tracing::info!(
+            "[bridge::no_showdown] table {} reset for next hand before writing win message",
+            socket_table_id
+        );
 
         let player_name = table
             .seats()
