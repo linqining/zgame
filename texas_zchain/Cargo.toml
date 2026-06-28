@@ -1,0 +1,18 @@
+[package]
+name = "texas_zchain"
+version = "0.1.0"
+edition = "2024"
+description = "Texas Hold'em poker contract for zchain (rBPF VM), ported from texas_poker_move"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+
+# 声明为独立包，不并入父 workspace（/Users/mac/projects/zgame/Cargo.toml）
+[workspace]
