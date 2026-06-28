@@ -59,13 +59,21 @@ pub(crate) async fn apply_reveal_phase_evt_to_socket(
         }
     };
 
-    // 3. 若 reveal_token_state 已激活但 pending_players 为空，说明本地未执行 start_*_reveal_phase，
-    //    需根据链上 summary 重建 assignments（按用户拆分），否则前端收到的 REVEAL_NOTICE 无数据。
-    let need_populate = {
+    // 3. 判定是否需要从链上 summary 重建 player_assignments。
+    //    关键：本函数在 sync_table_state 之前运行（见 relayer/mod.rs apply_event_to_socket），
+    //    此时本地 reveal_token_state.phase 可能仍为上一手 reset 后的 None，
+    //    因此不能用本地 is_active() 判定，必须用链上 summary.state.reveal_phase。
+    //    连续打牌场景：reset_for_next_hand 清空本地 phase → RevealPhaseEvt 到达时
+    //    is_active()=false → 旧逻辑跳过 rebuild → assignments 为空 → 前端无法生成
+    //    reveal_token → 链上 partial_decrypt_c2 错误 → "Failed to decrypt readable card"。
+    let chain_reveal_active = summary.map(|s| s.state.reveal_phase != 0).unwrap_or(false);
+    let need_populate = if !chain_reveal_active {
+        false
+    } else {
         let gs = app_state.socket_state.state.read().await;
         gs.tables
             .get(&socket_table_id)
-            .map(|t| t.reveal_token_state.is_active() && t.reveal_token_state.pending_players.is_empty())
+            .map(|t| t.reveal_token_state.pending_players.is_empty())
             .unwrap_or(false)
     };
 

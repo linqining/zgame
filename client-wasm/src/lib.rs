@@ -569,7 +569,17 @@ impl WasmClientPlayer {
 
         self.inner.decrypt_readable_card(&ct, deck_plaintext)
         .map(|card| card.to_string())
-        .ok_or_else(|| JsValue::from_str("Failed to decrypt readable card"))
+        .ok_or_else(|| {
+            // 诊断信息：帮助定位连续打牌场景下的解密失败原因
+            // 主要触发点：relayer 未重建 player_assignments → 前端无 reveal_token → 链上 partial_decrypt_c2 错误
+            console_log(&format!(
+                "decrypt_readable_card failed: c1={} c2={} deck_plaintext_size={}",
+                ecpoint_to_hex(&ct.c1),
+                ecpoint_to_hex(&ct.c2),
+                deck_plaintext_json.len()
+            ));
+            JsValue::from_str("Failed to decrypt readable card")
+        })
     }
 
     pub fn reconstruct(
