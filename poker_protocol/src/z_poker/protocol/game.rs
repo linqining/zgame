@@ -83,13 +83,17 @@ impl MentalPokerGame {
     }
 
     pub fn reset(&mut self) {
-        let agg_pk = self.key_manager.get_aggregated_pk();
+        // 对齐 Move 合约 set_initial_encrypted_deck: (g1_generator, plaintext_i)
+        // 不加 agg_pk — 与 new() 和链上 set_initial_encrypted_deck 保持一致。
+        // 此前版本误加 agg_pk 导致 LOCAL trivial deck 与链上不同，
+        // 由于 submit_shuffle_verified 跳过证明验证，前端会基于错误牌组洗牌并上链，
+        // 导致 reveal 阶段 decrypt_readable_card 失败。
         let initial_encrypt_deck = self.deck_plaintext
             .iter()
             .map(|c| {
                 ElGamalCiphertext {
                     c1: *BASE_G,
-                    c2: *c + agg_pk,
+                    c2: *c,
                 }
             }).collect();
         self.deck_encrypted = initial_encrypt_deck;

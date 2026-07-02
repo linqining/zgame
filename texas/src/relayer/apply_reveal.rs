@@ -63,19 +63,16 @@ pub(crate) async fn apply_reveal_phase_evt_to_socket(
     //    关键：本函数在 sync_table_state 之前运行（见 relayer/mod.rs apply_event_to_socket），
     //    此时本地 reveal_token_state.phase 可能仍为上一手 reset 后的 None，
     //    因此不能用本地 is_active() 判定，必须用链上 summary.state.reveal_phase。
-    //    连续打牌场景：reset_for_next_hand 清空本地 phase → RevealPhaseEvt 到达时
-    //    is_active()=false → 旧逻辑跳过 rebuild → assignments 为空 → 前端无法生成
-    //    reveal_token → 链上 partial_decrypt_c2 错误 → "Failed to decrypt readable card"。
+    //
+    //    重要修复：始终在 chain_reveal_active 时从链上重建 player_assignments。
+    //    此前仅当本地 pending_players 为空时才重建，但本地 advance_shuffle 可能在
+    //    sync_table_state 之前运行（game loop tick），使用 mental_poker_game 中可能过期的
+    //    hand_encrypted 构建 assignments → 前端基于错误牌组生成 reveal_token →
+    //    链上 plaintext_to_playing_card 匹配失败 → EInvalidCardIndex。
+    //    修复后：始终以链上 summary 为权威源重建，同时保留已完成的 completed_players
+    //    避免要求已提交的玩家重复提交。
     let chain_reveal_active = summary.map(|s| s.state.reveal_phase != 0).unwrap_or(false);
-    let need_populate = if !chain_reveal_active {
-        false
-    } else {
-        let gs = app_state.socket_state.state.read().await;
-        gs.tables
-            .get(&socket_table_id)
-            .map(|t| t.reveal_token_state.pending_players.is_empty())
-            .unwrap_or(false)
-    };
+    let need_populate = chain_reveal_active;
 
     if need_populate {
         // 3a. 获取 summary：优先用事件携带的 summary，否则从 table.summary 读取（已由 sync 同步）
@@ -127,14 +124,21 @@ pub(crate) async fn apply_reveal_phase_evt_to_socket(
 
         let mut gs = app_state.socket_state.state.write().await;
         if let Some(table) = gs.tables.get_mut(&socket_table_id) {
+            // 3d. 保存已完成的玩家列表，rebuild 后恢复，避免要求已提交的玩家重复提交
+            let preserved_completed = table.reveal_token_state.completed_players.clone();
+
             match rust_phase {
                 Some(RevealPhase::HandReveal) => {
                     if let Err(e) = rebuild_hand_reveal_from_summary(table, summary_ref, chain_phase) {
                         tracing::warn!("[bridge::reveal] rebuild HandReveal failed: {}", e);
                     } else {
+                        // 恢复已完成的玩家，从 pending 中移除
+                        table.reveal_token_state.completed_players = preserved_completed.clone();
+                        table.reveal_token_state.pending_players.retain(|pk| !preserved_completed.contains(pk));
                         tracing::info!(
-                            "[bridge::reveal] rebuilt reveal_token_state from summary for HandReveal, pending={}, assignments={}",
+                            "[bridge::reveal] rebuilt reveal_token_state from summary for HandReveal, pending={}, completed={}, assignments={}",
                             table.reveal_token_state.pending_players.len(),
+                            table.reveal_token_state.completed_players.len(),
                             table.reveal_token_state.player_assignments.len()
                         );
                     }
@@ -143,9 +147,12 @@ pub(crate) async fn apply_reveal_phase_evt_to_socket(
                     if let Err(e) = rebuild_community_reveal_from_summary(table, summary_ref, chain_phase) {
                         tracing::warn!("[bridge::reveal] rebuild CommunityReveal failed: {}", e);
                     } else {
+                        table.reveal_token_state.completed_players = preserved_completed.clone();
+                        table.reveal_token_state.pending_players.retain(|pk| !preserved_completed.contains(pk));
                         tracing::info!(
-                            "[bridge::reveal] rebuilt reveal_token_state from summary for CommunityReveal, pending={}, assignments={}",
+                            "[bridge::reveal] rebuilt reveal_token_state from summary for CommunityReveal, pending={}, completed={}, assignments={}",
                             table.reveal_token_state.pending_players.len(),
+                            table.reveal_token_state.completed_players.len(),
                             table.reveal_token_state.player_assignments.len()
                         );
                     }
@@ -154,9 +161,12 @@ pub(crate) async fn apply_reveal_phase_evt_to_socket(
                     if let Err(e) = rebuild_showdown_reveal_from_summary(table, summary_ref, &decrypted_cards_info) {
                         tracing::warn!("[bridge::reveal] rebuild ShowdownReveal failed: {}", e);
                     } else {
+                        table.reveal_token_state.completed_players = preserved_completed.clone();
+                        table.reveal_token_state.pending_players.retain(|pk| !preserved_completed.contains(pk));
                         tracing::info!(
-                            "[bridge::reveal] rebuilt reveal_token_state from summary for ShowdownReveal, pending={}, assignments={}",
+                            "[bridge::reveal] rebuilt reveal_token_state from summary for ShowdownReveal, pending={}, completed={}, assignments={}",
                             table.reveal_token_state.pending_players.len(),
+                            table.reveal_token_state.completed_players.len(),
                             table.reveal_token_state.player_assignments.len()
                         );
                     }
@@ -206,8 +216,9 @@ fn rebuild_hand_reveal_from_summary(
     // 2. 构建 seat_index -> GamePkHex 映射
     let seat_pk_map = build_seat_pk_map(&summary.crypto.seat_pks);
 
-    // 3. 获取加密牌组（优先从 summary.crypto.deck_encrypted 反序列化）
-    let deck = table.deck_encrypted();
+    // 3. 获取加密牌组（直接从 summary.crypto.deck_encrypted 反序列化，避免依赖可能被 reset 清空的 mental_poker_game）
+    let deck = crate::relayer::sync::deserialize_deck_encrypted(&summary.crypto.deck_encrypted)
+        .map_err(|e| format!("deck_encrypted deserialization failed: {}", e))?;
     if deck.is_empty() {
         return Err("deck_encrypted is empty".to_string());
     }
@@ -315,8 +326,9 @@ fn rebuild_community_reveal_from_summary(
     // 2. 构建 seat_index -> GamePkHex 映射
     let seat_pk_map = build_seat_pk_map(&summary.crypto.seat_pks);
 
-    // 3. 获取加密牌组
-    let deck = table.deck_encrypted();
+    // 3. 获取加密牌组（直接从 summary.crypto.deck_encrypted 反序列化，避免依赖可能被 reset 清空的 mental_poker_game）
+    let deck = crate::relayer::sync::deserialize_deck_encrypted(&summary.crypto.deck_encrypted)
+        .map_err(|e| format!("deck_encrypted deserialization failed: {}", e))?;
     if deck.is_empty() {
         return Err("deck_encrypted is empty".to_string());
     }
@@ -417,8 +429,9 @@ fn rebuild_showdown_reveal_from_summary(
     // 2. 构建 seat_index -> GamePkHex 映射
     let seat_pk_map = build_seat_pk_map(&summary.crypto.seat_pks);
 
-    // 3. 获取加密牌组
-    let deck = table.deck_encrypted();
+    // 3. 获取加密牌组（直接从 summary.crypto.deck_encrypted 反序列化，避免依赖可能被 reset 清空的 mental_poker_game）
+    let deck = crate::relayer::sync::deserialize_deck_encrypted(&summary.crypto.deck_encrypted)
+        .map_err(|e| format!("deck_encrypted deserialization failed: {}", e))?;
     if deck.is_empty() {
         return Err("deck_encrypted is empty".to_string());
     }
@@ -600,19 +613,35 @@ pub(crate) async fn apply_reveal_token_submitted_to_socket(
         }
     };
 
-    // 2. 获取 pk_hex（用于广播）
+    // 2. 获取 pk_hex 并标记玩家已完成 reveal（不触发 on_reveal_complete，
+    //    on-chain 模式下 phase 转换由链上事件驱动）。
+    //    这防止 RevealPhaseEvt 重建时仍将玩家列入 pending_players，
+    //    导致重复 REVEAL_NOTICE 和重复提交。
     let pk_hex = {
-        let gs = app_state.socket_state.state.read().await;
-        gs.tables
-            .get(&socket_table_id)
-            .map(|table| {
-                let seats = table.seats();
-                seats.get(&(seat_index as u32))
-                    .and_then(|seat| seat.player.as_ref())
-                    .map(|p| p.pk_hex.to_string())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default()
+        let mut gs = app_state.socket_state.state.write().await;
+        if let Some(table) = gs.tables.get_mut(&socket_table_id) {
+            let pk_owned = table
+                .seats()
+                .get(&(seat_index as u32))
+                .and_then(|seat| seat.player.as_ref())
+                .map(|p| p.pk_hex.clone());
+
+            if let Some(ref pk) = pk_owned {
+                if table.reveal_token_state.is_active()
+                    && !table.reveal_token_state.completed_players.contains(pk)
+                {
+                    table.reveal_token_state.completed_players.push(pk.clone());
+                    table.reveal_token_state.pending_players.retain(|p| p != pk);
+                    tracing::info!(
+                        "[bridge::reveal_token] table {} seat {} marked reveal completed (pk={}), pending={}",
+                        socket_table_id, seat_index, pk, table.reveal_token_state.pending_players.len()
+                    );
+                }
+            }
+            pk_owned.map(|p| p.to_string()).unwrap_or_default()
+        } else {
+            String::new()
+        }
     };
 
     // 3. 广播 CRYPTO_EVENT（event_type="reveal_token", card_index, verified=true）

@@ -258,10 +258,10 @@ pub async fn apply_event_to_socket(
         }
         // 手牌阶段事件（无需去重，直接同步）
         SuiChainEvent::HandStarted { table_id, .. } => {
-            apply_hand_started_to_socket(app_state, table_id).await;
+            apply_hand_started_to_socket(app_state, table_id, summary).await;
         }
         SuiChainEvent::ShuffleComplete { table_id, .. } => {
-            apply_shuffle_complete_to_socket(app_state, table_id).await;
+            apply_shuffle_complete_to_socket(app_state, table_id, summary).await;
         }
         SuiChainEvent::RevealPhaseEvt { table_id, phase, .. } => {
             apply_reveal_phase_evt_to_socket(app_state, table_id, *phase, summary).await;

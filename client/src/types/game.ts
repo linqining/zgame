@@ -68,6 +68,9 @@ export interface ShuffleState {
 }
 
 export interface RevealTokenState {
+  phase?: string;
+  pending_players?: string[];
+  completed_players?: string[];
   player_assignments: Record<
     string,
     {

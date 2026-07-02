@@ -8,14 +8,19 @@ use std::sync::Arc;
 use crate::handlers::AppState;
 use crate::pokergame::table::events::CryptoEventType;
 use crate::socket::{broadcast, get_socket_io};
+use crate::sui_events::TableSummaryV2;
 
-use crate::relayer::locate_socket_table_by_chain_id;
+use crate::relayer::{locate_socket_table_by_chain_id, sync_table_state};
 
 /// Task 7: 将链上 ShuffleComplete 事件同步到内存 Table。
 ///
-/// 若 shuffle_state 活跃，调用 table.advance_shuffle() 推进 shuffle，
-/// 发送 shuffle_notice，广播 TABLE_UPDATED。
-pub(crate) async fn apply_shuffle_complete_to_socket(app_state: &Arc<AppState>, table_id: &str) {
+/// 先同步链上 crypto 状态（deck_encrypted 已因洗牌更新），再推进 shuffle_state，
+/// 最后发送 shuffle_notice + 广播 TABLE_UPDATED，确保前端拿到最新 deck_encrypted。
+pub(crate) async fn apply_shuffle_complete_to_socket(
+    app_state: &Arc<AppState>,
+    table_id: &str,
+    summary: Option<&TableSummaryV2>,
+) {
     // 1. 获取 SocketIo 实例
     let io = match get_socket_io() {
         Some(io) => io,
@@ -37,21 +42,41 @@ pub(crate) async fn apply_shuffle_complete_to_socket(app_state: &Arc<AppState>, 
         }
     };
 
-    // 3. 若 shuffle_state 活跃 → advance_shuffle
+    // 3. 同步链上 crypto 状态（deck_encrypted 已因洗牌更新，前端需要最新 deck 才能正确解牌）
+    if let Some(s) = summary {
+        sync_table_state(app_state, table_id, false, true, s).await;
+    } else {
+        tracing::warn!(
+            "[bridge::shuffle_complete] summary is None, table_id={}, skip crypto sync (deck_encrypted may be stale)",
+            table_id
+        );
+    }
+
+    // 4. 若 shuffle_state 活跃 → 推进 shuffle
+    //    on-chain 模式下不调用 advance_shuffle（它会本地启动 reveal 阶段并发出 RevealNotice），
+    //    reveal 阶段由链上 RevealPhaseEvt 事件驱动，避免双重 REVEAL_NOTICE 导致前端重复提交。
     {
         let mut gs = app_state.socket_state.state.write().await;
         if let Some(table) = gs.tables.get_mut(&socket_table_id) {
             if table.shuffle_state.is_active() {
-                tracing::info!(
-                    "[bridge::shuffle_complete] advancing shuffle for table {}",
-                    socket_table_id
-                );
-                table.advance_shuffle();
+                if app_state.config.sui_on_chain_enabled {
+                    tracing::info!(
+                        "[bridge::shuffle_complete] on-chain mode: reset shuffle_state for table {} (reveal driven by RevealPhaseEvt)",
+                        socket_table_id
+                    );
+                    table.shuffle_state.reset();
+                } else {
+                    tracing::info!(
+                        "[bridge::shuffle_complete] advancing shuffle for table {}",
+                        socket_table_id
+                    );
+                    table.advance_shuffle();
+                }
             }
         }
     } // 写锁释放
 
-    // 4. 发送 shuffle_notice + 广播 TABLE_UPDATED
+    // 5. 发送 shuffle_notice + 广播 TABLE_UPDATED
     app_state.socket_state.send_shuffle_notice(socket_table_id).await;
     broadcast::broadcast_to_table(
         &io,

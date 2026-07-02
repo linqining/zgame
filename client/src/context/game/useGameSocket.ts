@@ -105,9 +105,28 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
     if (socket) {
       socket.on(TABLE_UPDATED, ({ table, message, from }: TableUpdatedPayload) => {
         logger.log(TABLE_UPDATED, table, message, from);
+        // 新一手开始前（waiting 状态）清空上一手的解密手牌，
+        // 防止 displayTable memo 将旧牌注入到空 hand 的座位。
+        if (table.roundState === 'waiting') {
+          setDecryptedHandCards([]);
+        }
         setCurrentTable(table);
         logger.log("table updated:", table);
         message && addMessage(message);
+
+        // Fallback: 如果当前玩家需要在 reveal 阶段提交 token 但错过了 REVEAL_NOTICE，
+        // 通过 TABLE_UPDATED 补触发（解决新加入玩家未收到通知导致被踢的问题）
+        const revealState = table.revealTokenState;
+        if (revealState && pkHex && revealState.pending_players?.includes(pkHex)
+            && !revealState.completed_players?.includes(pkHex)) {
+          logger.log('[Reveal] TABLE_UPDATED fallback: player in pending, triggering handleRevealNotice');
+          handleRevealNotice({
+            table_id: table.id,
+            phase: revealState.phase || '',
+            pending_players: revealState.pending_players,
+            player_assignments: revealState.player_assignments,
+          });
+        }
       });
 
       socket.on(TABLE_JOINED, ({ table, message, from }: TableJoinedPayload) => {
@@ -129,8 +148,9 @@ export const useGameSocket = (params: UseGameSocketParams): void => {
       });
 
       socket.on(SHUFFLE_NOTICE, async (data: ShuffleNoticeData) => {
-        // 新一手洗牌开始，清空上一手的公共牌
+        // 新一手洗牌开始，清空上一手的公共牌和解密手牌
         setCommunityCards([]);
+        setDecryptedHandCards([]);
         const result = await handleShuffleNotice(data);
         if (result) {
           logger.log('SHUFFLE_NOTICE shuffle proof', result.shuffleResult.shuffle_proof);

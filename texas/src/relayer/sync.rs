@@ -329,6 +329,43 @@ pub(crate) fn seat_indices_to_pk_hex(
         .collect()
 }
 
+/// 从链上 deck_encrypted bytes (96 bytes: c1 || c2) 反序列化为 ElGamalCiphertext 列表。
+///
+/// 每个元素必须是 96 bytes (48 bytes c1 + 48 bytes c2)，使用 G1 compressed 格式。
+/// 反序列化失败时返回 Err。
+pub(crate) fn deserialize_deck_encrypted(
+    deck_bytes: &[Vec<u8>],
+) -> Result<Vec<poker_protocol::crypto::ElGamalCiphertext>, String> {
+    use poker_protocol::crypto::curve::CurvePoint;
+    use poker_protocol::crypto::{DefaultCurve, ElGamalCiphertext};
+    type P = <DefaultCurve as poker_protocol::crypto::curve::Curve>::Point;
+
+    let mut result: Vec<ElGamalCiphertext> = Vec::with_capacity(deck_bytes.len());
+    for (i, ct_bytes) in deck_bytes.iter().enumerate() {
+        if ct_bytes.len() != 96 {
+            return Err(format!(
+                "deck_encrypted[{}] has invalid length {} (expected 96)",
+                i,
+                ct_bytes.len()
+            ));
+        }
+        let (c1_bytes, c2_bytes) = ct_bytes.split_at(48);
+        match (
+            <P as CurvePoint>::from_compressed(c1_bytes),
+            <P as CurvePoint>::from_compressed(c2_bytes),
+        ) {
+            (Some(c1), Some(c2)) => result.push(ElGamalCiphertext { c1, c2 }),
+            _ => {
+                return Err(format!(
+                    "deck_encrypted[{}] deserialization failed (invalid G1 compressed bytes)",
+                    i
+                ))
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// 同步 round_state：将链上 round_state (u8) 映射为本地 RoundState 枚举并同步。
 ///
 /// 使用 `transition_to_forced` 跳过本地状态机校验，因为链上 round_state 已由
@@ -476,9 +513,10 @@ fn sync_reveal_token_state(summary: &TableSummaryV2, table: &mut Table, socket_t
 /// - `deck_plaintext`：从链上 G1 compressed bytes 反序列化为 EcPoint，强制覆盖本地。
 ///   必须在 start_reconstruct 之前完成，否则 reconstruct 使用的牌组与链上不一致，
 ///   提交链上验证会失败。
-/// - `summary.crypto`：整体同步到 `table.summary.crypto`（上链模式权威数据源）。
-/// - `deck_encrypted` / `aggregated_pk` / shuffle 玩家列表：仅在 shuffle 活跃时同步，
-///   避免非活跃阶段用空数据覆盖本地状态。
+/// - `summary.crypto`：整体同步到 `table.summary.crypto`（仅供 `players()` 读取 `seat_pks`）。
+/// - `deck_encrypted` / `aggregated_pk`：**无条件**同步到 `mental_poker_game`（单一真理之源），
+///   不再受 `shuffle_active` 条件限制。
+/// - `shuffle_pending_players` / `shuffle_completed_players`：仅在 shuffle 活跃时同步。
 fn sync_deck_state(
     summary: &TableSummaryV2,
     table: &mut Table,
@@ -549,79 +587,60 @@ fn sync_deck_state(
         table.summary.crypto = summary.crypto.clone();
     }
 
-    if shuffle_active {
-        // 构建 seat_index → pk_hex 映射表（供 shuffle/reconstruct 玩家列表转换用）
-        let seat_pk_map = build_seat_pk_map(&summary.crypto.seat_pks);
-
-        // 同步 deck_encrypted（96 bytes: c1 || c2 → ElGamalCiphertext）
-        if !summary.crypto.deck_encrypted.is_empty() {
-            use poker_protocol::crypto::curve::CurvePoint;
-            use poker_protocol::crypto::{DefaultCurve, ElGamalCiphertext};
-            type P = <DefaultCurve as poker_protocol::crypto::curve::Curve>::Point;
-
-            let mut synced_deck: Vec<ElGamalCiphertext> =
-                Vec::with_capacity(summary.crypto.deck_encrypted.len());
-            let mut all_ok = true;
-            for ct_bytes in &summary.crypto.deck_encrypted {
-                if ct_bytes.len() != 96 {
-                    all_ok = false;
-                    break;
-                }
-                let (c1_bytes, c2_bytes) = ct_bytes.split_at(48);
-                match (
-                    <P as CurvePoint>::from_compressed(c1_bytes),
-                    <P as CurvePoint>::from_compressed(c2_bytes),
-                ) {
-                    (Some(c1), Some(c2)) => synced_deck.push(ElGamalCiphertext { c1, c2 }),
-                    _ => {
-                        all_ok = false;
-                        break;
-                    }
-                }
-            }
-            if all_ok {
+    // 4d-2a. 无条件同步 deck_encrypted（mental_poker_game 是单一真理之源）
+    // Task: Phase 2 — 不再受 shuffle_active 条件限制，链上有数据就同步
+    if !summary.crypto.deck_encrypted.is_empty() {
+        match deserialize_deck_encrypted(&summary.crypto.deck_encrypted) {
+            Ok(synced_deck) => {
                 if table.mental_poker_game.deck_encrypted != synced_deck {
                     tracing::info!(
-                        "[bridge::sync] table {} deck_encrypted synced from chain ({} cards)",
+                        "[bridge::sync] table {} deck_encrypted synced from chain ({} cards, shuffle_active={})",
                         socket_table_id,
-                        synced_deck.len()
+                        synced_deck.len(),
+                        shuffle_active
                     );
                     table.mental_poker_game.deck_encrypted = synced_deck;
                 }
-            } else {
+            }
+            Err(e) => {
                 tracing::warn!(
-                    "[bridge::sync] table {} deck_encrypted sync failed: invalid ciphertext bytes",
-                    socket_table_id
+                    "[bridge::sync] table {} deck_encrypted sync failed: {}",
+                    socket_table_id,
+                    e
                 );
             }
         }
+    }
 
-        // 同步 aggregated_pk（48 bytes G1 compressed → EcPoint → key_manager）
-        if !summary.crypto.aggregated_pk.is_empty() {
-            use poker_protocol::crypto::curve::CurvePoint;
-            use poker_protocol::crypto::DefaultCurve;
-            type P = <DefaultCurve as poker_protocol::crypto::curve::Curve>::Point;
+    // 4d-2b. 无条件同步 aggregated_pk（mental_poker_game 是单一真理之源）
+    if !summary.crypto.aggregated_pk.is_empty() {
+        use poker_protocol::crypto::curve::CurvePoint;
+        use poker_protocol::crypto::DefaultCurve;
+        type P = <DefaultCurve as poker_protocol::crypto::curve::Curve>::Point;
 
-            if let Some(pk) =
-                <P as CurvePoint>::from_compressed(&summary.crypto.aggregated_pk)
-            {
-                let current_pk = table.mental_poker_game.key_manager.get_aggregated_pk();
-                if current_pk != pk {
-                    tracing::info!(
-                        "[bridge::sync] table {} aggregated_pk synced from chain",
-                        socket_table_id
-                    );
-                    table.mental_poker_game.key_manager.set_aggregated_pk(pk);
-                }
-            } else {
-                tracing::warn!(
-                    "[bridge::sync] table {} aggregated_pk deserialization failed",
-                    socket_table_id
+        if let Some(pk) = <P as CurvePoint>::from_compressed(&summary.crypto.aggregated_pk) {
+            let current_pk = table.mental_poker_game.key_manager.get_aggregated_pk();
+            if current_pk != pk {
+                tracing::info!(
+                    "[bridge::sync] table {} aggregated_pk synced from chain (shuffle_active={})",
+                    socket_table_id,
+                    shuffle_active
                 );
+                table.mental_poker_game.key_manager.set_aggregated_pk(pk);
             }
+        } else {
+            tracing::warn!(
+                "[bridge::sync] table {} aggregated_pk deserialization failed",
+                socket_table_id
+            );
         }
+    }
 
-        // 同步 shuffle_pending_players / shuffle_completed_players（seat_index → pk_hex）
+    // 4d-2c. shuffle_pending_players / shuffle_completed_players 仅在 shuffle 活跃时同步
+    if shuffle_active {
+        // 构建 seat_index → pk_hex 映射表（供 shuffle 玩家列表转换用）
+        let seat_pk_map = build_seat_pk_map(&summary.crypto.seat_pks);
+
         let chain_pending =
             seat_indices_to_pk_hex(&summary.crypto.shuffle_pending_players, &seat_pk_map);
         let chain_completed = seat_indices_to_pk_hex(
@@ -866,17 +885,20 @@ fn sync_betting_state(summary: &TableSummaryV2, table: &mut Table, socket_table_
     }
 
     // 执行清理：移除链上已清空的本地座位
+    // 同步清理 pk_to_seat / local_players / local_seats（对齐 reset_for_next_hand 的清理策略）
     for pk in &pks_to_remove {
         table.pk_to_seat.remove(pk);
+        table.local_players.remove(pk);
     }
     for seat_id in &seats_to_remove {
         table.local_seats.remove(seat_id);
     }
     if !seats_to_remove.is_empty() {
         tracing::info!(
-            "[bridge::sync] table {} cleaned up {} zombie seats from local state",
+            "[bridge::sync] table {} cleaned up {} zombie seats from local state (pks removed: {})",
             socket_table_id,
-            seats_to_remove.len()
+            seats_to_remove.len(),
+            pks_to_remove.len()
         );
     }
 }

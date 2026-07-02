@@ -28,7 +28,7 @@ pub async fn subscribe_checkpoints(
     let client = Client::new(grpc_url.as_str())
         .map_err(|e| format!("Failed to create gRPC client: {}", e))?;
 
-    // Chainstack/QuickNode 等付费节点需要 x-token 认证
+    // BlockPi/Chainstack/QuickNode 等付费节点需要 x-token 认证
     let mut client = client;
     if !config.grpc_token.is_empty() {
         let mut headers = HeadersInterceptor::new();
@@ -36,7 +36,14 @@ pub async fn subscribe_checkpoints(
             .map_err(|e| format!("GRPC_TOKEN contains invalid characters for gRPC header: {}", e))?;
         headers.headers_mut().insert("x-token", token_value);
         client = client.with_headers(headers);
-        tracing::info!("[sui_grpc] x-token authentication enabled");
+        let masked = if config.grpc_token.len() > 8 {
+            format!("{}...{}", &config.grpc_token[..4], &config.grpc_token[config.grpc_token.len()-4..])
+        } else {
+            "***".to_string()
+        };
+        tracing::info!("[sui_grpc] x-token authentication enabled (token={})", masked);
+    } else {
+        tracing::warn!("[sui_grpc] no GRPC_TOKEN set, connecting without authentication");
     }
 
     let mut subscription_client = client.subscription_client();

@@ -246,6 +246,8 @@ async fn retry_apply_player_action(
     };
 
     // 调用 apply_player_action_to_socket（不调用 check_and_mark_action）
+    // 传 None 作为 original_event：避免内部再次推入重试队列造成死循环，
+    // 由本函数的返回值决定是否递增 retry_count 继续重试。
     crate::relayer::apply_player_action_to_socket(
         app_state,
         &table_id,
@@ -253,11 +255,7 @@ async fn retry_apply_player_action(
         action,
         amount,
         &summary,
-        Some(event),
+        None,
     )
-    .await;
-
-    // apply_player_action_to_socket 内部会处理 game_loop 关闭的情况，
-    // 若 game_loop 仍关闭会再次推入队列。这里假设成功返回即处理完成。
-    true
+    .await
 }

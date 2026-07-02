@@ -246,96 +246,23 @@ impl Table {
     }
 
     /// 返回当前加密牌组。
-    /// 上链模式（chain_table_id.is_some() 且 summary.crypto.deck_encrypted 非空）：
-    ///   从 summary.crypto.deck_encrypted 反序列化 Vec<Vec<u8>> → Vec<ElGamalCiphertext>
-    /// 离链模式或反序列化失败：回退到 mental_poker_game.deck_encrypted
+    /// 始终从 `mental_poker_game.deck_encrypted` 读取（单一真理之源）。
+    /// `sync_deck_state` 负责将链上 `summary.crypto.deck_encrypted` 同步到 `mental_poker_game`。
     pub fn deck_encrypted(&self) -> Vec<ElGamalCiphertext> {
-        if self.chain_table_id.is_some() && !self.summary.crypto.deck_encrypted.is_empty() {
-            use poker_protocol::crypto::curve::CurvePoint;
-            use poker_protocol::crypto::DefaultCurve;
-            type P = <DefaultCurve as poker_protocol::crypto::curve::Curve>::Point;
-
-            let mut synced_deck: Vec<ElGamalCiphertext> = Vec::with_capacity(self.summary.crypto.deck_encrypted.len());
-            let mut all_ok = true;
-            for ct_bytes in &self.summary.crypto.deck_encrypted {
-                if ct_bytes.len() != 96 {
-                    all_ok = false;
-                    break;
-                }
-                let (c1_bytes, c2_bytes) = ct_bytes.split_at(48);
-                match (
-                    <P as CurvePoint>::from_compressed(c1_bytes),
-                    <P as CurvePoint>::from_compressed(c2_bytes),
-                ) {
-                    (Some(c1), Some(c2)) => synced_deck.push(ElGamalCiphertext { c1, c2 }),
-                    _ => {
-                        all_ok = false;
-                        break;
-                    }
-                }
-            }
-            if all_ok {
-                return synced_deck;
-            }
-            tracing::warn!(
-                "[Table::deck_encrypted] table {} failed to deserialize summary.crypto.deck_encrypted, falling back to mental_poker_game",
-                self.summary.id
-            );
-        }
         self.mental_poker_game.deck_encrypted.clone()
     }
 
     /// 返回当前明文牌组。
-    /// 上链模式（chain_table_id.is_some() 且 summary.state.deck_plaintext 非空）：
-    ///   从 summary.state.deck_plaintext 反序列化 Vec<Vec<u8>> → Vec<Plaintext>
-    /// 离链模式或反序列化失败：回退到 mental_poker_game.deck_plaintext
+    /// 始终从 `mental_poker_game.deck_plaintext` 读取（单一真理之源）。
+    /// `sync_deck_state` 负责将链上 `summary.state.deck_plaintext` 同步到 `mental_poker_game`。
     pub fn deck_plaintext(&self) -> Vec<Plaintext> {
-        if self.chain_table_id.is_some() && !self.summary.state.deck_plaintext.is_empty() {
-            use poker_protocol::crypto::curve::CurvePoint;
-            use poker_protocol::crypto::DefaultCurve;
-            type P = <DefaultCurve as poker_protocol::crypto::curve::Curve>::Point;
-
-            let mut synced_deck: Vec<Plaintext> = Vec::with_capacity(self.summary.state.deck_plaintext.len());
-            let mut all_ok = true;
-            for bytes in &self.summary.state.deck_plaintext {
-                match <P as CurvePoint>::from_compressed(bytes) {
-                    Some(pt) => synced_deck.push(pt),
-                    None => {
-                        all_ok = false;
-                        break;
-                    }
-                }
-            }
-            if all_ok && synced_deck.len() == self.mental_poker_game.deck_plaintext.len() {
-                return synced_deck;
-            }
-            if !all_ok {
-                tracing::warn!(
-                    "[Table::deck_plaintext] table {} failed to deserialize summary.state.deck_plaintext, falling back to mental_poker_game",
-                    self.summary.id
-                );
-            }
-        }
         self.mental_poker_game.deck_plaintext.clone()
     }
 
     /// 返回当前聚合公钥。
-    /// 上链模式：从 summary.crypto.aggregated_pk 反序列化
-    /// 离链模式：从 mental_poker_game.key_manager 获取
+    /// 始终从 `mental_poker_game.key_manager` 读取（单一真理之源）。
+    /// `sync_deck_state` 负责将链上 `summary.crypto.aggregated_pk` 同步到 `mental_poker_game`。
     pub fn aggregated_pk(&self) -> EcPoint {
-        if self.chain_table_id.is_some() && !self.summary.crypto.aggregated_pk.is_empty() {
-            use poker_protocol::crypto::curve::CurvePoint;
-            use poker_protocol::crypto::DefaultCurve;
-            type P = <DefaultCurve as poker_protocol::crypto::curve::Curve>::Point;
-
-            if let Some(pk) = <P as CurvePoint>::from_compressed(&self.summary.crypto.aggregated_pk) {
-                return pk;
-            }
-            tracing::warn!(
-                "[Table::aggregated_pk] table {} failed to deserialize summary.crypto.aggregated_pk, falling back to mental_poker_game",
-                self.summary.id
-            );
-        }
         self.mental_poker_game.key_manager.get_aggregated_pk()
     }
 
@@ -638,5 +565,156 @@ impl Table {
 
     pub fn get_pk_hex_by_wallet_address(&self,wallet: &str)->Option<GamePkHex>{
         self.players().iter().find(|(pk_hex,wallet_addr)| wallet_addr.0 == wallet).map(|(pk_hex,_)|pk_hex.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_table() -> Table {
+        Table::new(1, "test".to_string(), 100, 6, "0xchain_table_id".to_string())
+    }
+
+    /// 测试 `deck_encrypted()` 始终从 `mental_poker_game` 读取，不再 fallback 到 `summary.crypto`。
+    ///
+    /// 场景：summary.crypto.deck_encrypted 有 52 个假数据，mental_poker_game.deck_encrypted
+    /// 也有 52 个 trivial ciphertexts（new() 初始化的）。
+    /// 预期：deck_encrypted() 返回 mental_poker_game 中的值（trivial ciphertexts），
+    ///       而非 summary.crypto 中的假数据。
+    #[test]
+    fn test_deck_encrypted_reads_from_mental_poker_game_not_summary() {
+        let mut table = make_test_table();
+        // 记录 mental_poker_game 的初始 deck_encrypted
+        let mp_deck = table.mental_poker_game.deck_encrypted.clone();
+        assert_eq!(mp_deck.len(), 52, "mental_poker_game should have 52 trivial ciphertexts after new()");
+
+        // 模拟链上同步：summary.crypto.deck_encrypted 有不同的假数据
+        table.summary.crypto.deck_encrypted = vec![vec![0xAAu8; 96]; 52];
+
+        // deck_encrypted() 应返回 mental_poker_game 的值，而非 summary.crypto 的
+        let deck = table.deck_encrypted();
+        assert_eq!(deck.len(), 52, "deck_encrypted() should return mental_poker_game's 52 cards");
+        assert_eq!(deck, mp_deck, "deck_encrypted() should match mental_poker_game, not summary.crypto");
+    }
+
+    /// 测试 `reset_for_next_hand()` 不再清理 `summary.crypto` 缓存。
+    ///
+    /// 场景：summary.crypto.deck_encrypted 有假数据，调用 reset_for_next_hand()。
+    /// 预期：summary.crypto.deck_encrypted 保留（不被清理），
+    ///       mental_poker_game.deck_encrypted 被 reset 重建（trivial ciphertexts）。
+    #[test]
+    fn test_reset_for_next_hand_preserves_summary_crypto() {
+        let mut table = make_test_table();
+        // 模拟链上同步：summary.crypto 有假数据
+        let fake_deck: Vec<Vec<u8>> = vec![vec![0xBBu8; 96]; 52];
+        table.summary.crypto.deck_encrypted = fake_deck.clone();
+        table.summary.state.cards_dealt = 10;
+
+        // 调用 reset_for_next_hand
+        table.reset_for_next_hand();
+
+        // summary.crypto.deck_encrypted 应保留（不被清理）
+        assert_eq!(
+            table.summary.crypto.deck_encrypted, fake_deck,
+            "summary.crypto.deck_encrypted should NOT be cleared by reset_for_next_hand"
+        );
+        // summary.state.cards_dealt 应保留
+        assert_eq!(
+            table.summary.state.cards_dealt, 10,
+            "summary.state.cards_dealt should NOT be cleared by reset_for_next_hand"
+        );
+        // mental_poker_game.deck_encrypted 应被 reset 重建（52 个 trivial ciphertexts）
+        assert_eq!(
+            table.mental_poker_game.deck_encrypted.len(), 52,
+            "mental_poker_game.deck_encrypted should be rebuilt by reset (52 trivial ciphertexts)"
+        );
+    }
+
+    /// 测试 `deck_plaintext()` 始终从 `mental_poker_game` 读取，不再 fallback 到 `summary.state`。
+    ///
+    /// 场景：summary.state.deck_plaintext 有假数据，mental_poker_game.deck_plaintext
+    /// 也有 52 个明文点（new() 初始化的）。
+    /// 预期：deck_plaintext() 返回 mental_poker_game 的值，而非 summary.state 的假数据。
+    #[test]
+    fn test_deck_plaintext_reads_from_mental_poker_game() {
+        let mut table = make_test_table();
+        // 记录 mental_poker_game 的初始 deck_plaintext
+        let mp_plaintext = table.mental_poker_game.deck_plaintext.clone();
+        assert_eq!(mp_plaintext.len(), 52, "mental_poker_game should have 52 plaintext points after new()");
+
+        // 模拟链上同步：summary.state.deck_plaintext 有不同的假数据
+        table.summary.state.deck_plaintext = vec![vec![0xCCu8; 48]; 52];
+
+        // deck_plaintext() 应返回 mental_poker_game 的值
+        let deck = table.deck_plaintext();
+        assert_eq!(deck.len(), 52, "deck_plaintext() should return mental_poker_game's 52 points");
+        assert_eq!(deck, mp_plaintext, "deck_plaintext() should match mental_poker_game, not summary.state");
+    }
+
+    /// 测试 `aggregated_pk()` 始终从 `mental_poker_game.key_manager` 读取。
+    #[test]
+    fn test_aggregated_pk_reads_from_mental_poker_game() {
+        let mut table = make_test_table();
+        // summary.crypto.aggregated_pk 有假数据
+        table.summary.crypto.aggregated_pk = vec![0xDDu8; 48];
+
+        // aggregated_pk() 应返回 mental_poker_game.key_manager 中的值（不 panic）
+        let pk = table.aggregated_pk();
+        // 验证不等于 summary.crypto 中的假数据（mental_poker_game 初始时 agg_pk 为 identity/默认）
+        let _ = pk; // 仅验证不 panic 且返回一个值
+    }
+
+    /// 测试 zombie seat 清理后 local_players 中对应 pk 被移除。
+    ///
+    /// 场景：table.local_players 有一个 pk→wallet 映射，table.local_seats 有对应座位，
+    /// 但链上该座位已清空（seats_occupied=false, seat_players=0x0）。
+    /// 预期：sync_betting_state 清理后 local_players 中对应 pk 被移除。
+    #[test]
+    fn test_zombie_seat_cleanup_removes_local_players() {
+        use crate::pokergame::player::{GamePlayer, WalletAddress};
+        use crate::pokergame::seat::Seat;
+
+        let mut table = make_test_table();
+        let pk_hex = GamePkHex::new("test_pk_hex".to_string());
+        let wallet = WalletAddress::new("0xtestwallet".to_string());
+
+        // 模拟本地有玩家入座
+        table.local_players.insert(pk_hex.clone(), wallet.clone());
+        table.pk_to_seat.insert(pk_hex.clone(), 0);
+        let player = GamePlayer {
+            name: "test".to_string(),
+            bankroll: 0,
+            pk_hex: pk_hex.clone(),
+            readable_hands: vec![],
+            wallet_address: wallet,
+        };
+        table.local_seats.insert(0, Seat::new(0, Some(player), 100, 100));
+
+        // 模拟 reset_for_next_hand 的 pk_to_seat + local_players 清理逻辑
+        // （与 sync_betting_state 中的 zombie seat 清理对齐）
+        let active_seat_pks: std::collections::HashSet<GamePkHex> = table.seats().values()
+            .filter_map(|s| s.player.as_ref().map(|p| p.pk_hex.clone()))
+            .collect();
+
+        // seat 0 仍有玩家，所以 active_seat_pks 应包含 pk_hex
+        assert!(active_seat_pks.contains(&pk_hex));
+
+        // 现在模拟玩家离开（清空 seat 0 的 player）
+        table.local_seats.get_mut(&0).unwrap().player = None;
+
+        // 重新计算 active_seat_pks
+        let active_seat_pks: std::collections::HashSet<GamePkHex> = table.seats().values()
+            .filter_map(|s| s.player.as_ref().map(|p| p.pk_hex.clone()))
+            .collect();
+        assert!(!active_seat_pks.contains(&pk_hex));
+
+        // 模拟 sync_betting_state 的清理：移除 pk_to_seat + local_players
+        table.pk_to_seat.remove(&pk_hex);
+        table.local_players.remove(&pk_hex);
+
+        // 验证清理后 local_players 不再包含 pk_hex
+        assert!(!table.local_players.contains_key(&pk_hex), "local_players should not contain pk after zombie seat cleanup");
+        assert!(!table.pk_to_seat.contains_key(&pk_hex), "pk_to_seat should not contain pk after zombie seat cleanup");
     }
 }

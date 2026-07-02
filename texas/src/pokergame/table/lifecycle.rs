@@ -141,6 +141,10 @@ impl Table {
         self.reveal_token_state.reset();
         self.reconstruct_state.reset();
         self.mental_poker_game.reset();
+
+        // 7. summary.crypto / summary.state 缓存不再清理
+        //    accessor 已改为从 mental_poker_game 读取（单一真理之源），
+        //    清理 summary 缓存无意义且有害（sync_table_state 会立即从链上覆写）。
     }
 
     /// 镜像 Move refund_all_bets：退还所有玩家本手牌的下注。

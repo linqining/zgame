@@ -93,7 +93,7 @@ pub(crate) async fn apply_player_action_to_socket(
     amount: Option<u64>,
     summary: &TableSummaryV2,
     original_event: Option<&SuiChainEvent>,
-) {
+) -> bool {
     // 1. 从 summary 参数中根据 seat_index 解析玩家钱包地址
     let wallet = {
         let idx = seat_index as usize;
@@ -104,21 +104,24 @@ pub(crate) async fn apply_player_action_to_socket(
                 summary.meta.seat_players.len(),
                 sui_table_id
             );
-            return;
+            return true;
+        }
+        let sp = &summary.meta.seat_players[idx];
+        // 全零地址表示空座位（summary 过期或玩家已离开），
+        // 无法定位玩家，跳过避免误查 0x0000...0000。
+        if sp.iter().all(|&b| b == 0) {
+            tracing::warn!(
+                "[bridge::action] seat {} in table {} has zero address in summary (stale snapshot or player left), skip {}",
+                seat_index,
+                sui_table_id,
+                action
+            );
+            return true;
         }
         // 问题12: 钱包地址规范化为小写，避免大小写不匹配
         // seat_players 现为 [u8; 32]（Move address），需转为 0x 前缀的 hex 字符串
-        format!("0x{}", hex::encode(&summary.meta.seat_players[idx])).to_lowercase()
+        format!("0x{}", hex::encode(sp)).to_lowercase()
     };
-
-    if wallet.is_empty() {
-        tracing::warn!(
-            "[bridge::action] empty wallet at seat {} table {}",
-            seat_index,
-            sui_table_id
-        );
-        return;
-    }
 
     // 2. 在 GameState 中定位包含该钱包的 table，解析 pk_hex 并做幂等检查
     let (socket_table_id, pk_hex) = {
@@ -134,7 +137,7 @@ pub(crate) async fn apply_player_action_to_socket(
                                 "[bridge::action] player {} already folded, skip fold",
                                 wallet
                             );
-                            return;
+                            return true;
                         }
                         "check" | "call" | "raise" | "allin" if seat.folded => {
                             tracing::debug!(
@@ -142,7 +145,7 @@ pub(crate) async fn apply_player_action_to_socket(
                                 wallet,
                                 action
                             );
-                            return;
+                            return true;
                         }
                         _ => {}
                     }
@@ -158,13 +161,15 @@ pub(crate) async fn apply_player_action_to_socket(
                     "[bridge::action] wallet {} not found in any socket table",
                     wallet
                 );
-                return;
+                return true;
             }
         }
     };
 
     // 3. 通过 game loop 的 ActionRequest 通道触发行动，
     //    复用 process_action 完成的行动 + handle_turn_advance + broadcast 全流程
+    // 返回值约定：true = 已处理（含提前跳过 / 已转发 / 已推入重试队列），
+    //             false = game_loop 不可用且未自行推入重试队列，由调用方决定是否重试。
     match app_state.socket_state.get_action_sender(socket_table_id).await {
         Some(sender) => match sender
             .send(ActionRequest {
@@ -181,6 +186,7 @@ pub(crate) async fn apply_player_action_to_socket(
                     socket_table_id,
                     wallet
                 );
+                true
             }
             Err(e) => {
                 // Task 11: game_loop 通道关闭 - 不丢弃事件，回退到纯同步模式
@@ -195,6 +201,9 @@ pub(crate) async fn apply_player_action_to_socket(
                 // 推入重试队列，等待 game_loop 恢复后重试
                 if let Some(evt) = original_event {
                     push_action_retry(app_state, evt.clone());
+                    true
+                } else {
+                    false
                 }
             }
         },
@@ -210,6 +219,9 @@ pub(crate) async fn apply_player_action_to_socket(
             // 推入重试队列，等待 game_loop 启动后重试
             if let Some(evt) = original_event {
                 push_action_retry(app_state, evt.clone());
+                true
+            } else {
+                false
             }
         }
     }

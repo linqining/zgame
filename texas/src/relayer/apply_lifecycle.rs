@@ -12,12 +12,25 @@ use crate::socket::{broadcast, get_socket_io};
 use crate::sui_events::TableSummaryV2;
 
 use crate::relayer::locate_socket_table_by_chain_id;
+use crate::relayer::sync_table_state;
 use crate::relayer::util::now_ms;
 
 /// Task 6: 将链上 HandStarted 事件同步到内存 Table。
 ///
-/// 确保 game loop 已启动，广播 TABLE_UPDATED。
-pub(crate) async fn apply_hand_started_to_socket(app_state: &Arc<AppState>, table_id: &str) {
+/// 安全网清理：调用 `reset_for_next_hand()` 清理上一手残留状态
+/// （公共牌、底牌、底池、下注、shuffle/reveal/reconstruct 状态等），
+/// 防止 HandSettled/HandReset 事件丢失或乱序导致第二手开局仍展示上一手数据。
+/// 正常流程下 HandSettled 已调用过 reset_for_next_hand，此处为幂等操作。
+///
+/// 关键：在启动 game loop 之前先调用 sync_table_state 同步链上 deck_encrypted，
+/// 避免 game loop tick 在 sync 完成前广播 LOCAL reset 产生的错误牌组。
+/// 由于 submit_shuffle_verified 跳过证明验证，前端基于错误牌组洗牌会直接上链，
+/// 导致 reveal 阶段 decrypt_readable_card 失败。
+pub(crate) async fn apply_hand_started_to_socket(
+    app_state: &Arc<AppState>,
+    table_id: &str,
+    summary: Option<&TableSummaryV2>,
+) {
     // 1. 获取 SocketIo 实例
     let io = match get_socket_io() {
         Some(io) => io,
@@ -39,14 +52,45 @@ pub(crate) async fn apply_hand_started_to_socket(app_state: &Arc<AppState>, tabl
         }
     };
 
-    // 3. 若 game loop 未运行，启动 game loop
+    // 3. 安全网：清理上一手残留状态
+    //    HandSettled/HandReset 正常已清理，此处幂等兜底，防止事件丢失/乱序。
+    {
+        let mut gs = app_state.socket_state.state.write().await;
+        if let Some(table) = gs.tables.get_mut(&socket_table_id) {
+            table.reset_for_next_hand();
+            tracing::info!(
+                "[bridge::hand_start] table {} reset for next hand (safety net)",
+                socket_table_id
+            );
+        }
+    }
+
+    // 4. 在启动 game loop 之前同步链上状态（特别是 deck_encrypted）
+    //    消除 race condition：reset_for_next_hand 产生 LOCAL trivial deck，
+    //    若 game loop 在 sync 之前 tick，会广播错误牌组给前端。
+    //    由于 submit_shuffle_verified 跳过证明验证，前端基于错误牌组洗牌会直接上链，
+    //    导致 reveal 阶段 decrypt_readable_card 失败。
+    if let Some(s) = summary {
+        sync_table_state(app_state, table_id, false, true, s).await;
+        tracing::info!(
+            "[bridge::hand_start] table {} chain state synced before game loop start",
+            socket_table_id
+        );
+    } else {
+        tracing::warn!(
+            "[bridge::hand_start] table {} summary is None, deck_encrypted may be stale until next sync",
+            socket_table_id
+        );
+    }
+
+    // 5. 若 game loop 未运行，启动 game loop
     //    start_game_loop 内部会检查是否已运行，重复调用是安全的
     app_state
         .socket_state
         .start_game_loop(io.clone(), app_state.socket_state.clone(), socket_table_id)
         .await;
 
-    // 4. 广播 TABLE_UPDATED
+    // 6. 广播 TABLE_UPDATED
     broadcast::broadcast_to_table(
         &io,
         &app_state.socket_state,

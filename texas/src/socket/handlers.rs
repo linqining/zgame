@@ -2476,6 +2476,18 @@ fn on_connect(socket: SocketRef, _io: SocketIo, _state: Arc<SocketState>) {
                     let seat_index = table.and_then(|t| t.pk_to_seat.get(&pk_hex).copied());
                     let chain_table_id = table.and_then(|t| t.chain_table_id.clone());
                     let deck_encrypted = table.map(|t| t.summary.crypto.deck_encrypted.clone());
+                    // 防止重复提交：若玩家已在 completed_players 中，直接跳过，
+                    // 避免构建会被链上拒绝（ENotPendingRevealer）的 PTB
+                    let already_completed = table
+                        .map(|t| t.reveal_token_state.completed_players.contains(&pk_hex))
+                        .unwrap_or(false);
+                    if already_completed {
+                        tracing::info!(
+                            "[REVEAL_SUBMIT] player {} already completed reveal for table {}, skipping",
+                            pk_hex, payload.table_id
+                        );
+                        return;
+                    }
                     match (chain_table_id, seat_index, deck_encrypted) {
                         (Some(cid), Some(sid), Some(de)) => (cid, sid, de),
                         _ => {

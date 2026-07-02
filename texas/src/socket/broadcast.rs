@@ -261,6 +261,13 @@ impl SocketState {
         }
 
         // 6. 为每个玩家构造 payload 并发送
+        tracing::info!(
+            "[reveal_result_from_summary] table_id={} decrypted_cards={} cards_by_seat={} deck_plaintext_len={}",
+            table_id,
+            decrypted_cards.len(),
+            cards_by_seat.len(),
+            deck_plaintext.len()
+        );
         for (seat_idx, readable_cards) in cards_by_seat {
             if readable_cards.is_empty() {
                 continue;

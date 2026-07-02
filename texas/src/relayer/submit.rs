@@ -367,6 +367,8 @@ mod tests {
             sui_clock_object_id: "0x6".to_string(),
             sui_on_chain_enabled: false,
             shinami_api_key: String::new(),
+            sponsor_reveal_gas_budget: 0,
+            default_chain_table_id: String::new(),
         }
     }
 

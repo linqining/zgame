@@ -505,6 +505,17 @@ impl SocketState {
         };
 
         if let Some((shuffle_state, socket_id)) = shuffle_notice_data {
+            let deck_len = shuffle_state.deck_encrypted.len();
+            let first_c1 = shuffle_state.deck_encrypted.first().map(|c| c.c1_hex.as_str()).unwrap_or("none");
+            let first_c2 = shuffle_state.deck_encrypted.first().map(|c| c.c2_hex.as_str()).unwrap_or("none");
+            tracing::info!(
+                "[send_shuffle_notice] table={} deck_len={} first_c1={}... first_c2={}... current_pk={:?}",
+                table_id,
+                deck_len,
+                &first_c1[..std::cmp::min(16, first_c1.len())],
+                &first_c2[..std::cmp::min(16, first_c2.len())],
+                shuffle_state.current_player_pk
+            );
             if let Ok(sid) = socket_id.parse::<socketioxide::socket::Sid>() {
                 if let Some(socket) = io.get_socket(sid) {
                     let notice = ShuffleNoticePayload { table_id, shuffle_state: Some(shuffle_state) };

@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { WasmClientPlayer } from '@linqining/client-wasm';
@@ -76,6 +76,11 @@ export const useCryptoOperations = (
   const getRequiredKeys = useCallback((): WasmClientPlayer | null => {
     return playerKeys || getPlayerKeys();
   }, [playerKeys, getPlayerKeys]);
+
+  // 防止同一 reveal phase 的重复 REVEAL_NOTICE 导致重复提交。
+  // revealLoadingRef 仅防并发，emit 后立即重置无法阻止同一阶段的顺序重复提交。
+  // 此 ref 记录已提交的 phase + 时间戳，30 秒窗口内同 phase 的重复通知直接跳过。
+  const revealSubmittedRef = useRef<{ phase: string; ts: number } | null>(null);
 
   const handleShuffleNotice = useCallback(async (data: ShuffleNoticeData): Promise<ShuffleHandleResult | null> => {
     logger.log(SHUFFLE_NOTICE, data);
@@ -164,6 +169,14 @@ export const useCryptoOperations = (
       return;
     }
 
+    // 防止同一阶段的重复 REVEAL_NOTICE 导致重复提交（30 秒窗口）
+    const now = Date.now();
+    const lastSubmit = revealSubmittedRef.current;
+    if (lastSubmit && lastSubmit.phase === phase && now - lastSubmit.ts < 30_000) {
+      logger.log(`[Reveal] Already submitted for phase ${phase} within 30s, skipping`);
+      return;
+    }
+
     const assignments = player_assignments || currentTableRef.current?.revealTokenState?.player_assignments;
     if (!assignments) {
       logger.warn('[Reveal] No player assignments available');
@@ -215,6 +228,7 @@ export const useCryptoOperations = (
         pkHex: pkHex!,
         revealTokens: tokens as SubmitRevealToken[],
       });
+      revealSubmittedRef.current = { phase, ts: Date.now() };
       logger.log('[Reveal] Submitted tokens:', { gameId: table_id, pkHex, tokens });
 
       addMessage(`Reveal ${phase}: ${tokens.length} tokens submitted`);
